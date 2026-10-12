@@ -63,6 +63,8 @@ The ESP32 must know the time before it can verify the broker certificate. The Pi
 
 1. Install `chrony` on `pi-brain` and use `chrony/chrony-pi-brain.conf` (syncs from `pool.ntp.org`, serves your LAN, keeps serving a free-running clock with `local stratum 10` if the internet is down). Open UDP 123 from the LAN.
 2. The BLE provisioning bundle carries `ntp_host` = the Pi's LAN IP (same address as the broker). The firmware tries `ntp_host` first and falls back to `pool.ntp.org`.
-3. Open item: with no internet and a Pi that has not synced since boot, the served time can be wrong and TLS date checks may fail. Mitigations to evaluate in the S2a spike: boot-time `makestep`, a fake-hwclock on the Pi, or a long-lived server cert (current server cert: 3 years, CA 10 years).
+3. **Pi 5 RTC backup battery.** The Pi 5 has a real-time clock but no battery by default, so after a power cut without internet the Pi would boot with a stale time and then serve that stale time to the boards. Fit the Raspberry Pi RTC battery (rechargeable lithium cell on the J5 connector) and enable charging by adding `dtparam=rtc_bbat_vchg=3000000` to `/boot/firmware/config.txt`, then reboot. Check with `sudo hwclock -r` and `cat /sys/class/rtc/rtc0/time`. The shipped chrony config has `rtcsync`, which keeps the RTC updated while the Pi is synced.
+4. **`local stratum 10` is kept** on purpose: if the internet is down the Pi still serves its own clock (RTC-backed) so the LAN stays consistent and boards can still do TLS. It is only as good as the RTC; hence the battery.
+5. **Firmware safety net** (required in `contracts/mqtt.md`): boards refuse to treat NTP time earlier than their firmware build timestamp as valid and do not open TLS until the time is plausible, so a stale Pi clock makes boards wait and retry instead of connecting with wrong dates.
 
 Status: documented and configured on paper; not tested on hardware.

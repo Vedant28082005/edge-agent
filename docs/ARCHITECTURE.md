@@ -177,7 +177,7 @@ BOOT → LOAD_CONFIG
   ├─ no config, or BOOT button held 3 s → PROVISIONING (BLE, 5 min window, LED pattern)
   │     ├─ success → save to NVS → reboot
   │     └─ timeout → idle (no BLE) until the button is pressed or power-cycled
-  └─ config present → apply boot_value → WIFI → NTP → MQTT_TLS (LWT=offline)
+  └─ config present → apply boot_value → WIFI → NTP (valid only if ≥ firmware build timestamp; retry, no TLS before) → MQTT_TLS (LWT=offline)
         → ANNOUNCE (retained) → subscribe cmd → publish state → RUN
 RUN: handle cmd (dedup cmd_id, validate vs own ranges, apply, publish state, ack)
      publish state on change + heartbeat; sensors on interval
@@ -187,7 +187,7 @@ RUN: handle cmd (dedup cmd_id, validate vs own ranges, apply, publish state, ack
 
 - Core library (option A, [decision]): one declarative call per capability (e.g. `addBool("power", setRelay)`, `addInt("speed", 1, 5, setSpeed)`, `addSensorFloat("temperature", 30, readDht)`). The library does Wi-Fi, NTP, TLS, MQTT, announce JSON, acks, dedup, safety timers, BLE provisioning, `identify`, `unprovision`.
 - FreeRTOS tasks: network/MQTT, provisioning, sensor sampling, actuator control. Pin-level code stays in the user's callbacks.
-- TLS needs a valid clock, so NTP sync happens before the MQTT connect. Open item: verify behavior when there is no internet (section 11).
+- TLS needs a valid clock, so NTP sync happens before the MQTT connect. Time earlier than the firmware build timestamp is never accepted: the board keeps retrying NTP (LAN chrony on `pi-brain` first, `pool.ntp.org` fallback) and does not connect over TLS until the time is plausible. The Pi 5 keeps time across power cuts with an RTC backup battery (`deploy/README.md`). Open item: verify behavior when there is no internet (section 11).
 
 ### 4.4 BLE provisioning (admin-initiated)
 

@@ -58,6 +58,16 @@ On failure `ok:false` and `error` is a short code string (`unknown_endpoint`, `u
 {"ts": 1760000000, "service": "vision-node", "cpu_pct": 41.0, "mem_available_mb": 812, "temp_c": 62.5, "queue_depth": 0}
 ```
 
+## Firmware time requirement (TLS)
+
+TLS certificate dates are checked against the board's clock, and a board without a valid clock must not guess.
+
+- The firmware embeds its **build timestamp** (`FW_BUILD_TS`, Unix seconds, set at compile time).
+- Time obtained from NTP (or any other source) is **valid only if `t >= FW_BUILD_TS`** (and not absurdly far ahead, e.g. `t < FW_BUILD_TS + 50 years`). Anything earlier is treated as "no time".
+- Until valid time is obtained the board **does not start the TLS/MQTT connection**. It keeps retrying NTP (LAN `ntp_host` from the provisioning bundle first, then `pool.ntp.org`) with backoff, keeps local buttons and failsafe timers working, and never disables certificate verification or date checks to get online.
+- Once the time is valid it is used for `ts` fields; `ts` in `state` is Unix seconds UTC and the schemas reject values before 2001.
+- A valid-looking NTP answer that moves the clock backwards past `FW_BUILD_TS` is rejected the same way.
+
 ## ACL rules (enforced through dynamic-security)
 
 - Every node has its own MQTT user (username = `node_id`) and its own role cloned from the template `node-template`, whose ACLs allow publish and subscribe **only** on `home/v1/nodes/<node_id>/#` (dynsec ACL types `publishClientSend`, `publishClientReceive`, `subscribePattern`, `unsubscribePattern`, all on that one subtree).
