@@ -15,13 +15,13 @@ if (-not (Test-Path $py)) {
     if ($LASTEXITCODE -ne 0) { throw 'python -m venv failed' }
 }
 $ErrorActionPreference = 'Continue'   # PS 5.1 turns native stderr into errors
-& $py -c "import jsonschema" 2>&1 | Out-Null
+& $py -c "import jsonschema, yaml, openapi_spec_validator" 2>&1 | Out-Null
 $haveJsonschema = ($LASTEXITCODE -eq 0)
 $ErrorActionPreference = 'Stop'
 if (-not $haveJsonschema) {
-    Write-Host 'Installing jsonschema into .venv ...'
-    & $py -m pip install --quiet --disable-pip-version-check jsonschema
-    if ($LASTEXITCODE -ne 0) { throw 'pip install jsonschema failed' }
+    Write-Host 'Installing jsonschema, pyyaml, openapi-spec-validator into .venv ...'
+    & $py -m pip install --quiet --disable-pip-version-check jsonschema pyyaml openapi-spec-validator
+    if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
 }
 
 $checker = Join-Path $PSScriptRoot 'contract_test.py'
