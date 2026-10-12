@@ -1,0 +1,42 @@
+{
+  "node_id": "esp32-a1b2c3d4e5f6",
+  "hw": "esp32-devkit",
+  "fw": "0.1.0",
+  "endpoints": [
+    {
+      "local_id": "ch1",
+      "type": "fan",
+      "capabilities": [
+        {
+          "id": "power",
+          "kind": "actuator",
+          "type": "bool",
+          "boot_value": false,
+          "failsafe_value": false,
+          "max_on_s": 0
+        },
+        {
+          "id": "speed",
+          "kind": "actuator",
+          "type": "int",
+          "min": 1,
+          "max": 5,
+          "boot_value": 1
+        }
+      ]
+    },
+    {
+      "local_id": "t1",
+      "type": "sensor",
+      "capabilities": [
+        {
+          "id": "temperature",
+          "kind": "sensor",
+          "type": "float",
+          "unit": "C",
+          "interval_s": 30
+        }
+      ]
+    }
+  ]
+}
