@@ -1,0 +1,8 @@
+# Dev overlay for the PC (run from deploy/):
+#   docker compose -f compose.yml -f compose.dev.yml up -d
+# Same broker, but published on localhost only and not auto-restarted.
+services:
+  mosquitto:
+    restart: "no"
+    ports: !override
+      - "127.0.0.1:8883:8883"

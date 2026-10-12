@@ -1,0 +1,15 @@
+# Production stack on pi-brain. Broker only for now; other services are added by their sessions.
+# Run from the deploy/ folder:  docker compose -f compose.yml up -d
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20   # multi-arch (linux/arm64 for the Pi)
+    container_name: edge-mosquitto
+    restart: unless-stopped
+    ports:
+      - "8883:8883"                   # TLS only; 1883 is not configured
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/certs/ca.crt:/mosquitto/certs/ca.crt:ro
+      - ./mosquitto/certs/server.crt:/mosquitto/certs/server.crt:ro
+      - ./mosquitto/certs/server.key:/mosquitto/certs/server.key:ro
+      - ./mosquitto/data:/mosquitto/data

@@ -1,0 +1,11 @@
+{
+  "_comment": "Role template. {{node_id}} is substituted per node by dynsec-node-user.ps1 / the hub dynsec client. A node may only touch its own subtree.",
+  "rolename": "node-{{node_id}}",
+  "textdescription": "ESP32 node {{node_id}}",
+  "acls": [
+    {"acltype": "publishClientSend",    "topic": "home/v1/nodes/{{node_id}}/#", "priority": 0, "allow": true},
+    {"acltype": "publishClientReceive", "topic": "home/v1/nodes/{{node_id}}/#", "priority": 0, "allow": true},
+    {"acltype": "subscribePattern",     "topic": "home/v1/nodes/{{node_id}}/#", "priority": 0, "allow": true},
+    {"acltype": "unsubscribePattern",   "topic": "home/v1/nodes/{{node_id}}/#", "priority": 0, "allow": true}
+  ]
+}
