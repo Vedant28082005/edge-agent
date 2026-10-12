@@ -7,6 +7,8 @@
   Tailnet DNS name of the broker host (e.g. pi-brain.tailnet-name.ts.net). Goes into the SANs.
 .PARAMETER ExtraDns / ExtraIp
   Optional additional SANs. localhost and 127.0.0.1 are always included (local testing).
+.PARAMETER ServerDays
+  Validity of the server certificate in days (default 1095, about 3 years).
 .PARAMETER Force
   Regenerate the server certificate even if it exists (the CA is kept unless -NewCa).
 .NOTES
@@ -16,13 +18,15 @@
     certs/server.crt, server.key   broker cert and key (Windows ACL: current user only)
   Ownership by the container user (uid 1883, mode 600) cannot be set on Windows; tools\deploy.ps1 does it on the
   Pi (sudo chown 1883:1883 + chmod 600). On Docker Desktop the bind mount ignores POSIX ownership.
-  Server cert: RSA 2048, SHA-256, 825 days. CA: RSA 4096, 10 years.
+  Server cert: RSA 2048, SHA-256, -ServerDays (default 1095 = 3 years). CA: RSA 4096, 10 years (3650 days).
+  Renewing the server cert under the SAME CA needs no board re-provisioning (boards trust the CA).
 #>
 param(
     [Parameter(Mandatory)][string]$LanIp,
     [Parameter(Mandatory)][string]$TailnetName,
     [string[]]$ExtraDns = @(),
     [string[]]$ExtraIp = @(),
+    [ValidateRange(30, 3650)][int]$ServerDays = 1095,
     [switch]$Force,
     [switch]$NewCa
 )
@@ -65,7 +69,7 @@ if ($Force -or -not (Test-Path $srvCrt)) {
         'keyUsage=critical,digitalSignature,keyEncipherment',
         'extendedKeyUsage=serverAuth',
         "subjectAltName=$san")
-    Invoke-Ssl x509 -req -in $csr -CA $caCrt -CAkey $caKey -CAcreateserial -out $srvCrt -days 825 -sha256 -extfile $ext
+    Invoke-Ssl x509 -req -in $csr -CA $caCrt -CAkey $caKey -CAcreateserial -out $srvCrt -days $ServerDays -sha256 -extfile $ext
     Remove-Item $csr, $ext -Force
     Write-Host "SANs: $san"
 }

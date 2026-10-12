@@ -31,6 +31,16 @@ tools\deploy.ps1 -Target brain -Up                  # starts the broker
 
 `setup-pi-brain.sh` checks that the key matches the cert and chains to the CA, installs everything under `/etc/edge-agent/mosquitto` owned by uid 1883 (the container user; `server.key` and `dynamic-security.json` mode 600), points compose at it through `deploy/.env` (`MOSQUITTO_STATE_DIR`), installs chrony with the edge-agent config, and shreds the staged secrets. It is safe to re-run (stage new files first) after renewing the server cert or changing dynsec. Needs an interactive sudo password, not passwordless sudo.
 
+## Certificate lifecycle
+
+- **CA**: 10 years (3650 days). **Server certificate**: 3 years by default (`-ServerDays`), always issued by the same CA.
+- **Before the first Pi deploy, regenerate with the real values** (the dev run used placeholders): `deploy\mosquitto
+ew-certs.ps1 -LanIp <pi-brain static LAN IP> -TailnetName <pi-brain>.<tailnet>.ts.net -Force`. The broker's LAN IP goes into every board's provisioning bundle, so give `pi-brain` a static address or DHCP reservation; a changed IP means a new server cert **and** new bundles.
+- **Back up `certs\ca\ca.key` offline** (encrypted USB or password manager attachment, not cloud sync, not git). It is the root of trust for every board; losing it means you cannot issue a new server cert under the same CA. It never goes to the Pi.
+- **Renewing the server cert** (same CA): rerun `new-certs.ps1 -LanIp ... -TailnetName ... -Force`, stage the new files and rerun `tools/setup-pi-brain.sh` (see above). Boards keep working, they trust the CA.
+- **Rotating or replacing the CA means re-provisioning every board**: the CA certificate is stored in each board's NVS from the BLE bundle, so a new CA is only trusted after each board is provisioned again. Treat the CA key as permanent; rotate only if it is compromised.
+- Boards verify the certificate dates, so they need a plausible clock (see NTP below).
+
 ## Files
 
 | File | Purpose |
@@ -53,6 +63,6 @@ The ESP32 must know the time before it can verify the broker certificate. The Pi
 
 1. Install `chrony` on `pi-brain` and use `chrony/chrony-pi-brain.conf` (syncs from `pool.ntp.org`, serves your LAN, keeps serving a free-running clock with `local stratum 10` if the internet is down). Open UDP 123 from the LAN.
 2. The BLE provisioning bundle carries `ntp_host` = the Pi's LAN IP (same address as the broker). The firmware tries `ntp_host` first and falls back to `pool.ntp.org`.
-3. Open item: with no internet and a Pi that has not synced since boot, the served time can be wrong and TLS date checks may fail. Mitigations to evaluate in the S2a spike: boot-time `makestep`, a fake-hwclock on the Pi, or a long-lived server cert (current server cert: 825 days, CA 10 years).
+3. Open item: with no internet and a Pi that has not synced since boot, the served time can be wrong and TLS date checks may fail. Mitigations to evaluate in the S2a spike: boot-time `makestep`, a fake-hwclock on the Pi, or a long-lived server cert (current server cert: 3 years, CA 10 years).
 
 Status: documented and configured on paper; not tested on hardware.
