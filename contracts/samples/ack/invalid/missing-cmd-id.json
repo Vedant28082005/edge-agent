@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "endpoint": "ch1",
+  "values": {
+    "power": true,
+    "speed": 3
+  },
+  "error": null
+}

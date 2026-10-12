@@ -1,0 +1,8 @@
+{
+  "ts": 1760000000,
+  "node": "jetson-yolo",
+  "source_id": "cam0",
+  "kind": "detection_change",
+  "detections": [],
+  "summary": "scene cleared"
+}

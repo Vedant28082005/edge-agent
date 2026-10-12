@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edge-agent.local/contracts/ack.schema.json",
+  "title": "Node ack payload (home/v1/nodes/{id}/ack)",
+  "description": "Command result. ok:true requires error:null; ok:false requires an error code. endpoint is null for identify/unprovision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "cmd_id",
+    "ok",
+    "endpoint",
+    "values",
+    "error"
+  ],
+  "properties": {
+    "cmd_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "endpoint": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-z0-9_]{1,16}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "values": {
+      "type": "object",
+      "minProperties": 0,
+      "maxProperties": 16,
+      "propertyNames": {
+        "enum": [
+          "power",
+          "brightness",
+          "color_temp",
+          "speed",
+          "position",
+          "lock",
+          "target_temp",
+          "mode",
+          "temperature",
+          "humidity",
+          "illuminance",
+          "motion",
+          "contact",
+          "power_w",
+          "current_a",
+          "voltage_v",
+          "battery"
+        ]
+      },
+      "additionalProperties": {
+        "type": [
+          "boolean",
+          "number",
+          "string"
+        ],
+        "maxLength": 24
+      }
+    },
+    "error": {
+      "oneOf": [
+        {
+          "enum": [
+            "unknown_endpoint",
+            "unknown_capability",
+            "out_of_range",
+            "bad_type",
+            "busy",
+            "unsupported",
+            "bad_request"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "error": {
+            "enum": [
+              "unknown_endpoint",
+              "unknown_capability",
+              "out_of_range",
+              "bad_type",
+              "busy",
+              "unsupported",
+              "bad_request"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

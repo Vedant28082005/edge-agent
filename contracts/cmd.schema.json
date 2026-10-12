@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edge-agent.local/contracts/cmd.schema.json",
+  "title": "Node command payload (home/v1/nodes/{id}/cmd)",
+  "description": "Desired-state set, or identify / unprovision. Never a toggle. QoS 1, not retained.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cmd_id",
+        "endpoint",
+        "set",
+        "by"
+      ],
+      "properties": {
+        "cmd_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "endpoint": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]{1,16}$"
+        },
+        "set": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 16,
+          "propertyNames": {
+            "enum": [
+              "power",
+              "brightness",
+              "color_temp",
+              "speed",
+              "position",
+              "lock",
+              "target_temp",
+              "mode",
+              "temperature",
+              "humidity",
+              "illuminance",
+              "motion",
+              "contact",
+              "power_w",
+              "current_a",
+              "voltage_v",
+              "battery"
+            ]
+          },
+          "additionalProperties": {
+            "type": [
+              "boolean",
+              "number",
+              "string"
+            ],
+            "maxLength": 24
+          }
+        },
+        "by": {
+          "$ref": "#/$defs/by"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cmd_id",
+        "cmd",
+        "duration_s"
+      ],
+      "properties": {
+        "cmd_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "cmd": {
+          "const": "identify"
+        },
+        "duration_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cmd_id",
+        "cmd"
+      ],
+      "properties": {
+        "cmd_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "cmd": {
+          "const": "unprovision"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "by": {
+      "type": "string",
+      "pattern": "^(user:[A-Za-z0-9_.-]{1,64}|agent|scene:[A-Za-z0-9_-]{1,32}|rule:[A-Za-z0-9_-]{1,32})$"
+    }
+  }
+}

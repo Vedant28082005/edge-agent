@@ -1,0 +1,18 @@
+{
+  "ts": 1760000000,
+  "node": "jetson-yolo",
+  "kind": "detection_change",
+  "detections": [
+    {
+      "label": "person",
+      "conf": 0.81,
+      "bbox": [
+        10,
+        20,
+        100,
+        200
+      ]
+    }
+  ],
+  "summary": "person appeared"
+}

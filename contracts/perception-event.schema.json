@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edge-agent.local/contracts/perception-event.schema.json",
+  "title": "Perception event (home/v1/perception/{node}/events)",
+  "description": "Published by yolo-node / vision-node on change. QoS 1, not retained. Labels are untrusted text.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ts",
+    "node",
+    "source_id",
+    "kind",
+    "detections",
+    "summary"
+  ],
+  "properties": {
+    "ts": {
+      "type": "integer",
+      "minimum": 1000000000
+    },
+    "node": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]{1,32}$"
+    },
+    "source_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,32}$"
+    },
+    "kind": {
+      "enum": [
+        "detection_change"
+      ]
+    },
+    "detections": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "conf",
+          "bbox"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9 _-]{1,32}$"
+          },
+          "conf": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "bbox": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 120
+    }
+  }
+}

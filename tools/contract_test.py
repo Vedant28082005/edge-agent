@@ -1,4 +1,5 @@
-"""Validate contracts/samples/{valid,invalid}/*.json against announce.schema.json."""
+"""Validate every contract sample against its JSON Schema (announce, state, cmd, ack, perception-event),
+then check the OpenAPI file and the MCP tool list."""
 import json
 import sys
 from pathlib import Path
@@ -6,28 +7,39 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 contracts = Path(sys.argv[1])
-schema = json.loads((contracts / "announce.schema.json").read_text(encoding="utf-8"))
-Draft202012Validator.check_schema(schema)
-validator = Draft202012Validator(schema)
+
+# schema file -> sample folder (announce samples predate the others and live at samples/{valid,invalid})
+SUITES = {
+    "announce": ("announce.schema.json", contracts / "samples"),
+    "state": ("state.schema.json", contracts / "samples" / "state"),
+    "cmd": ("cmd.schema.json", contracts / "samples" / "cmd"),
+    "ack": ("ack.schema.json", contracts / "samples" / "ack"),
+    "perception-event": ("perception-event.schema.json", contracts / "samples" / "perception-event"),
+}
 
 failures = 0
 counts = {"valid": 0, "invalid": 0}
-for kind in ("valid", "invalid"):
-    files = sorted((contracts / "samples" / kind).glob("*.json"))
-    if not files:
-        print(f"FAIL: no samples in {kind}/")
-        failures += 1
-    for f in files:
-        counts[kind] += 1
-        errors = list(validator.iter_errors(json.loads(f.read_text(encoding="utf-8"))))
-        ok = (not errors) if kind == "valid" else bool(errors)
-        if ok:
-            note = "" if kind == "valid" else f"  (rejected: {errors[0].message[:70]})"
-            print(f"ok   {kind}/{f.name}{note}")
-        else:
+for name, (schema_file, base) in SUITES.items():
+    schema = json.loads((contracts / schema_file).read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+    for kind in ("valid", "invalid"):
+        files = sorted((base / kind).glob("*.json"))
+        if not files:
+            print(f"FAIL: no samples for {name} in {kind}/")
             failures += 1
-            why = "expected to pass but failed: " + errors[0].message[:100] if kind == "valid" else "expected to fail but passed"
-            print(f"FAIL {kind}/{f.name}: {why}")
+        for f in files:
+            counts[kind] += 1
+            errors = list(validator.iter_errors(json.loads(f.read_text(encoding="utf-8"))))
+            ok = (not errors) if kind == "valid" else bool(errors)
+            label = f"{name}/{kind}/{f.name}"
+            if ok:
+                note = "" if kind == "valid" else f"  (rejected: {errors[0].message[:60]})"
+                print(f"ok   {label}{note}")
+            else:
+                failures += 1
+                why = "expected to pass but failed: " + errors[0].message[:100] if kind == "valid" else "expected to fail but passed"
+                print(f"FAIL {label}: {why}")
 
 # --- OpenAPI: valid, and /admin/* is separate and admin-gated -----------------
 import re

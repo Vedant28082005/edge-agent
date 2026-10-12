@@ -21,6 +21,8 @@ No other topics exist. There are no `devices/` topics.
 
 ## Payloads
 
+JSON Schemas: `announce.schema.json`, `state.schema.json`, `cmd.schema.json`, `ack.schema.json`, `perception-event.schema.json` (samples in `samples/`, checked by `tools\contract-test.ps1`). The prose below is explanatory; the schemas are normative.
+
 **announce**: validated against `announce.schema.json` (schema 2). See `samples/valid/`.
 
 **status**: the bare strings `online` or `offline` (not JSON). LWT: topic `status`, payload `offline`, QoS 1, retained. After connecting the node publishes `online` (retained).
@@ -43,7 +45,7 @@ No other topics exist. There are no `devices/` topics.
 ```json
 {"cmd_id": "3f0c...uuid", "ok": true, "endpoint": "ch1", "values": {"power": true, "speed": 3}, "error": null}
 ```
-On failure `ok:false` and `error` is a short code string (`unknown_endpoint`, `unknown_capability`, `out_of_range`, `busy`, `unsupported`). The hub waits 3 s for an ack.
+On failure `ok:false` and `error` is a short code string (`unknown_endpoint`, `unknown_capability`, `out_of_range`, `bad_type`, `busy`, `unsupported`, `bad_request`; free text is not allowed). The hub waits 3 s for an ack.
 
 **perception event**
 ```json

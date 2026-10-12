@@ -1,0 +1,11 @@
+{
+  "endpoints": {
+    "ch1": {
+      "power": true,
+      "speed": 3
+    },
+    "t1": {
+      "temperature": 27.4
+    }
+  }
+}
