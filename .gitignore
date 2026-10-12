@@ -1,0 +1,20 @@
+# dependencies / environments
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+
+# build outputs
+build/
+dist/
+out/
+.pio/
+*.egg-info/
+
+# secrets
+.env
+*.pem
+*.key
+
+# temporary: original mangled doc, pending confirmation
+docs/ARCHITECTURE.mangled.md
