@@ -2,7 +2,7 @@
 
 Implemented once each in firmware, Flutter (`flutter_blue_plus`) and the web client (Web Bluetooth). Admin-initiated: the gateway (`POST /admin/provision-sessions`, admin role) creates the node's MQTT user and returns the **bundle**; the client relays it over BLE.
 
-**Status: draft pending the S2b spike.** If the Arduino-ESP32 wrapper cannot expose a custom data channel via Espressif protocomm, this custom GATT service is the fallback and is the contract to implement. Any change after the spike bumps `proto`.
+**Status: DRAFT pending the S2b spike.** The GATT layout is stable; the session encryption below (X25519 ECDH + HKDF + AES-256-GCM) is **DRAFT** and may be replaced by Espressif protocomm security or another scheme after the spike. If the Arduino-ESP32 wrapper cannot expose a custom data channel via Espressif protocomm, this custom GATT service is the fallback and is the contract to implement. Any change after the spike bumps `proto`.
 
 ## Window
 
@@ -12,14 +12,14 @@ Implemented once each in firmware, Flutter (`flutter_blue_plus`) and the web cli
 
 ## GATT service
 
-Service UUID: `6e1f0000-8a4b-4c3e-9d2a-5b7f1c0d0000` (project-private, 128-bit).
+Service UUID: `4dd57997-6f7e-4f0a-b1d5-e01ef6674efe` (random 128-bit v4, generated once for this project; do not change without bumping `proto`).
 
 | Characteristic | UUID | Properties | Content |
 |---|---|---|---|
-| `info` | `6e1f0000-8a4b-4c3e-9d2a-5b7f1c0d0001` | read | UTF-8 JSON, plaintext, see below |
-| `session` | `6e1f0000-8a4b-4c3e-9d2a-5b7f1c0d0002` | write, indicate | key exchange, see below |
-| `data` | `6e1f0000-8a4b-4c3e-9d2a-5b7f1c0d0003` | write (no response), notify | chunked encrypted bundle (client→board); chunk acks (board→client) |
-| `result` | `6e1f0000-8a4b-4c3e-9d2a-5b7f1c0d0004` | read, notify | UTF-8 JSON status |
+| `info` | `9809777c-4f37-44e6-b054-b3fb7ee9f6db` | read | UTF-8 JSON, plaintext, see below |
+| `session` | `8583a1b2-4f51-48cc-8270-35f88e7b7260` | write, indicate | key exchange, see below |
+| `data` | `c5a63a5d-8766-4e3b-b2b2-eab7c732361b` | write (no response), notify | chunked encrypted bundle (client→board); chunk acks (board→client) |
+| `result` | `43f00218-77e0-4e21-9eb2-56da36658cee` | read, notify | UTF-8 JSON status |
 
 
 ### info (read)
@@ -29,16 +29,16 @@ Service UUID: `6e1f0000-8a4b-4c3e-9d2a-5b7f1c0d0000` (project-private, 128-bit).
 ```
 Contains nothing secret. Strings are length-limited and treated as untrusted by clients.
 
-### session (write, indicate)
+### session (write, indicate) [DRAFT]
 1. Client writes: `{"proto":1, "client_pub":"<base64 X25519 public key>", "pop": ""}`.
    `pop` is the **reserved PoP field**: present, empty, ignored by v1 firmware. When PoP is added it is mixed into the key derivation (below) and `info.pop_required` becomes true.
 2. Board indicates: `{"board_pub":"<base64 X25519 public key>", "salt":"<base64 16 bytes>"}`.
 3. Both derive `key = HKDF-SHA256(ikm = X25519 shared secret, salt = salt, info = "edge-agent-ble-v1" || pop, len = 32)`.
    One session per window attempt; a new `session` write discards the previous key and any partial data.
 
-Limitation (documented, accepted in v1): unauthenticated ECDH gives confidentiality against passive sniffing only, not against an active MITM during the window. The button window is the only trust anchor until PoP is added.
+**Security limitation (accepted in v1): without the PoP this scheme does NOT protect against an active man-in-the-middle.** Unauthenticated ECDH gives confidentiality against passive sniffing only; an attacker in radio range during the 5-minute window who relays or impersonates the board can read the bundle (Wi-Fi password, MQTT credentials). The physical button window is the only trust anchor until the PoP (printed secret / QR, mixed into the key derivation) is added. Do not describe the provisioning as authenticated in the report.
 
-### data (chunked encrypted bundle)
+### data (chunked encrypted bundle) [DRAFT encryption]
 Plaintext bundle (UTF-8 JSON, max 4096 bytes):
 ```json
 {"v": 1,
@@ -47,7 +47,7 @@ Plaintext bundle (UTF-8 JSON, max 4096 bytes):
  "ntp_host": "192.168.1.10",
  "ca_pem": "-----BEGIN CERTIFICATE-----\n..."}
 ```
-`ntp_host` optional (open item: NTP without internet). The bundle contains secrets: never logged, never stored anywhere but NVS.
+`ntp_host` optional: the LAN NTP server the board should use first (chrony on `pi-brain`, see `docs`/`deploy/README.md`). The firmware falls back to `pool.ntp.org` if `ntp_host` is absent or unreachable. If the board has no internet and chrony is down, TLS cannot validate the certificate dates. The bundle contains secrets: never logged, never stored anywhere but NVS.
 
 Encryption: AES-256-GCM with the session key, random 12-byte nonce. Transmitted blob = `nonce(12) || ciphertext || tag(16)`. AAD = `node_id` UTF-8.
 
