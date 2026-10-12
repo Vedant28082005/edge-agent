@@ -232,14 +232,14 @@ Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, 
 
 The LLM can **propose** a scene or automation as JSON, but it is saved only after a user approves it in the UI.
 
-**Confirmation tokens.** `risk: confirm` actions need a `confirmation_token`: opaque, single-use, bound to the user and the exact action, 60 s TTL, minted by the gateway (`POST /confirmations`) only when the user approves in the UI. It is **not** in any tool schema the LLM sees; the agent executor attaches it out-of-band (MCP `_meta`), and device-hub validates and consumes it through the gateway. Without a valid token the tool returns `confirmation_required` / `needs_confirmation` and the agent emits a `confirmation_request` event. Details in `contracts/mcp-tools.md`.
+**Confirmation tokens.** `risk: confirm` actions need a `confirmation_token`: opaque, single-use, bound to the user and the exact action, 60 s TTL, minted by the gateway (`POST /confirmations`) only when the user approves in the UI. It is **not** in any tool schema the LLM sees; the agent executor attaches it out-of-band (MCP `_meta`), and device-hub validates and consumes it through the gateway. Without a valid token the tool returns `confirmation_required` / `needs_confirmation` and the agent emits a `confirmation_request` event. A decline or timeout produces `confirmation_declined` / `confirmation_expired`; there is **no automatic re-prompt**, the UI offers a **Retry** that creates a brand-new request. Proactive and automation-triggered actions never prompt: for `risk: confirm` endpoints they only notify. Details in `contracts/mcp-tools.md` and `contracts/agent-events.md`.
 
 ### 4.7 Scenes (v1)
 
 - A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time, so a new light added to the bedroom automatically joins "good night".
 - Run semantics: validate each action, run through the same executor as everything else (range checks, `risk`, verify). **Endpoints that are offline, or lack the capability, are skipped and reported** ("fan offline, skipped"); commands are never queued, so a stale "unlock" cannot fire later. Results are per action (partial failure is visible).
 - `risk: confirm` endpoints in a scene need a `confirmation_token` from the user running it. If any action targets such an endpoint without a valid token, **the scene executes nothing** (not even its non-risky actions) and returns `needs_confirmation` listing those endpoints; the token is bound to the scene and to the exact risky actions it resolved to.
-- Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only. Automations (later) cannot touch `risk: confirm` endpoints unless an admin opted that endpoint in.
+- Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only. Automations (later) never execute actions on `risk: confirm` endpoints and never prompt: they notify instead, and the user can then act through the normal confirmation flow. (Earlier plan text allowed an admin opt-in; removed because it would bypass the token.)
 - The registry re-validates all scenes and automations on every registry change and flags the broken ones.
 
 ### 4.8 Perception APIs
@@ -378,7 +378,7 @@ Parallelism: after S0 run S1, S2a, S2c, S6, S7 in parallel; S2b starts with its 
 3. Action log with `reason` and `trigger` fields.
 4. Executor separate from planner. Planner output = a list of validated tool calls.
 5. Per-request budgets (max steps, time, retries).
-6. `needs_confirmation(action, trigger)` policy function (reuses `risk`).
+6. `needs_confirmation(action, trigger)` policy function (reuses `risk`). For a user-initiated trigger it yields a `confirmation_request`; for any proactive or automation trigger on a `risk: confirm` endpoint it yields `notify_only` (never a prompt, never an execution).
 7. Empty `rules` table and a stub rules engine that subscribes to the bus.
 
 **Later, in this order (cut from the bottom if time runs out):**
@@ -388,7 +388,7 @@ Parallelism: after S0 run S1, S2a, S2c, S6, S7 in parallel; S2b starts with its 
 3. **Proactive perception:** YOLO change → VLM check → notify or act.
 4. **Routine mining:** propose automations from repeated patterns in the action log (optional).
 
-Autonomy: low risk and high confidence acts and notifies; medium or ambiguous asks first; `risk: confirm` always asks. Proactive actions are rate-limited, undoable where possible and always logged with a reason. With only v1 built, describe the system as an LLM-driven multimodal control framework with an agent loop; with closed-loop verification and compiled automations the "agentic" claim is stronger.
+Autonomy: low risk and high confidence acts and notifies; medium or ambiguous asks first; `risk: confirm` always asks the user who is interacting (never auto-retried); proactive and automation-triggered actions on `risk: confirm` endpoints never prompt and only notify. Proactive actions are rate-limited, undoable where possible and always logged with a reason. With only v1 built, describe the system as an LLM-driven multimodal control framework with an agent loop; with closed-loop verification and compiled automations the "agentic" claim is stronger.
 
 ---
 

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.1.0
+  version: 2.2.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -184,6 +184,34 @@ paths:
                   confirmation_token: {type: string, description: Present only in the direct flow}
                   action_hash: {type: string}
                   expires_at: {type: integer}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /confirmations/{request_id}/decline:
+    post:
+      tags: [devices]
+      operationId: declineConfirmation
+      description: The user declined a pending `confirmation_request`. Emits `confirmation_declined`; nothing is executed.
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '204': {description: Declined}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /confirmations/{request_id}/retry:
+    post:
+      tags: [devices]
+      operationId: retryConfirmation
+      description: |
+        Retry after `confirmation_declined` or `confirmation_expired`. Creates a NEW confirmation request
+        (new request_id, fresh TTL) for the same blocked action, re-validated against the live registry.
+        It never executes anything and never reuses an old token. There is no automatic re-prompt; only this
+        explicit user action creates a new request.
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '202':
+          description: New request created; it arrives as a `confirmation_request` event / WebSocket message
+          content: {application/json: {schema: {type: object, required: [request_id], properties: {request_id: {type: string}}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
   /chat:
