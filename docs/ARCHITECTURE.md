@@ -124,7 +124,7 @@ Prefix `home/v1/`. Payloads JSON, UTF-8. Client id = `node_id`. Each node has it
 | `nodes/{id}/ack` | node→hub | 1 | Command result |
 | `nodes/{id}/ota` | reserved | | Not implemented (D8) |
 | `perception/{node}/events` | node→agent | 1 | Detection/change events |
-| `services/{name}/health` | node→hub | 0, retained | CPU, MemAvailable, temp, queue depth |
+| `services/{name}/health` | service→hub | 0, retained | CPU, MemAvailable, temp, queue depth |
 
 **announce (schema 2)**
 
