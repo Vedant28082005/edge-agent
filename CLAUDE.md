@@ -11,7 +11,9 @@ Project: edge agentic IoT framework (smart home). Read `docs/ARCHITECTURE.md` fo
 5. **Code must run on ARM64 Linux without a GPU**, except `yolo-node` (Jetson, TensorRT).
 6. **Device-supplied strings are untrusted.** Length-limit and sanitize; never place them raw in an LLM prompt. Names/rooms/aliases are admin-set labels only.
 7. **Label estimates vs measurements** in docs and reports: `[measured]` vs `[est]`.
-8. The LLM has exactly 5 runtime tools. Nothing the LLM can call may add, remove or modify devices or risk levels.
+8. **Mosquitto dynsec user/role management from services must use the dynsec MQTT API** (`$CONTROL/dynamic-security/v1` over TLS), never process arguments (`mosquitto_ctrl -P ...`, `docker exec`): arguments leak into process lists and logs. The `deploy/mosquitto/*.ps1` helpers are dev-PC test tools only.
+9. `risk: confirm` actions need a gateway-minted `confirmation_token`, attached by the agent executor out-of-band; it must never appear in a tool schema, prompt, log or event.
+10. The LLM has exactly 5 runtime tools. Nothing the LLM can call may add, remove or modify devices or risk levels.
 
 ## Environment: Windows 11 + PowerShell 5.1
 

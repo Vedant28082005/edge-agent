@@ -1,5 +1,7 @@
 <#
 .SYNOPSIS
+  DEV-PC TEST HELPER ONLY: passes the hub admin and node passwords as process arguments (docker exec mosquitto_ctrl),
+  which services must never do; production code uses the dynsec MQTT API (see CLAUDE.md rule 8).
   Creates (or with -Remove deletes) an MQTT user + role for one node via the dynamic-security plugin.
   Intended for local testing and manual provisioning; the hub's dynsec client does the same in production.
 .DESCRIPTION
