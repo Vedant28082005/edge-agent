@@ -32,3 +32,13 @@ All generated material (`certs/`, `data/`, `.env`) is git-ignored. `certs\ca\ca.
 
 Production: `tools\deploy.ps1 -Target brain -Up`.
 ESP32s need the CA cert (delivered in the BLE bundle). Their TLS check needs a valid clock (NTP) and the broker's LAN IP in the SANs.
+
+## NTP (needed for ESP32 TLS)
+
+The ESP32 must know the time before it can verify the broker certificate. The Pi 5 has no battery RTC, so:
+
+1. Install `chrony` on `pi-brain` and use `chrony/chrony-pi-brain.conf` (syncs from `pool.ntp.org`, serves your LAN, keeps serving a free-running clock with `local stratum 10` if the internet is down). Open UDP 123 from the LAN.
+2. The BLE provisioning bundle carries `ntp_host` = the Pi's LAN IP (same address as the broker). The firmware tries `ntp_host` first and falls back to `pool.ntp.org`.
+3. Open item: with no internet and a Pi that has not synced since boot, the served time can be wrong and TLS date checks may fail. Mitigations to evaluate in the S2a spike: boot-time `makestep`, a fake-hwclock on the Pi, or a long-lived server cert (current server cert: 825 days, CA 10 years).
+
+Status: documented and configured on paper; not tested on hardware.
