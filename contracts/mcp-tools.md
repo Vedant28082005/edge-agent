@@ -10,9 +10,28 @@ Version 2 change: the boolean `confirmed` argument is gone; confirmation is a `c
 
 - A token is **opaque** (256-bit random, base64url), **single-use**, bound to **user + exact action + short TTL (60 s)**, and **minted by the gateway** only when the user approves in the UI (`POST /confirmations`, see `openapi/gateway.yaml`). The agent cannot mint one.
 - **It is not part of any tool's `inputSchema`.** The LLM never sees it, cannot generate it and cannot pass it. The agent **executor** attaches it out-of-band in the MCP call's `_meta` field: `{"name": "set_state", "arguments": {...}, "_meta": {"confirmation_token": "<token>"}}`. The tool schema list sent to the model contains no confirmation field; any `confirmation_token` found in the model's own arguments is stripped and logged by the executor.
-- **Binding.** `action_hash = sha256(canonical_json({tool, args}))`. For `set_state` the args are `endpoint_id, capability, value`. For `run_scene` they are the scene id plus the sorted list of `risk: confirm` `(endpoint_id, capability, value)` actions the scene resolves to at that moment. The token is also bound to the requesting `user_id`.
-- **Validation** is done by device-hub when it runs the action: it calls the gateway's internal consume endpoint (`POST /internal/confirmations/consume`, localhost/service-to-service, not part of the public OpenAPI) with `{token, user_id, action_hash}`. The gateway atomically marks it used, so replay fails. Expired, used, unknown, wrong-user or wrong-action tokens are all treated as **no token**.
+- **Binding.** The token is bound to the requesting `user_id` and to `action_hash` (defined precisely below). The gateway stores only `SHA-256(token)`, the user, the action hash and the expiry.
+- **Validation** is done by device-hub when it runs the action: it calls the gateway's internal consume endpoint (`POST /internal/confirmations/consume`: loopback or unix socket only, shared-secret authenticated; specified in the clearly marked internal section of `openapi/gateway.yaml`) with `{token, user_id, action_hash}`. The gateway validates and marks it used in one atomic operation, so replay and races fail. Any denial (`expired`, `used`, `hash_mismatch`, `unknown`) is treated as **no token**: the tool returns `confirmation_required` / `needs_confirmation`. Only the gateway can mint tokens; the agent holds neither the service secret nor any mint or consume access.
 - A token for `set_state` cannot confirm a `run_scene` and vice versa. Automations and guests can never obtain one for `risk: confirm` endpoints unless the admin opted that endpoint in (see ARCHITECTURE 4.7).
+
+## Canonical action hash
+
+`action_hash` = lowercase hex SHA-256 of the UTF-8 bytes of the canonical JSON of the action object below. Canonical JSON is **RFC 8785 (JCS)**: no whitespace, object keys sorted by UTF-16 code unit, minimal string escaping, numbers in ECMAScript shortest form (`3`, not `3.0`; `0.5`; no `+`, no exponent for ordinary values). The object has **exactly these fields, no others** (a missing or extra field changes the hash):
+
+`set_state`:
+```json
+{"capability": "power", "endpoint_id": "ep_3fa91c02", "type": "set_state", "value": true}
+```
+
+`run_scene` (hash covers the scene id and the **`risk: confirm` actions only**, as resolved at that moment, so a scene that later resolves to different risky targets needs a new approval):
+```json
+{"actions": [{"capability": "lock", "endpoint_id": "ep_1b2c3d4e", "value": "unlocked"}], "scene_id": "sc_9a8b7c6d", "type": "run_scene"}
+```
+- `scene_id` is the scene's permanent id, never its display name.
+- `actions` is sorted ascending by `endpoint_id`, then `capability` (plain string comparison). Each entry has exactly `endpoint_id`, `capability`, `value`.
+- Offline or incapable risky actions are still listed (they are part of what the user approved); they are skipped at run time as usual.
+
+Both the gateway (when minting) and device-hub (when consuming) must compute the hash from their own view of the action; they never trust a hash supplied by the agent or the client. Test vectors: `samples/confirmation/hash-vectors.json` (checked by `tools\contract-test.ps1`).
 
 ## list_devices
 Args: `room?: string`, `type?: string` (endpoint type enum).

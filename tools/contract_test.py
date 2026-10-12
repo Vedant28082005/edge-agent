@@ -67,6 +67,80 @@ for path, item in spec["paths"].items():
             print(f"FAIL openapi {method.upper()} {path}: admin operation lacks a 403 response")
 print("ok   openapi admin gating checked")
 
+# --- OpenAPI component samples (internal consume endpoint) -------------------------
+OPENAPI_SUITES = {
+    "consume-request": "ConsumeRequest",
+    "consume-response": "ConsumeResponse",
+}
+spec_for_refs = dict(spec)
+# ConsumeResponse = granted or denied
+spec["components"]["schemas"]["ConsumeResponse"] = {
+    "oneOf": [{"$ref": "#/components/schemas/ConsumeGranted"}, {"$ref": "#/components/schemas/ConsumeDenied"}]}
+for folder, comp in OPENAPI_SUITES.items():
+    validator = Draft202012Validator({"$ref": f"#/components/schemas/{comp}", "components": spec["components"]})
+    for kind in ("valid", "invalid"):
+        files = sorted((contracts / "samples" / folder / kind).glob("*.json"))
+        if not files:
+            failures += 1
+            print(f"FAIL: no samples for {folder} in {kind}/")
+        for f in files:
+            counts[kind] += 1
+            errors = list(validator.iter_errors(json.loads(f.read_text(encoding="utf-8"))))
+            ok = (not errors) if kind == "valid" else bool(errors)
+            if ok:
+                print(f"ok   {folder}/{kind}/{f.name}")
+            else:
+                failures += 1
+                print(f"FAIL {folder}/{kind}/{f.name}: " + ("expected to pass but failed: " + errors[0].message[:100] if kind == "valid" else "expected to fail but passed"))
+
+# internal section: only service-secret auth, never user JWT, never /admin
+for path, item in spec["paths"].items():
+    for method, op in item.items():
+        if method not in ("get", "post", "put", "patch", "delete"):
+            continue
+        is_internal = path.startswith("/internal/")
+        sec = [list(x) for x in op.get("security", [])]
+        if is_internal and (sec != [["serviceSecret"]] or "internal" not in op.get("tags", [])):
+            failures += 1
+            print(f"FAIL openapi {method.upper()} {path}: internal operations must be tagged internal and use only serviceSecret")
+        if not is_internal and any("serviceSecret" in x for x in sec):
+            failures += 1
+            print(f"FAIL openapi {method.upper()} {path}: serviceSecret is for /internal/* only")
+print("ok   openapi internal section checked")
+
+# --- canonical action hash vectors -------------------------------------------------
+import copy
+import hashlib
+
+
+def _norm(v):
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, dict):
+        return {k: _norm(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_norm(x) for x in v]
+    return v
+
+
+def canonical_action(action):
+    """Reference canonicalizer (RFC 8785 for the value types used by actions)."""
+    a = _norm(copy.deepcopy(action))
+    if a["type"] == "run_scene":
+        a["actions"] = sorted(a["actions"], key=lambda x: (x["endpoint_id"], x["capability"]))
+    return json.dumps(a, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+vec = json.loads((contracts / "samples" / "confirmation" / "hash-vectors.json").read_text(encoding="utf-8"))
+for v in vec["vectors"]:
+    c = canonical_action(v["input"])
+    good = c == v["canonical"] and hashlib.sha256(c.encode("utf-8")).hexdigest() == v["sha256"]
+    if good:
+        print(f"ok   confirmation hash vector: {v['name']}")
+    else:
+        failures += 1
+        print(f"FAIL confirmation hash vector: {v['name']}")
+
 # --- docs: no devices/ topics, exactly 5 MCP tools -------------------------------
 for doc in contracts.glob("*.md"):
     if re.search(r"home/v1/devices|[\s`]devices/\{", doc.read_text(encoding="utf-8")):

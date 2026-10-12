@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.0.0
+  version: 2.1.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -20,6 +20,8 @@ tags:
   - name: system
   - name: admin
     description: Admin role only. Device management and user management.
+  - name: internal
+    description: SERVICE-TO-SERVICE ONLY. Never exposed on the public listener or through tailscale serve. Not for clients, apps or the LLM.
 paths:
   /auth/login:
     post:
@@ -149,7 +151,7 @@ paths:
       description: |
         Mints a confirmation token when the user approves a `risk: confirm` action in the UI.
         The token is opaque, single-use, bound to the caller's user id and to the exact action
-        (sha256 of the canonical action JSON), and expires after 60 s. Guests can never mint one.
+        (SHA-256 of the canonical action JSON, see mcp-tools.md), and expires after 60 s (default TTL; server-configurable up to 300 s). Guests can never mint one.
         Two flows:
         * Agent flow: send `request_id` from the `confirmation_request` SSE event. The gateway verifies that the
           action matches the pending request and hands the token to the agent executor server-side; the response
@@ -271,6 +273,57 @@ paths:
         {type: state|perception|notification|async_result|registry_changed, ...}.
       responses:
         '101': {description: Switching protocols}
+
+  # ------------------------------------------------------------ INTERNAL (service-to-service only)
+  # Everything below is on a separate internal listener, NOT on the public gateway port 8000:
+  #   * unix socket /run/edge-agent/gateway-internal.sock (preferred), or
+  #   * http://127.0.0.1:8001 bound to loopback only.
+  # The public listener must answer 404 for any /internal/* path. Callers authenticate with the shared
+  # service secret (X-Service-Secret), not with a user JWT. The secret is read from a file
+  # (EDGE_SERVICE_SECRET_FILE, default /etc/edge-agent/service-secret, mode 600, owner = service user),
+  # shared by gateway and device-hub only. The agent does NOT have it and cannot mint or consume tokens.
+  /internal/confirmations/consume:
+    servers:
+      - url: http://127.0.0.1:8001
+        description: Loopback-only internal listener
+      - url: http+unix://%2Frun%2Fedge-agent%2Fgateway-internal.sock
+        description: Unix socket (preferred)
+    post:
+      tags: [internal]
+      operationId: internalConsumeConfirmation
+      security:
+        - serviceSecret: []
+      description: |
+        INTERNAL. Called by device-hub just before it executes a `risk: confirm` action.
+        Atomically validates and consumes a confirmation token. The check-and-mark-used is ONE atomic
+        operation (e.g. a single `UPDATE ... WHERE token_hash=? AND used=0 AND expires_at>? AND action_hash=?
+        AND user_id=?` and checking the affected-row count), so two concurrent calls can never both succeed.
+        Only the gateway mints tokens (POST /confirmations); tokens are stored only as SHA-256 hashes.
+
+        Denial reasons (HTTP 403, `consumed: false`):
+        * `unknown`: no such token, or the token belongs to a different user (indistinguishable on purpose).
+        * `expired`: past `expires_at` (default TTL 60 s from minting, configurable up to 300 s).
+        * `used`: already consumed.
+        * `hash_mismatch`: token is valid but was minted for a different action.
+        `hash_mismatch` and the user check do not burn the token (a 256-bit token cannot be guessed, and a
+        wrong caller must not be able to destroy the user's approval). Every attempt is audit-logged without
+        the token value.
+
+        The action hash is defined in `mcp-tools.md` ("Canonical action hash") with test vectors in
+        `samples/confirmation/hash-vectors.json`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConsumeRequest'}
+      responses:
+        '200':
+          description: Token valid and now consumed. The caller may execute the action.
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsumeGranted'}}}
+        '403':
+          description: Denied. The caller must NOT execute the action.
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsumeDenied'}}}
+        '401': {description: Missing or wrong X-Service-Secret, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
 
   # ------------------------------------------------------------ /admin/* (admin only)
   /admin/provision-sessions:
@@ -492,6 +545,11 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: Access token carrying the role. Every /admin/* path additionally requires role admin.
+    serviceSecret:
+      type: apiKey
+      in: header
+      name: X-Service-Secret
+      description: Shared service secret read from a file (never from env/args, never logged). Internal endpoints only.
   parameters:
     EndpointId: {name: endpoint_id, in: path, required: true, schema: {$ref: '#/components/schemas/EndpointId'}}
     NodeId: {name: node_id, in: path, required: true, schema: {$ref: '#/components/schemas/NodeId'}}
@@ -586,6 +644,29 @@ components:
             scene_id: {type: string}
             owner: {type: string}
             broken: {type: boolean}
+    ConsumeRequest:
+      type: object
+      additionalProperties: false
+      required: [token, user_id, action_hash]
+      properties:
+        token: {type: string, pattern: '^[A-Za-z0-9_-]{43}$', description: 256-bit random, base64url without padding}
+        user_id: {type: string, minLength: 1, maxLength: 64}
+        action_hash: {type: string, pattern: '^[0-9a-f]{64}$', description: Lowercase hex SHA-256 of the canonical action JSON (see mcp-tools.md)}
+    ConsumeGranted:
+      type: object
+      additionalProperties: false
+      required: [consumed, action_hash, user_id]
+      properties:
+        consumed: {const: true}
+        action_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        user_id: {type: string}
+    ConsumeDenied:
+      type: object
+      additionalProperties: false
+      required: [consumed, reason]
+      properties:
+        consumed: {const: false}
+        reason: {type: string, enum: [expired, used, hash_mismatch, unknown]}
     ConfirmAction:
       oneOf:
         - type: object

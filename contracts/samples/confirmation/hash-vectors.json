@@ -1,0 +1,75 @@
+{
+  "description": "Canonical action hash vectors. 'input' is the action as the caller builds it; 'canonical' is the RFC 8785 JSON that is hashed.",
+  "vectors": [
+    {
+      "name": "set_state bool",
+      "input": {
+        "type": "set_state",
+        "endpoint_id": "ep_3fa91c02",
+        "capability": "power",
+        "value": true
+      },
+      "canonical": "{\"capability\":\"power\",\"endpoint_id\":\"ep_3fa91c02\",\"type\":\"set_state\",\"value\":true}",
+      "sha256": "0b1f37b13553dcd819afb617cebed75cea881cfcd4dd2b56b878bcb1e4f8bbc3"
+    },
+    {
+      "name": "set_state enum",
+      "input": {
+        "type": "set_state",
+        "endpoint_id": "ep_1b2c3d4e",
+        "capability": "lock",
+        "value": "unlocked"
+      },
+      "canonical": "{\"capability\":\"lock\",\"endpoint_id\":\"ep_1b2c3d4e\",\"type\":\"set_state\",\"value\":\"unlocked\"}",
+      "sha256": "a1cced365c3877307a7df3fedce8ef0041b345a50c9886992e35df8b28a5d83d"
+    },
+    {
+      "name": "set_state integral float normalised to int",
+      "input": {
+        "type": "set_state",
+        "endpoint_id": "ep_aa00bb11",
+        "capability": "target_temp",
+        "value": 24.0
+      },
+      "canonical": "{\"capability\":\"target_temp\",\"endpoint_id\":\"ep_aa00bb11\",\"type\":\"set_state\",\"value\":24}",
+      "sha256": "f8cc8f8fd5d2ea0856dc804702ab107d350fbc30a253355d360fab16fc5072e6"
+    },
+    {
+      "name": "set_state fractional float",
+      "input": {
+        "type": "set_state",
+        "endpoint_id": "ep_aa00bb11",
+        "capability": "target_temp",
+        "value": 22.5
+      },
+      "canonical": "{\"capability\":\"target_temp\",\"endpoint_id\":\"ep_aa00bb11\",\"type\":\"set_state\",\"value\":22.5}",
+      "sha256": "e4ea6a01a5f11605180daaae38746a8c9dea96dacb3ba6164cf87fece39f2608"
+    },
+    {
+      "name": "run_scene, actions sorted by endpoint_id then capability",
+      "input": {
+        "type": "run_scene",
+        "scene_id": "sc_9a8b7c6d",
+        "actions": [
+          {
+            "endpoint_id": "ep_ffff0000",
+            "capability": "power",
+            "value": false
+          },
+          {
+            "endpoint_id": "ep_1b2c3d4e",
+            "capability": "lock",
+            "value": "locked"
+          },
+          {
+            "endpoint_id": "ep_1b2c3d4e",
+            "capability": "brightness",
+            "value": 0
+          }
+        ]
+      },
+      "canonical": "{\"actions\":[{\"capability\":\"brightness\",\"endpoint_id\":\"ep_1b2c3d4e\",\"value\":0},{\"capability\":\"lock\",\"endpoint_id\":\"ep_1b2c3d4e\",\"value\":\"locked\"},{\"capability\":\"power\",\"endpoint_id\":\"ep_ffff0000\",\"value\":false}],\"scene_id\":\"sc_9a8b7c6d\",\"type\":\"run_scene\"}",
+      "sha256": "01235314d60ad7e4df6011d41728a7f64c6926e0d2336da0b5e39647b08862f3"
+    }
+  ]
+}
