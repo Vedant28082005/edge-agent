@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 1.0.0
+  version: 2.0.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -83,7 +83,7 @@ paths:
               properties:
                 capability: {type: string}
                 value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
-                confirmed: {type: boolean, default: false}
+                confirmation_token: {type: string, description: Single-use token from POST /confirmations. Required for risk:confirm endpoints.}
       responses:
         '200': {description: Result, content: {application/json: {schema: {$ref: '#/components/schemas/SetResult'}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
@@ -137,10 +137,53 @@ paths:
             schema:
               type: object
               properties:
-                confirmed: {type: boolean, default: false}
+                confirmation_token: {type: string, description: Single-use token from POST /confirmations. Required for risk:confirm endpoints.}
       responses:
         '200': {description: Per-action results, content: {application/json: {schema: {$ref: '#/components/schemas/SceneRunResult'}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: Nothing executed; risk:confirm actions need a confirmation token, content: {application/json: {schema: {$ref: '#/components/schemas/SceneRunResult'}}}}
+  /confirmations:
+    post:
+      tags: [devices]
+      operationId: mintConfirmation
+      description: |
+        Mints a confirmation token when the user approves a `risk: confirm` action in the UI.
+        The token is opaque, single-use, bound to the caller's user id and to the exact action
+        (sha256 of the canonical action JSON), and expires after 60 s. Guests can never mint one.
+        Two flows:
+        * Agent flow: send `request_id` from the `confirmation_request` SSE event. The gateway verifies that the
+          action matches the pending request and hands the token to the agent executor server-side; the response
+          has no token.
+        * Direct flow: send `action` for use with POST /devices/{id}/set or /scenes/{id}/run. The response
+          contains the token.
+        The token is validated and consumed by device-hub through an internal gateway endpoint (not in this file).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              oneOf:
+                - required: [request_id]
+                - required: [action]
+              properties:
+                request_id: {type: string}
+                action: {$ref: '#/components/schemas/ConfirmAction'}
+      responses:
+        '200':
+          description: Approved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, expires_at, action_hash]
+                properties:
+                  status: {type: string, enum: [delivered_to_agent, minted]}
+                  confirmation_token: {type: string, description: Present only in the direct flow}
+                  action_hash: {type: string}
+                  expires_at: {type: integer}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /chat:
     post:
       tags: [chat]
@@ -543,11 +586,39 @@ components:
             scene_id: {type: string}
             owner: {type: string}
             broken: {type: boolean}
+    ConfirmAction:
+      oneOf:
+        - type: object
+          required: [type, endpoint_id, capability, value]
+          properties:
+            type: {const: set_state}
+            endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            capability: {type: string}
+            value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+        - type: object
+          required: [type, scene]
+          properties:
+            type: {const: run_scene}
+            scene: {type: string}
     SceneRunResult:
       type: object
-      required: [ok, results]
+      description: |
+        If any action targets a risk:confirm endpoint and no valid confirmation_token covers it, NOTHING runs:
+        `executed` is false, `status` is needs_confirmation and `needs_confirmation` lists those actions (HTTP 409).
+      required: [ok, executed]
       properties:
         ok: {type: boolean}
+        executed: {type: boolean}
+        status: {type: string, enum: [needs_confirmation]}
+        needs_confirmation:
+          type: array
+          items:
+            type: object
+            required: [endpoint_id, capability, value]
+            properties:
+              endpoint_id: {type: string}
+              capability: {type: string}
+              value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
         results:
           type: array
           items:
@@ -556,7 +627,7 @@ components:
             properties:
               endpoint_id: {type: string}
               capability: {type: string}
-              status: {type: string, enum: [ok, skipped_offline, skipped_no_capability, needs_confirmation, failed]}
+              status: {type: string, enum: [ok, skipped_offline, skipped_no_capability, failed]}
               detail: {type: string}
     Memory:
       type: object

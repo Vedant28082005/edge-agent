@@ -226,17 +226,19 @@ Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, 
 |---|---|---|
 | `list_devices` | `room?`, `type?` | Endpoints with room, type, online status |
 | `get_state` | `endpoint_id` or `room` | Current values |
-| `set_state` | `endpoint_id`, `capability`, `value` | Validated against the registry; waits for ack (3 s timeout); `risk: confirm` needs `confirmed: true`, set only after the user confirms |
-| `run_scene` | `scene` | See 4.7 |
+| `set_state` | `endpoint_id`, `capability`, `value` | Validated against the registry; waits for ack (3 s timeout); `risk: confirm` endpoints need a `confirmation_token` (see below) |
+| `run_scene` | `scene` | See 4.7. Same `confirmation_token` rule; if any action needs confirmation and has no valid token, **nothing runs** |
 | `read_sensor` | `endpoint_id`, `capability` | Last value, timestamp, staleness flag |
 
 The LLM can **propose** a scene or automation as JSON, but it is saved only after a user approves it in the UI.
+
+**Confirmation tokens.** `risk: confirm` actions need a `confirmation_token`: opaque, single-use, bound to the user and the exact action, 60 s TTL, minted by the gateway (`POST /confirmations`) only when the user approves in the UI. It is **not** in any tool schema the LLM sees; the agent executor attaches it out-of-band (MCP `_meta`), and device-hub validates and consumes it through the gateway. Without a valid token the tool returns `confirmation_required` / `needs_confirmation` and the agent emits a `confirmation_request` event. Details in `contracts/mcp-tools.md`.
 
 ### 4.7 Scenes (v1)
 
 - A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time, so a new light added to the bedroom automatically joins "good night".
 - Run semantics: validate each action, run through the same executor as everything else (range checks, `risk`, verify). **Endpoints that are offline, or lack the capability, are skipped and reported** ("fan offline, skipped"); commands are never queued, so a stale "unlock" cannot fire later. Results are per action (partial failure is visible).
-- `risk: confirm` endpoints in a scene need confirmation from the user running it.
+- `risk: confirm` endpoints in a scene need a `confirmation_token` from the user running it. If any action targets such an endpoint without a valid token, **the scene executes nothing** (not even its non-risky actions) and returns `needs_confirmation` listing those endpoints; the token is bound to the scene and to the exact risky actions it resolved to.
 - Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only. Automations (later) cannot touch `risk: confirm` endpoints unless an admin opted that endpoint in.
 - The registry re-validates all scenes and automations on every registry change and flags the broken ones.
 
