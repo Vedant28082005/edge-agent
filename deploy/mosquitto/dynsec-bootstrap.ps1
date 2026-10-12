@@ -31,7 +31,10 @@ $ErrorActionPreference = 'Stop'
 
 # Tighten defaults: deny everything not granted by a role.
 $j = Get-Content $cfg -Raw | ConvertFrom-Json
-foreach ($a in $j.defaultACLAccess) { $a.allow = $false }
+foreach ($name in @($j.defaultACLAccess.PSObject.Properties.Name)) { $j.defaultACLAccess.$name = $false }
+# The init 'admin' role can receive/subscribe everywhere but not publish outside $CONTROL: the hub must publish cmds.
+$adminRole = $j.roles | Where-Object { $_.rolename -eq 'admin' }
+$adminRole.acls += [pscustomobject]@{ acltype = 'publishClientSend'; topic = '#'; allow = $true }
 # Containers run as uid 1883; make the file readable/writable for them via the bind mount.
 $j | ConvertTo-Json -Depth 20 | Set-Content -Encoding ascii $cfg
 

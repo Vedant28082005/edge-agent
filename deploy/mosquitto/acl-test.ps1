@@ -4,7 +4,7 @@
   Prereqs (see deploy/README.md): Docker running, new-certs.ps1, dynsec-bootstrap.ps1, compose up.
   Creates two throwaway nodes, runs the checks, removes them. Exit 0 = all assertions held.
 .NOTES
-  STATUS: written on a PC where the Docker daemon would not start, so this script has NOT been run yet.
+  STATUS: run against the dev broker (Mosquitto 2.0.20, Docker Desktop on Windows); see the commit message for the result.
 #>
 param([string]$Container = 'edge-mosquitto')
 $ErrorActionPreference = 'Stop'
@@ -46,7 +46,20 @@ try {
     Assert ($seen -notmatch 'A-on-B') "hub never saw A's message on B's topic"
 
     $subOther = Mq 'mosquitto_sub' @('-u', $ca.username, '-P', $ca.password, '-i', $a, '-t', "home/v1/nodes/$b/#", '-W', '2', '-C', '1')
-    Assert ($subOther.Out -match 'not authori[sz]ed|135|Subscribe' -or $subOther.Code -ne 0) "node A cannot subscribe to B's subtree ($($subOther.Out.Trim()))"
+    Assert ($subOther.Out -match 'not authori[sz]ed|denied' -or $subOther.Code -ne 0) "node A cannot subscribe to B's subtree ($($subOther.Out.Trim()))"
+
+    $subOwn = Mq 'mosquitto_sub' @('-u', $ca.username, '-P', $ca.password, '-i', $a, '-t', "home/v1/nodes/$a/cmd", '-W', '2', '-C', '1')
+    Assert ($subOwn.Out -notmatch 'denied|not authori[sz]ed') "node A can subscribe to its own cmd topic ($($subOwn.Out.Trim()))"
+
+    # hub -> node: the hub admin can publish a cmd and node A receives it
+    $nodeSub = Start-Job -ScriptBlock {
+        param($c, $u, $p, $id)
+        docker exec $c mosquitto_sub -h localhost -p 8883 --cafile /mosquitto/certs/ca.crt -u $u -P $p -i $id -t "home/v1/nodes/$id/cmd" -W 6 -C 1 2>&1
+    } -ArgumentList $Container, $ca.username, $ca.password, $a
+    Start-Sleep 2
+    Mq 'mosquitto_pub' @('-u', $e['HUB_ADMIN_USER'], '-P', $e['HUB_ADMIN_PASSWORD'], '-i', 'hub-test', '-t', "home/v1/nodes/$a/cmd", '-q', '1', '-m', 'hub-cmd-ok') | Out-Null
+    $got = (Receive-Job $nodeSub -Wait -AutoRemoveJob) -join "`n"
+    Assert ($got -match 'hub-cmd-ok') 'hub publishes a cmd and node A receives it'
 
     $anon = Mq 'mosquitto_pub' @('-i', 'anon', '-t', "home/v1/nodes/$a/state", '-m', 'x')
     Assert ($anon.Code -ne 0) 'anonymous connection is refused'
