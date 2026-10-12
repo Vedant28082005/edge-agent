@@ -15,7 +15,21 @@ cd deploy; docker compose -f compose.yml -f compose.dev.yml up -d
 cd ..; deploy\mosquitto\acl-test.ps1
 ```
 
-All generated material (`certs/`, `data/`, `.env`) is git-ignored. `certs\ca\ca.key` never leaves the PC; `tools\deploy.ps1 brain` copies only `ca.crt`, `server.crt`, `server.key` and `dynamic-security.json`, then on the Pi sets `server.key`, `dynamic-security.json` and `data/` to owner uid 1883 (the container user) with mode 600 via `sudo -n chown/chmod` (needs passwordless sudo for the deploy user). Afterwards the ssh user can only read them with sudo. On the PC, `new-certs.ps1` restricts the key files to your Windows user; Windows cannot set uid 1883 and Docker Desktop's bind mount does not enforce POSIX ownership, so the ownership rule applies on the Pi only.
+All generated material (`certs/`, `data/`, `.env`) is git-ignored. `certs\ca\ca.key` never leaves the PC. On the PC, `new-certs.ps1` restricts the key files to your Windows user.
+
+## One-time Pi setup (secrets and chrony)
+
+Routine `tools\deploy.ps1 -Target brain` needs **no root** and carries **no secrets**: it copies only `contracts/`, `compose.yml`, `mosquitto.conf`, the role template, the chrony config and `tools/setup-pi-brain.sh`. Secrets reach the Pi once, by hand:
+
+```powershell
+tools\deploy.ps1 -Target brain                      # puts setup-pi-brain.sh and the chrony config on the Pi
+ssh pi@pi-brain "mkdir -p -m 700 ~/edge-agent-setup"
+scp deploy\mosquitto\certs\ca.crt deploy\mosquitto\certs\server.crt deploy\mosquitto\certs\server.key deploy\mosquitto\data\dynamic-security.json pi@pi-brain:edge-agent-setup/
+ssh -t pi@pi-brain "LAN_CIDR=192.168.1.0/24 bash ~/edge-agent/tools/setup-pi-brain.sh"   # asks for your sudo password
+tools\deploy.ps1 -Target brain -Up                  # starts the broker
+```
+
+`setup-pi-brain.sh` checks that the key matches the cert and chains to the CA, installs everything under `/etc/edge-agent/mosquitto` owned by uid 1883 (the container user; `server.key` and `dynamic-security.json` mode 600), points compose at it through `deploy/.env` (`MOSQUITTO_STATE_DIR`), installs chrony with the edge-agent config, and shreds the staged secrets. It is safe to re-run (stage new files first) after renewing the server cert or changing dynsec. Needs an interactive sudo password, not passwordless sudo.
 
 ## Files
 

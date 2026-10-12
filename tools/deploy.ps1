@@ -9,8 +9,12 @@
 .PARAMETER DryRun
   Print what would be copied/run without touching the network.
 .NOTES
-  Uses scp (no rsync on Windows). Copies: deploy/, contracts/, services/<name>/ for the node, and for brain only
-  ca.crt, server.crt, server.key and data/dynamic-security.json. NEVER copies certs\ca\ca.key, .env or node credentials.
+  Routine deploys need NO root and carry NO secrets. They copy only code and non-secret config:
+  contracts/, services/<name>/, and for brain also deploy/compose.yml, mosquitto.conf, the role template,
+  the chrony config and tools/setup-pi-brain.sh.
+
+  Certificates, the broker key and the dynsec file are installed ONCE by hand with tools/setup-pi-brain.sh
+  (see deploy/README.md, "One-time Pi setup"). This script never copies certs, keys, .env or credentials.
 #>
 param(
     [Parameter(Mandatory)][ValidateSet('brain', 'vision', 'jetson')][string]$Target,
@@ -24,20 +28,15 @@ $n = $nodes[$Target]
 $dest = "$($n.User)@$($n.Host)"
 $remote = $n.Dir
 
-# What goes where (relative to repo root).
+# What goes where (relative to repo root). Nothing secret is in this list.
 $services = @{ brain = @('device-hub', 'agent', 'gateway'); vision = @('vision-node'); jetson = @('yolo-node') }
 $items = @('contracts')
 if ($Target -eq 'brain') {
-    $items += 'deploy\compose.yml', 'deploy\mosquitto\mosquitto.conf', 'deploy\mosquitto\node-role.template.json'
+    $items += 'deploy\compose.yml', 'deploy\mosquitto\mosquitto.conf', 'deploy\mosquitto\node-role.template.json',
+              'deploy\chrony', 'tools\setup-pi-brain.sh'
 }
 foreach ($s in $services[$Target]) {
     if (Test-Path (Join-Path $root "services\$s")) { $items += "services\$s" }
-}
-# Secrets-bearing files for the broker: explicit allow-list, not a folder copy.
-$secretFiles = @()
-if ($Target -eq 'brain') {
-    $secretFiles = @('deploy\mosquitto\certs\ca.crt', 'deploy\mosquitto\certs\server.crt',
-                     'deploy\mosquitto\certs\server.key', 'deploy\mosquitto\data\dynamic-security.json')
 }
 
 function Invoke-Native([string]$exe, [string[]]$arguments) {
@@ -49,13 +48,9 @@ function Invoke-Native([string]$exe, [string[]]$arguments) {
 }
 
 Write-Host "Deploying '$Target' to $dest`:$remote"
-$dirs = @("$remote/services")
-if ($Target -eq 'brain') { $dirs += "$remote/deploy/mosquitto/certs", "$remote/deploy/mosquitto/data" }
+$dirs = @("$remote/services", "$remote/tools")
+if ($Target -eq 'brain') { $dirs += "$remote/deploy/mosquitto" }
 Invoke-Native 'ssh' @($dest, "mkdir -p $($dirs -join ' ')")
-if ($Target -eq 'brain') {
-    # A previous deploy left these owned by uid 1883 (mode 600); take them back so scp can overwrite, we re-lock below.
-    Invoke-Native 'ssh' @($dest, "sudo -n chown -R `$(id -u):`$(id -g) $remote/deploy/mosquitto/data $remote/deploy/mosquitto/certs 2>/dev/null || true")
-}
 
 foreach ($i in $items) {
     $src = Join-Path $root $i
@@ -66,17 +61,6 @@ foreach ($i in $items) {
     $rdir = if ($parent) { "$remote/$parent/" } else { "$remote/" }
     $flags = @(); if ($isDir) { $flags = @('-r') }
     Invoke-Native 'scp' ($flags + @('-q', $src, "$dest`:$rdir"))
-}
-foreach ($f in $secretFiles) {
-    $src = Join-Path $root $f
-    if (-not (Test-Path $src)) { Write-Warning "missing $f (run deploy\mosquitto\new-certs.ps1 / dynsec-bootstrap.ps1 first)"; continue }
-    Invoke-Native 'scp' @('-q', $src, "$dest`:$remote/$($f.Replace('\', '/'))")
-}
-if ($Target -eq 'brain') {
-    # The broker container runs as uid 1883. Private material is owned by that uid with mode 600; the CA cert is public (644).
-    # Needs passwordless sudo on the node (sudo -n). The ssh user itself can then no longer read server.key/dynamic-security.json (use sudo).
-    $m = "$remote/deploy/mosquitto"
-    Invoke-Native 'ssh' @($dest, "sudo -n chown -R 1883:1883 $m/data $m/certs/server.key && sudo -n chmod 600 $m/certs/server.key $m/data/dynamic-security.json && chmod 644 $m/certs/ca.crt $m/certs/server.crt")
 }
 if ($Up) {
     $cd = if ($Target -eq 'brain') { "$remote/deploy" } else { "$remote/services/$($services[$Target][0])" }
