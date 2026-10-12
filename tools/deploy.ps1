@@ -52,6 +52,10 @@ Write-Host "Deploying '$Target' to $dest`:$remote"
 $dirs = @("$remote/services")
 if ($Target -eq 'brain') { $dirs += "$remote/deploy/mosquitto/certs", "$remote/deploy/mosquitto/data" }
 Invoke-Native 'ssh' @($dest, "mkdir -p $($dirs -join ' ')")
+if ($Target -eq 'brain') {
+    # A previous deploy left these owned by uid 1883 (mode 600); take them back so scp can overwrite, we re-lock below.
+    Invoke-Native 'ssh' @($dest, "sudo -n chown -R `$(id -u):`$(id -g) $remote/deploy/mosquitto/data $remote/deploy/mosquitto/certs 2>/dev/null || true")
+}
 
 foreach ($i in $items) {
     $src = Join-Path $root $i
@@ -69,9 +73,10 @@ foreach ($f in $secretFiles) {
     Invoke-Native 'scp' @('-q', $src, "$dest`:$remote/$($f.Replace('\', '/'))")
 }
 if ($Target -eq 'brain') {
-    # The container runs as uid 1883 (not the ssh user), so the key must be world-readable on the node.
-    # Acceptable on a single-user Pi; tighten with chown 1883 + 600 if the host is shared.
-    Invoke-Native 'ssh' @($dest, "chmod 644 $remote/deploy/mosquitto/certs/server.key $remote/deploy/mosquitto/certs/*.crt; chmod 666 $remote/deploy/mosquitto/data/dynamic-security.json")
+    # The broker container runs as uid 1883. Private material is owned by that uid with mode 600; the CA cert is public (644).
+    # Needs passwordless sudo on the node (sudo -n). The ssh user itself can then no longer read server.key/dynamic-security.json (use sudo).
+    $m = "$remote/deploy/mosquitto"
+    Invoke-Native 'ssh' @($dest, "sudo -n chown -R 1883:1883 $m/data $m/certs/server.key && sudo -n chmod 600 $m/certs/server.key $m/data/dynamic-security.json && chmod 644 $m/certs/ca.crt $m/certs/server.crt")
 }
 if ($Up) {
     $cd = if ($Target -eq 'brain') { "$remote/deploy" } else { "$remote/services/$($services[$Target][0])" }

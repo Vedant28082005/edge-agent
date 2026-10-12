@@ -15,7 +15,7 @@ cd deploy; docker compose -f compose.yml -f compose.dev.yml up -d
 cd ..; deploy\mosquitto\acl-test.ps1
 ```
 
-All generated material (`certs/`, `data/`, `.env`) is git-ignored. `certs\ca\ca.key` never leaves the PC; `tools\deploy.ps1 brain` copies only `ca.crt`, `server.crt`, `server.key` and `dynamic-security.json`.
+All generated material (`certs/`, `data/`, `.env`) is git-ignored. `certs\ca\ca.key` never leaves the PC; `tools\deploy.ps1 brain` copies only `ca.crt`, `server.crt`, `server.key` and `dynamic-security.json`, then on the Pi sets `server.key`, `dynamic-security.json` and `data/` to owner uid 1883 (the container user) with mode 600 via `sudo -n chown/chmod` (needs passwordless sudo for the deploy user). Afterwards the ssh user can only read them with sudo. On the PC, `new-certs.ps1` restricts the key files to your Windows user; Windows cannot set uid 1883 and Docker Desktop's bind mount does not enforce POSIX ownership, so the ownership rule applies on the Pi only.
 
 ## Files
 

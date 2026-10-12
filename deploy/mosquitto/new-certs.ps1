@@ -13,7 +13,9 @@
   Needs openssl on PATH (Git for Windows ships one). Layout:
     certs/ca/ca.key, ca.crt   CA (ca.key never leaves this PC, deploy.ps1 does not copy it)
     certs/ca.crt              CA cert (broker truststore + goes into the BLE bundle)
-    certs/server.crt, server.key   broker cert and key
+    certs/server.crt, server.key   broker cert and key (Windows ACL: current user only)
+  Ownership by the container user (uid 1883, mode 600) cannot be set on Windows; tools\deploy.ps1 does it on the
+  Pi (sudo chown 1883:1883 + chmod 600). On Docker Desktop the bind mount ignores POSIX ownership.
   Server cert: RSA 2048, SHA-256, 825 days. CA: RSA 4096, 10 years.
 #>
 param(
@@ -66,5 +68,13 @@ if ($Force -or -not (Test-Path $srvCrt)) {
     Invoke-Ssl x509 -req -in $csr -CA $caCrt -CAkey $caKey -CAcreateserial -out $srvCrt -days 825 -sha256 -extfile $ext
     Remove-Item $csr, $ext -Force
     Write-Host "SANs: $san"
+}
+# Restrict private keys to the current Windows user (strip inherited ACEs).
+foreach ($k in @($caKey, (Join-Path $certs 'server.key'))) {
+    if (Test-Path $k) {
+        $ErrorActionPreference = 'Continue'
+        icacls $k /inheritance:r /grant:r "$($env:USERNAME):(R,W)" 2>&1 | Out-Null
+        $ErrorActionPreference = 'Stop'
+    }
 }
 Write-Host "Done. Certificates in $certs (git-ignored). Never commit them."
