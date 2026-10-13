@@ -1,0 +1,121 @@
+{
+  "description": "Reference consume semantics. Times are seconds after minting. Run in order within a scenario. 'granted' means HTTP 200, anything else is the 403 denial reason.",
+  "scenarios": [
+    {
+      "name": "happy path then replay",
+      "token": {
+        "user": "user:v",
+        "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ttl": 60
+      },
+      "calls": [
+        {
+          "at": 10,
+          "user": "user:v",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expect": "granted"
+        },
+        {
+          "at": 11,
+          "user": "user:v",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expect": "used"
+        }
+      ]
+    },
+    {
+      "name": "wrong user is unknown and does not burn",
+      "token": {
+        "user": "user:v",
+        "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ttl": 60
+      },
+      "calls": [
+        {
+          "at": 5,
+          "user": "user:eve",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expect": "unknown"
+        },
+        {
+          "at": 6,
+          "user": "user:v",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expect": "granted"
+        }
+      ]
+    },
+    {
+      "name": "hash mismatch burns the token (fail closed)",
+      "token": {
+        "user": "user:v",
+        "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ttl": 60
+      },
+      "calls": [
+        {
+          "at": 5,
+          "user": "user:v",
+          "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expect": "hash_mismatch"
+        },
+        {
+          "at": 6,
+          "user": "user:v",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expect": "used"
+        }
+      ]
+    },
+    {
+      "name": "wrong user plus wrong hash is unknown, token survives",
+      "token": {
+        "user": "user:v",
+        "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ttl": 60
+      },
+      "calls": [
+        {
+          "at": 5,
+          "user": "user:eve",
+          "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expect": "unknown"
+        },
+        {
+          "at": 6,
+          "user": "user:v",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expect": "granted"
+        }
+      ]
+    },
+    {
+      "name": "expired",
+      "token": {
+        "user": "user:v",
+        "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ttl": 60
+      },
+      "calls": [
+        {
+          "at": 61,
+          "user": "user:v",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expect": "expired"
+        }
+      ]
+    },
+    {
+      "name": "not minted",
+      "token": null,
+      "calls": [
+        {
+          "at": 1,
+          "user": "user:v",
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expect": "unknown"
+        }
+      ]
+    }
+  ]
+}

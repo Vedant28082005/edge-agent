@@ -323,19 +323,22 @@ paths:
         - serviceSecret: []
       description: |
         INTERNAL. Called by device-hub just before it executes a `risk: confirm` action.
-        Atomically validates and consumes a confirmation token. The check-and-mark-used is ONE atomic
-        operation (e.g. a single `UPDATE ... WHERE token_hash=? AND used=0 AND expires_at>? AND action_hash=?
-        AND user_id=?` and checking the affected-row count), so two concurrent calls can never both succeed.
+        Atomically validates and consumes a confirmation token, failing closed. The decision is ONE atomic
+        operation: `UPDATE tokens SET used=1 WHERE token_hash=? AND user_id=? AND used=0 AND expires_at>? RETURNING
+        action_hash`. If it affects no row the call is denied. If it affects one row the token is now burned, and
+        the returned `action_hash` is compared with the request's: equal means granted, different means
+        `hash_mismatch`. Two concurrent calls can therefore never both succeed.
         Only the gateway mints tokens (POST /confirmations); tokens are stored only as SHA-256 hashes.
 
         Denial reasons (HTTP 403, `consumed: false`):
         * `unknown`: no such token, or the token belongs to a different user (indistinguishable on purpose).
+          A wrong-user attempt does NOT burn the token, so a caller cannot destroy someone else's approval.
         * `expired`: past `expires_at` (default TTL 60 s from minting, configurable up to 300 s).
-        * `used`: already consumed.
-        * `hash_mismatch`: token is valid but was minted for a different action.
-        `hash_mismatch` and the user check do not burn the token (a 256-bit token cannot be guessed, and a
-        wrong caller must not be able to destroy the user's approval). Every attempt is audit-logged without
-        the token value.
+        * `used`: already consumed (including a token burned by an earlier `hash_mismatch`).
+        * `hash_mismatch`: the right user presented the token for a different action. **The token is burned**
+          (fail closed): the approval cannot be reused for another action, and a retry needs a new approval.
+        To tell `expired`/`used`/`unknown` apart after a zero-row update, do a read-only lookup; this lookup never
+        changes state. Every attempt is audit-logged without the token value.
 
         The action hash is defined in `mcp-tools.md` ("Canonical action hash") with test vectors in
         `samples/confirmation/hash-vectors.json`.

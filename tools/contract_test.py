@@ -141,6 +141,35 @@ for v in vec["vectors"]:
         failures += 1
         print(f"FAIL confirmation hash vector: {v['name']}")
 
+# --- consume semantics (reference implementation of the atomic rule in gateway.yaml) -----
+class RefTokenStore:
+    """One token. consume() mirrors: UPDATE ... SET used=1 WHERE user_id=? AND used=0 AND expires_at>? RETURNING hash."""
+
+    def __init__(self, token):
+        self.token = token
+        self.used = False
+
+    def consume(self, at, user, action_hash):
+        t = self.token
+        if t is not None and t["user"] == user and not self.used and at < t["ttl"]:
+            self.used = True  # burned whatever the hash turns out to be (fail closed)
+            return "granted" if t["hash"] == action_hash else "hash_mismatch"
+        if t is None or t["user"] != user:
+            return "unknown"
+        return "used" if self.used else "expired"
+
+
+scen = json.loads((contracts / "samples" / "confirmation" / "consume-scenarios.json").read_text(encoding="utf-8"))
+for sc in scen["scenarios"]:
+    store = RefTokenStore(sc["token"])
+    got = [store.consume(c["at"], c["user"], c["hash"]) for c in sc["calls"]]
+    want = [c["expect"] for c in sc["calls"]]
+    if got == want:
+        print(f"ok   consume scenario: {sc['name']}")
+    else:
+        failures += 1
+        print(f"FAIL consume scenario: {sc['name']}: got {got}, want {want}")
+
 # --- docs: no devices/ topics, exactly 5 MCP tools -------------------------------
 for doc in contracts.glob("*.md"):
     if re.search(r"home/v1/devices|[\s`]devices/\{", doc.read_text(encoding="utf-8")):
