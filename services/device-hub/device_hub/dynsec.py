@@ -98,7 +98,7 @@ class DynsecClient:
         session is replaced (credentials rotate). Returns the role name."""
         if not NODE_ID_RE.match(node_id):
             raise DynsecError("invalid node_id", 400)
-        SECRETS.add(password)
+        SECRETS.add(password, permanent=False)
         role = node_role_name(node_id)
         cmds = lambda: [  # noqa: E731
             {"command": "createRole", "rolename": role, "textdescription": f"ESP32 node {node_id}",

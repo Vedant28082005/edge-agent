@@ -53,7 +53,7 @@ class GatewayClient:
     def consume(self, token: str, user_id: str, action_hash: str) -> ConsumeResult:
         if not (isinstance(token, str) and TOKEN_RE.match(token)):
             return ConsumeResult(False, "invalid")
-        SECRETS.add(token)
+        SECRETS.add(token, permanent=False)
         if not (isinstance(user_id, str) and 1 <= len(user_id) <= 64) or not HASH_RE.match(action_hash):
             return ConsumeResult(False, "invalid")
         try:

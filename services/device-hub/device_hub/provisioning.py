@@ -49,13 +49,13 @@ class Provisioning:
         pv = self.cfg.provision
         if not pv.broker_host:
             raise HubError("not_configured", "provision.broker_host is not configured", 500)
-        SECRETS.add(wifi["password"])
+        SECRETS.add(wifi["password"], permanent=False)
         row = self.db.one("SELECT * FROM nodes WHERE node_id=?", (node_id,))
         if row is not None and not row["deleted"] and row["provisioned"] and self.registry.live.is_online(node_id):
             raise Conflict("node_online", "node is connected; unprovision it first")
         ca_pem = self._ca_pem()
         password = random_secret(24)
-        SECRETS.add(password)
+        SECRETS.add(password, permanent=False)
         bundle: dict[str, Any] = {
             "v": 1,
             "wifi": {"ssid": wifi["ssid"], "password": wifi["password"]},

@@ -163,7 +163,7 @@ def set_device(hub: Hub, r: Request, b: dict):
     hub.registry.get_endpoint(r.path_params["endpoint_id"])         # 404 for unknown
     tok = b.get("confirmation_token")
     if isinstance(tok, str):
-        SECRETS.add(tok)
+        SECRETS.add(tok, permanent=False)
     return hub.executor.set_state(r.path_params["endpoint_id"], b["capability"], b["value"],
                                   user_id=b.get("user_id") if isinstance(b.get("user_id"), str) else None,
                                   token=tok if isinstance(tok, str) else None)
@@ -212,7 +212,7 @@ def run_scene(hub: Hub, r: Request, b: dict):
         raise HubError("bad_request", "body must be {user_id?, confirmation_token?}")
     tok = b.get("confirmation_token")
     if isinstance(tok, str):
-        SECRETS.add(tok)
+        SECRETS.add(tok, permanent=False)
     res = hub.scenes.run_scene(r.path_params["scene_id"], user_id=b.get("user_id") if isinstance(b.get("user_id"), str) else None,
                                token=tok if isinstance(tok, str) else None)
     if res.get("error") == "unknown_scene":

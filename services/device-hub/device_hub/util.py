@@ -137,20 +137,30 @@ def run_scene_action(scene_id: str, risky: list[dict]) -> dict:
 # ------------------------------------------------------------------------------------------ secret redaction
 class SecretRegistry:
     """Process-wide set of secret strings that must never reach a log line. Values are registered when they are
-    created or read (MQTT passwords, service secret, Wi-Fi password, confirmation tokens)."""
+    created or read (MQTT passwords, service secret, Wi-Fi password, confirmation tokens). Short-lived ones (tokens,
+    Wi-Fi passwords seen in requests) live in a bounded FIFO so a long-running hub does not grow without limit."""
+
+    RECENT_MAX = 1024
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._secrets: set[str] = set()
+        self._permanent: set[str] = set()
+        self._recent: dict[str, None] = {}
 
-    def add(self, value: str | None) -> None:
+    def add(self, value: str | None, permanent: bool = True) -> None:
         if value and len(value) >= 6:
             with self._lock:
-                self._secrets.add(value)
+                if permanent:
+                    self._permanent.add(value)
+                else:
+                    self._recent.pop(value, None)
+                    self._recent[value] = None
+                    while len(self._recent) > self.RECENT_MAX:
+                        self._recent.pop(next(iter(self._recent)))
 
     def scrub(self, text: str) -> str:
         with self._lock:
-            known = list(self._secrets)
+            known = list(self._permanent) + list(self._recent)
         for s in known:
             if s in text:
                 text = text.replace(s, "[REDACTED]")
