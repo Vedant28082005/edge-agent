@@ -187,6 +187,11 @@ class CurtainMotor : public Actuator {
     return true;
   }
   bool reportsOwnState() const override { return true; }
+  float settleHintS() const override {
+    uint32_t m = cfg_.openMs > cfg_.closeMs ? cfg_.openMs : cfg_.closeMs;
+    if (m == 0) m = cfg_.maxRunMs;  // limit switches only: travel unknown until learned
+    return (float)(m + cfg_.deadMs) / 1000.0f;
+  }
   const CurtainController& controller() const { return ctl_; }
 
  private:

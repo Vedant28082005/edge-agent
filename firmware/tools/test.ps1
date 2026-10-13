@@ -43,6 +43,10 @@ try {
     Write-Host '--- contract validation of example output ---'
     & $py -I (Join-Path $PSScriptRoot 'check_contracts.py') $out (Join-Path $root 'contracts')
     $contract = $LASTEXITCODE
+    Write-Host ''
+    Write-Host '--- build-time clock floor (2026-10-01) ---'
+    & $py -I (Join-Path $PSScriptRoot 'test_build_floor.py')
+    if ($LASTEXITCODE -ne 0) { $contract = 1 }
 } finally { Pop-Location }
 
 if ($unit -ne 0 -or $contract -ne 0) { Write-Host "FAILED (unit tests: $unit, contract check: $contract)"; exit 1 }

@@ -81,6 +81,16 @@ class NodeCore {
   uint32_t identifyUntil_ = 0;
 };
 
+// What the node does on EVERY successful MQTT connect, in this order (contracts/mqtt.md, "Connect lifecycle").
+enum class ConnectStep : uint8_t { StatusOnline, Announce, SubscribeCmd, State };
+inline const ConnectStep* connectSequence(size_t& n) {
+  static const ConnectStep seq[] = {ConnectStep::StatusOnline, ConnectStep::Announce, ConnectStep::SubscribeCmd, ConnectStep::State};
+  n = sizeof seq / sizeof seq[0];
+  return seq;
+}
+// client_id == username == node_id, always.
+inline bool mqttIdentityOk(const std::string& nodeId, const std::string& user) { return !nodeId.empty() && nodeId == user; }
+
 // Command field helpers, exposed for tests.
 bool isValidUuid(const char* s);
 bool isValidBy(const char* s);

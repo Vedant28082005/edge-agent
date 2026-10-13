@@ -137,6 +137,14 @@ EndpointBuilder& EndpointBuilder::deadband(float d) {
   return *this;
 }
 
+EndpointBuilder& EndpointBuilder::settleS(float s) {
+  CapDef* c = last();
+  if (!c) return *this;
+  if (c->kind != CapKind::Actuator) { m_->addError("capability '" + c->id + "': settle_s applies to actuators only"); return *this; }
+  c->settleS = s;
+  return *this;
+}
+
 EndpointBuilder& EndpointBuilder::addButton(const char* capId, int pin, bool activeLow, ButtonDef::Mode mode) {
   int idx = ep_->findCap(capId ? capId : "");
   if (idx < 0) {
@@ -217,6 +225,9 @@ bool NodeModel::validate() {
         if (c.hasFailsafe && !inRange(c.failsafe)) addError(w + "failsafe_value outside the range");
         if (c.maxOnS > 86400) addError(w + "max_on_s must be <= 86400");
         if (c.intervalS) addError(w + "interval_s is for sensors");
+        if (c.settleS != 0 && (c.settleS < 1 || c.settleS > 120)) addError(w + "settle_s must be 1..120");
+        if (c.id == "position" && c.settleS == 0) addError(w + "position needs settle_s (settleS())");
+        if (c.settleS != 0 && c.act->settleHintS() > c.settleS) addError(w + "settle_s is shorter than the driver's worst-case motion time");
       } else {
         if (!c.sens) { addError(w + "no driver"); continue; }
         std::string de;

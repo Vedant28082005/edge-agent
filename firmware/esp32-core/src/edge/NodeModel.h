@@ -35,6 +35,8 @@ struct CapDef {
   uint32_t maxOnS = 0;
   bool maxOnSet = false;
   float deadband = 0;
+  float settleS = 0;       // actuators: worst-case seconds to reach a target (announce settle_s); 0 = not announced
+  bool localOverride = false;  // a physical press happened: failsafe is cancelled for this capability until the hub next sets it
   std::unique_ptr<Actuator> act;
   std::unique_ptr<SensorDriver> sens;
 
@@ -149,6 +151,7 @@ class EndpointBuilder {
   EndpointBuilder& maxOnS(uint32_t s);         // bool actuators only; 0 = unlimited
   EndpointBuilder& unit(const char* u);        // overrides the vocabulary default
   EndpointBuilder& deadband(float d);          // sensors: smallest change that is published
+  EndpointBuilder& settleS(float s);           // actuators: worst-case seconds to reach a commanded target (required for position)
 
   // ---- local controls (work offline) --------------------------------------------------------------
   // Pushbutton to GND (internal pull-up): toggles a bool capability / steps an int capability min..max and wraps.

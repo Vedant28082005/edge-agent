@@ -168,7 +168,7 @@ void test_new_target_while_moving_the_same_way_retargets_without_stopping() {
 
 void test_unsupported_midway_target_without_calibration_is_an_error_code() {
   EdgeNode node;
-  node.endpoint("c1", COVER).intCap("position", 0, 100, CurtainMotor(OPEN, CLOSE).limitSwitches(LIM_OPEN, LIM_CLOSED).maxRun(20000)).bootValue(0);
+  node.endpoint("c1", COVER).intCap("position", 0, 100, CurtainMotor(OPEN, CLOSE).limitSwitches(LIM_OPEN, LIM_CLOSED).maxRun(20000)).bootValue(0).settleS(30);
   TEST_ASSERT_TRUE(node.core().begin(0));
   fh->level[LIM_OPEN] = true;
   fh->level[LIM_CLOSED] = true;
@@ -191,7 +191,7 @@ void test_declaration_errors() {
 
 void test_position_reported_through_the_node_state() {
   EdgeNode node;
-  node.endpoint("c1", COVER).intCap("position", 0, 100, calibrated()).bootValue(0);
+  node.endpoint("c1", COVER).intCap("position", 0, 100, calibrated()).bootValue(0).settleS(30);
   TEST_ASSERT_TRUE(node.core().begin(0));
   send(node.core(), cmdSet(1, "c1", "{\"position\":100}"), 100);
   for (uint32_t t = 100; t < 11000; t += 20) node.core().tick(t, true);

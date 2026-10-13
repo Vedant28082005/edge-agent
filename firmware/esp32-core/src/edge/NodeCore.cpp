@@ -103,6 +103,7 @@ void NodeCore::runButtons(EndpointDef& ep, uint32_t now) {
       v = Value::makeInt(nx > (int32_t)c.hi ? (int32_t)c.lo : nx);
     }
     setActuator(c, v, now, false);
+    c.localOverride = true;  // the person's choice beats failsafe until the hub next sets this capability
     dirty_ = true;
   }
 }
@@ -111,7 +112,7 @@ bool NodeCore::failsafeNow(uint32_t now) {
   bool any = false;
   for (auto& ep : m_.endpoints)
     for (auto& c : ep->caps)
-      if (c.kind == CapKind::Actuator && c.hasFailsafe) {
+      if (c.kind == CapKind::Actuator && c.hasFailsafe && !c.localOverride) {
         setActuator(c, c.failsafe, now, false);
         any = true;
       }
@@ -237,6 +238,7 @@ std::string NodeCore::announceJson(const std::string& nodeId) const {
         putValue(co, "boot_value", c, c.boot);
         if (c.hasFailsafe) putValue(co, "failsafe_value", c, c.failsafe);
         if (c.type == CapType::Bool) co["max_on_s"] = c.maxOnS;
+        if (c.settleS != 0) co["settle_s"] = c.settleS;
       }
     }
   }
@@ -412,6 +414,7 @@ NodeCore::Outcome NodeCore::handleCommand(const char* payload, size_t len, uint3
     todo.push_back({&c, v});
   }
   for (const Pending& p : todo) {
+    p.cap->localOverride = false;  // the hub is in charge of this capability again: failsafe re-armed
     ApplyResult r = setActuator(*p.cap, p.v, now, false);
     if (r == ApplyResult::Unsupported) return finish(UNSUPPORTED, ep.localId.c_str(), nullptr);
     if (r == ApplyResult::Busy) return finish(BUSY, ep.localId.c_str(), nullptr);

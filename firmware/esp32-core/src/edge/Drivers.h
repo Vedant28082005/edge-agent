@@ -29,6 +29,8 @@ class Actuator {
   virtual bool pollChanged(Value& out) { (void)out; return false; }
   // True if the real state differs from what was commanded and is reported via pollChanged (curtain).
   virtual bool reportsOwnState() const { return false; }
+  // Worst-case seconds for a commanded motion to finish (0 = instantaneous). Used to check the declared settle_s.
+  virtual float settleHintS() const { return 0.0f; }
 };
 
 class SensorDriver {

@@ -315,8 +315,71 @@ void test_node_id_and_string_validators() {
   TEST_ASSERT_TRUE(isValidFwString("1.2.3-rc1+x")); TEST_ASSERT_FALSE(isValidFwString("1_2"));
 }
 
+// ---- connect lifecycle, identity, settle_s ------------------------------------------------------------------------
+
+void test_connect_sequence_is_status_announce_subscribe_state() {
+  size_t n = 0;
+  const ConnectStep* s = connectSequence(n);
+  TEST_ASSERT_EQUAL(4, (int)n);
+  TEST_ASSERT_EQUAL((int)ConnectStep::StatusOnline, (int)s[0]);
+  TEST_ASSERT_EQUAL((int)ConnectStep::Announce, (int)s[1]);
+  TEST_ASSERT_EQUAL((int)ConnectStep::SubscribeCmd, (int)s[2]);
+  TEST_ASSERT_EQUAL((int)ConnectStep::State, (int)s[3]);
+}
+
+void test_client_id_username_node_id_must_match() {
+  TEST_ASSERT_TRUE(mqttIdentityOk("esp32-a1b2c3d4e5f6", "esp32-a1b2c3d4e5f6"));
+  TEST_ASSERT_FALSE(mqttIdentityOk("esp32-a1b2c3d4e5f6", "esp32-000000000000"));
+  TEST_ASSERT_FALSE(mqttIdentityOk("", ""));
+  MemConfigStore store;
+  ConfigShell s(store, "esp32-a1b2c3d4e5f6");
+  fillShell(s);  // fillShell uses mqtt_user esp32-a1b2c3d4e5f6
+  TEST_ASSERT_EQUAL_STRING("ok saved, rebooting", sh(s, "save").c_str());
+  sh(s, "set mqtt_user somebody-else");
+  TEST_ASSERT_EQUAL_STRING("err invalid mqtt_user (must be the node id)", sh(s, "save").c_str());
+}
+
+static CurtainMotor tenSecondCurtain() { return CurtainMotor(26, 27).travelTime(10000, 10000); }
+
+void test_settle_s_is_announced_and_position_requires_it() {
+  FakeHal h;
+  setHal(&h);
+  { EdgeNode n; n.endpoint("c", COVER).intCap("position", 0, 100, tenSecondCurtain()); TEST_ASSERT_FALSE(n.core().begin(0)); TEST_ASSERT_TRUE(hasError(n, "settle_s")); }
+  { EdgeNode n; n.endpoint("c", COVER).intCap("position", 0, 100, tenSecondCurtain()).settleS(0.5f); TEST_ASSERT_FALSE(n.core().begin(0)); }
+  { EdgeNode n; n.endpoint("c", COVER).intCap("position", 0, 100, tenSecondCurtain()).settleS(121); TEST_ASSERT_FALSE(n.core().begin(0)); }
+  { EdgeNode n; n.endpoint("c", COVER).intCap("position", 0, 100, CurtainMotor(26, 27).travelTime(40000, 40000)).settleS(30); TEST_ASSERT_FALSE(n.core().begin(0)); }  // shorter than the motion
+  { EdgeNode n; n.endpoint("s", SENSOR).floatSensor("temperature", FakeSensor(), 30).settleS(5); TEST_ASSERT_FALSE(n.model().validate()); }
+  EdgeNode n;
+  n.endpoint("c", COVER).intCap("position", 0, 100, CurtainMotor(26, 27).travelTime(20000, 20000)).bootValue(0).settleS(30);
+  TEST_ASSERT_TRUE(n.core().begin(0));
+  JsonDocument a = parse(n.announce("esp32-a1b2c3d4e5f6"));
+  TEST_ASSERT_EQUAL(30, a["endpoints"][0]["capabilities"][0]["settle_s"].as<int>());
+}
+
+void test_curtain_ack_means_accepted_with_target_while_state_stays_estimated() {
+  FakeHal h;
+  setHal(&h);
+  EdgeNode n;
+  n.endpoint("c", COVER).intCap("position", 0, 100, tenSecondCurtain()).bootValue(0).settleS(30);
+  TEST_ASSERT_TRUE(n.core().begin(0));
+  JsonDocument a = parse(send(n.core(), cmdSet(1, "c", "{\"position\":80}"), 100).ack);
+  TEST_ASSERT_TRUE(a["ok"].as<bool>());
+  TEST_ASSERT_EQUAL(80, a["values"]["position"].as<int>());  // ack echoes the accepted target
+  TEST_ASSERT_TRUE(h.high(26));                              // motion started
+  TEST_ASSERT_EQUAL(0, n.core().value("c", "position")->i);  // state: still the estimate, not the target
+  for (uint32_t t = 100; t < 3100; t += 20) n.core().tick(t, true);
+  int mid = n.core().value("c", "position")->i;
+  TEST_ASSERT_TRUE(mid > 0 && mid < 80);  // progress is reported while moving
+  for (uint32_t t = 3100; t < 9000; t += 20) n.core().tick(t, true);
+  TEST_ASSERT_INT_WITHIN(2, 80, n.core().value("c", "position")->i);
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_connect_sequence_is_status_announce_subscribe_state);
+  RUN_TEST(test_client_id_username_node_id_must_match);
+  RUN_TEST(test_settle_s_is_announced_and_position_requires_it);
+  RUN_TEST(test_curtain_ack_means_accepted_with_target_while_state_stays_estimated);
   RUN_TEST(test_time_before_build_timestamp_is_rejected);
   RUN_TEST(test_time_far_in_the_future_is_rejected);
   RUN_TEST(test_a_clock_that_moves_back_past_the_build_time_is_rejected_again);

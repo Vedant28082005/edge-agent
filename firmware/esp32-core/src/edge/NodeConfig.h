@@ -42,13 +42,14 @@ class MemConfigStore : public ConfigStore {
 // keys: wifi_ssid wifi_pass mqtt_host mqtt_port mqtt_user mqtt_pass ntp_host
 class ConfigShell {
  public:
-  explicit ConfigShell(ConfigStore& store);
+  explicit ConfigShell(ConfigStore& store, const std::string& requiredUser = "");
   // Returns the reply line. Sets reboot when the caller should restart the chip after printing it.
   std::string handleLine(const std::string& line, bool& reboot);
   const NodeConfig& draft() const { return draft_; }
 
  private:
   ConfigStore& store_;
+  std::string requiredUser_;  // if set, mqtt_user must equal it (client_id == username == node_id)
   NodeConfig draft_;
   std::string caBuf_;
   bool inCa_ = false;

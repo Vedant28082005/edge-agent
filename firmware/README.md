@@ -92,8 +92,9 @@ Fan speed 1..5 maps to 20 %..100 % duty: check that your fan starts at 20 %, oth
   Learned times are kept in RAM only (lost at reboot).
 * `maxRun` always applies (default 150 % of the slowest travel). If the limit switch never fires the motor stops and a fault flag is set.
 * `boot_value` is the **assumed** position; the curtain never moves at boot. `failsafe_value`, if declared, does move it.
-* The cover `position` in `state` is the estimated current position (updated while moving, at stop). The ack `values` echo
-  the accepted target. A hub read-back verify therefore differs from the ack while the curtain is moving.
+* `position` needs `settle_s` (contract v2): `.settleS(30)` is announced, and validation rejects a value shorter than the driver's
+  worst-case motion (longest travel + dead time). The ack means "accepted, motion started" and echoes the accepted target;
+  `state` reports the estimated position as it moves and at stop.
 
 ## State machine (as built)
 
@@ -101,13 +102,16 @@ Fan speed 1..5 maps to 20 %..100 % duty: check that your fan starts at 20 %, oth
 begin(): validate declaration -> apply boot_value to every actuator -> start tasks
 net task:  UNCONFIGURED (no/invalid NVS config: serial shell only, LED 2 Hz)
            -> WIFI -> NTP (until time is plausible; no TLS before) -> MQTT_TLS (CA verified, LWT offline)
-           -> ANNOUNCE (retained) -> subscribe cmd -> publish state -> status "online" -> RUN
+           -> on EVERY connect, in this order: status "online" (retained) -> retained announce -> subscribe cmd -> state -> RUN
 RUN:       state on change (>= 250 ms apart) + heartbeat; acks after the state they belong to;
            link/Wi-Fi/clock lost -> teardown -> exponential backoff (1 s .. 60 s, +-20 % jitter) -> back to WIFI/NTP/MQTT
 actuator task (prio 3, 20 ms): commands, local buttons, driver ticks, max_on_s, failsafe, status LED
 sensor task   (prio 1, 20 ms): due sensors are read outside the lock and submitted
 ```
 
+* **Connection**: clean session; client_id == username == node_id (the node refuses a stored `mqtt_user` that differs; the shell's
+  `save` rejects it too). Nothing is queued while offline: the client is destroyed on every teardown, state/acks are only published
+  while connected, and acks left over from before a reconnect are dropped.
 * **Time rule**: NTP time is accepted only if `FW_BUILD_TS <= t < FW_BUILD_TS + 50 years`
   (`timePlausible`, host-tested). It is re-checked every 10 s in RUN; if the clock goes implausible the node publishes
   `offline`, leaves the TLS session and returns to NTP. Certificate verification and its date checks are never disabled.
@@ -117,9 +121,14 @@ sensor task   (prio 1, 20 ms): due sensors are read outside the lock and submitt
   `cmd_id`s: a duplicate gets the stored ack again and is not applied again. Payloads without a valid uuid `cmd_id` cannot be
   acknowledged and are dropped. `identify` blinks the status LED; `unprovision` acks, publishes `offline`, wipes NVS, reboots.
 * **Safety** (all enforced on the node, no hub needed): `boot_value` at boot (before any network), `failsafe_value` once per
-  outage after `failsafe_after_s` without the MQTT session (counted from boot if the hub was never reached; 0 = keep last),
-  `max_on_s` forced off after a continuous on-time (a repeated "on" does not restart it; off then on does).
-* "Hub connection" = the MQTT session to the broker. A dead hub behind a live broker is **not** detected (see decisions in the report).
+  outage after `failsafe_after_s` without the MQTT session (counted from boot if the hub was never reached; 0 = keep last).
+  **A physical press wins**: a local press on a capability cancels its pending failsafe until the hub next sends a command that sets
+  that capability (then it is armed again); a press after the failsafe was applied just sets the new value.
+  `max_on_s` is always enforced: forced off after a continuous on-time whatever turned it on (hub, press, `boot_value`,
+  `failsafe_value`); a repeated "on" does not restart it, off then on does.
+* "Hub connection" = the MQTT session to the broker (contract: broker-level liveness in v1). A dead hub behind a live broker does not trigger failsafe.
+* **Build-time check**: `scripts/fw_build_ts.py` aborts the build if the PC clock is earlier than 2026-10-01T00:00:00Z (1790812800);
+  tested by `tools	est_build_floor.py`.
 * Tasks never share state without the mutex; acks are never queued across a reconnect; commands are never queued for later.
 
 ## Serial configuration (until S2b)

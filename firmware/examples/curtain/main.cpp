@@ -6,6 +6,8 @@
 // and the times are learned from full runs.
 //
 // boot_value is the ASSUMED position at power-up (the curtain does not move at boot).
+// settle_s (required for position) is announced; the ack means "accepted, motion started" and echoes the target,
+// while state reports the estimated position as the curtain moves.
 #ifdef ARDUINO
 #include <Arduino.h>
 #endif
@@ -23,7 +25,8 @@ void declareDevice() {
                   .travelTime(20000 /*open ms*/, 20000 /*close ms*/)
                   .maxRun(30000)
                   .deadTime(500))
-      .bootValue(0);
+      .bootValue(0)
+      .settleS(30);  // worst case: 20 s travel + dead time + margin; the hub verifies convergence within this
 }
 
 #ifndef EDGE_NATIVE_TEST

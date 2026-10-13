@@ -236,8 +236,139 @@ void test_local_press_marks_state_dirty_for_publishing() {
   TEST_ASSERT_TRUE(rig->core().dirty());
 }
 
+// ---- local press wins over failsafe; max_on_s is never overridden ----------------------------------------------
+
+void test_local_press_cancels_the_pending_failsafe_for_that_capability() {
+  make(60);
+  rig->begin(0);
+  rig->hal.level[33] = true;  // buttons idle (released) from the start
+  rig->hal.level[32] = true;
+  cmdPower(20, true, 10);
+  rig->core().tick(20, true);     // hub up
+  rig->core().tick(1000, false);  // link lost at t=1000
+  rig->hal.level[33] = true;
+  rig->core().tick(2000, false);  // learn idle level
+  uint32_t t = 2000;
+  press(t, 33);  // person presses: power goes OFF (it was on)
+  press(t, 33);  // ... and ON again: their final choice
+  TEST_ASSERT_TRUE(power());
+  rig->core().tick(1000 + 60000, false);  // failsafe time
+  rig->core().tick(1000 + 120000, false);
+  TEST_ASSERT_TRUE(power());  // failsafe_value (off) did NOT override the person
+}
+
+void test_press_protects_only_the_capability_that_was_pressed() {
+  make(60);
+  rig->begin(0);
+  rig->hal.level[33] = true;  // buttons idle (released) from the start
+  rig->hal.level[32] = true;
+  send(rig->core(), cmdSet(21, "ch1", "{\"power\":true}"), 10);
+  rig->core().tick(20, true);
+  rig->core().tick(100, false);
+  rig->hal.level[32] = true;
+  rig->core().tick(150, false);
+  uint32_t t = 150;
+  press(t, 32);  // speed button only
+  rig->core().tick(100 + 60000, false);
+  TEST_ASSERT_FALSE(power());  // power had no local press: failsafe still applies
+}
+
+void test_hub_command_rearms_failsafe_after_a_local_press() {
+  make(60);
+  rig->begin(0);
+  rig->hal.level[33] = true;  // buttons idle (released) from the start
+  rig->hal.level[32] = true;
+  rig->core().tick(10, true);
+  rig->core().tick(100, false);
+  rig->hal.level[33] = true;
+  rig->core().tick(150, false);
+  uint32_t t = 150;
+  press(t, 33);  // person turns it on during the outage
+  rig->core().tick(100 + 60000, false);
+  TEST_ASSERT_TRUE(power());
+  rig->core().tick(70000, true);  // hub is back; the press keeps its cancellation
+  cmdPower(22, true, 70100);      // the hub sets power again: failsafe armed again
+  rig->core().tick(80000, false);
+  rig->core().tick(80000 + 60000, false);
+  TEST_ASSERT_FALSE(power());
+}
+
+void test_press_after_failsafe_applied_just_sets_the_new_value() {
+  make(60);
+  rig->begin(0);
+  rig->hal.level[33] = true;  // buttons idle (released) from the start
+  rig->hal.level[32] = true;
+  cmdPower(23, true, 10);
+  rig->core().tick(20, true);
+  rig->core().tick(100, false);
+  rig->core().tick(100 + 60000, false);
+  TEST_ASSERT_FALSE(power());  // failsafe applied
+  rig->hal.level[33] = true;
+  rig->core().tick(100 + 61000, false);
+  uint32_t t = 100 + 61000;
+  press(t, 33);
+  TEST_ASSERT_TRUE(power());
+  rig->core().tick(t + 120000, false);
+  TEST_ASSERT_TRUE(power());  // and failsafe does not fire again in this outage
+}
+
+void test_max_on_overrides_a_local_press() {
+  make(0, 100);
+  rig->begin(0);
+  rig->hal.level[33] = true;
+  rig->core().tick(10, false);
+  uint32_t t = 10;
+  rig->hal.level[33] = false;
+  rig->core().tick(t += 10, false);
+  rig->core().tick(t += 50, false);
+  TEST_ASSERT_TRUE(power());
+  uint32_t onAt = t;
+  rig->core().tick(onAt + 99999, false);
+  TEST_ASSERT_TRUE(power());
+  rig->core().tick(onAt + 100000, false);
+  TEST_ASSERT_FALSE(power());
+}
+
+void test_max_on_overrides_boot_value_true() {
+  FakeHal hal;
+  setHal(&hal);
+  EdgeNode n;
+  n.endpoint("h", OUTLET).boolCap("power", RelayOut(18)).bootValue(true).maxOnS(50);
+  n.core().begin(1000);
+  n.core().tick(1000 + 49999, true);
+  TEST_ASSERT_TRUE(n.core().value("h", "power")->b);
+  n.core().tick(1000 + 50000, true);
+  TEST_ASSERT_FALSE(n.core().value("h", "power")->b);
+  setHal(nullptr);
+}
+
+void test_max_on_overrides_failsafe_value_true() {
+  FakeHal hal;
+  setHal(&hal);
+  EdgeNode n;
+  n.failsafeAfter(10);
+  n.endpoint("h", OUTLET).boolCap("power", RelayOut(18)).bootValue(false).failsafeValue(true).maxOnS(30);
+  n.core().begin(0);
+  n.core().tick(10000, false);  // failsafe turns it on
+  TEST_ASSERT_TRUE(n.core().value("h", "power")->b);
+  n.core().tick(10000 + 29999, false);
+  TEST_ASSERT_TRUE(n.core().value("h", "power")->b);
+  n.core().tick(10000 + 30000, false);
+  TEST_ASSERT_FALSE(n.core().value("h", "power")->b);
+  n.core().tick(10000 + 90000, false);  // and nothing turns it back on
+  TEST_ASSERT_FALSE(n.core().value("h", "power")->b);
+  setHal(nullptr);
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_local_press_cancels_the_pending_failsafe_for_that_capability);
+  RUN_TEST(test_press_protects_only_the_capability_that_was_pressed);
+  RUN_TEST(test_hub_command_rearms_failsafe_after_a_local_press);
+  RUN_TEST(test_press_after_failsafe_applied_just_sets_the_new_value);
+  RUN_TEST(test_max_on_overrides_a_local_press);
+  RUN_TEST(test_max_on_overrides_boot_value_true);
+  RUN_TEST(test_max_on_overrides_failsafe_value_true);
   RUN_TEST(test_boot_value_true_is_applied_in_begin_before_any_tick);
   RUN_TEST(test_relay_pin_is_safe_before_it_is_switched);
   RUN_TEST(test_failsafe_fires_exactly_at_threshold_and_once);

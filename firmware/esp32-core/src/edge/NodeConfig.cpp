@@ -34,7 +34,7 @@ std::string NodeConfig::validate() const {
   return "";
 }
 
-ConfigShell::ConfigShell(ConfigStore& store) : store_(store) { store_.load(draft_); }
+ConfigShell::ConfigShell(ConfigStore& store, const std::string& requiredUser) : store_(store), requiredUser_(requiredUser) { store_.load(draft_); }
 
 static std::string trimEol(const std::string& s) {
   size_t e = s.size();
@@ -109,6 +109,7 @@ std::string ConfigShell::handleLine(const std::string& raw, bool& reboot) {
   }
   if (cmd == "save") {
     std::string bad = draft_.validate();
+    if (bad.empty() && !requiredUser_.empty() && draft_.mqttUser != requiredUser_) bad = "mqtt_user (must be the node id)";
     if (!bad.empty()) return "err invalid " + bad;
     if (!store_.save(draft_)) return "err storage_failed";
     reboot = true;

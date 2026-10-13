@@ -72,8 +72,12 @@ bool EdgeNode::begin() {
 
   store_ = new NvsConfigStore();
   auto* st = static_cast<NvsConfigStore*>(store_);
-  shell_ = new ConfigShell(*st);
+  shell_ = new ConfigShell(*st, nodeId_);
   cfgOk_ = st->load(cfg_) && cfg_.complete() && cfg_.validate().empty();
+  if (cfgOk_ && !mqttIdentityOk(nodeId_, cfg_.mqttUser)) {
+    logf("stored mqtt_user is not this node's id (%s): refusing to connect", nodeId_.c_str());
+    cfgOk_ = false;
+  }
   core_.setPhase(cfgOk_ ? NetPhase::Wifi : NetPhase::Unconfigured);
 
   logf("node %s fw %s, %u endpoint(s), announce %u bytes", nodeId_.c_str(), model_.fw.c_str(),
@@ -292,9 +296,10 @@ bool EdgeNode::mqttConnect() {
   c.transport = MQTT_TRANSPORT_OVER_SSL;
   c.cert_pem = cfg_.caPem.c_str();          // verify the broker certificate against the stored CA
   c.skip_cert_common_name_check = false;     // host name must match the certificate; never disabled
-  c.username = cfg_.mqttUser.c_str();
+  c.username = nodeId_.c_str();
   c.password = cfg_.mqttPass.c_str();
-  c.client_id = nodeId_.c_str();
+  c.client_id = nodeId_.c_str();             // client_id == username == node_id
+  c.disable_clean_session = false;           // clean session: the cmd topic is never retained, nothing to resume
   c.lwt_topic = tStatus_.c_str();
   c.lwt_msg = "offline";
   c.lwt_msg_len = 7;
@@ -336,6 +341,8 @@ void EdgeNode::teardownMqtt(bool publishOffline) {
 bool EdgeNode::pub(const std::string& topic, const std::string& payload, int qos, bool retain) {
   auto cl = static_cast<esp_mqtt_client_handle_t>(client_);
   if (!cl || !mqttUp_) return false;
+  // Never called while disconnected (mqttUp_), and the client is destroyed on every teardown, so nothing is
+  // queued across an outage; the outbox only serves QoS 1 retransmission inside one live session.
   return esp_mqtt_client_enqueue(cl, topic.c_str(), payload.data(), (int)payload.size(), qos, retain ? 1 : 0, true) >= 0;
 }
 
@@ -359,14 +366,29 @@ void EdgeNode::drainAcks(bool publish) {
 }
 
 bool EdgeNode::mqttSetup() {
-  drainAcks(false);
-  std::string ann;
-  { Lock l(mu_); ann = core_.announceJson(nodeId_); }
-  if (!pub(tAnnounce_, ann, 1, true)) { logf("announce failed"); return false; }
+  drainAcks(false);  // acks from before this connection are dropped, never replayed
   auto cl = static_cast<esp_mqtt_client_handle_t>(client_);
-  if (esp_mqtt_client_subscribe(cl, tCmd_.c_str(), 1) < 0) { logf("subscribe failed"); return false; }
-  publishState();
-  if (!pub(tStatus_, "online", 1, true)) return false;
+  size_t n = 0;
+  const ConnectStep* seq = connectSequence(n);  // status online, announce, subscribe cmd, state (host-tested order)
+  for (size_t k = 0; k < n; k++) {
+    switch (seq[k]) {
+      case ConnectStep::StatusOnline:
+        if (!pub(tStatus_, "online", 1, true)) { logf("status failed"); return false; }
+        break;
+      case ConnectStep::Announce: {
+        std::string ann;
+        { Lock l(mu_); ann = core_.announceJson(nodeId_); }
+        if (!pub(tAnnounce_, ann, 1, true)) { logf("announce failed"); return false; }
+        break;
+      }
+      case ConnectStep::SubscribeCmd:
+        if (esp_mqtt_client_subscribe(cl, tCmd_.c_str(), 1) < 0) { logf("subscribe failed"); return false; }
+        break;
+      case ConnectStep::State:
+        publishState();
+        break;
+    }
+  }
   return true;
 }
 
