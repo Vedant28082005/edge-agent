@@ -58,7 +58,7 @@ Subscribing to `cmd` only after the announce means the hub never sends a command
 {"cmd_id": "...", "cmd": "identify", "duration_s": 10}
 {"cmd_id": "...", "cmd": "unprovision"}
 ```
-`by` is `user:<name>`, `agent`, `scene:<id>` or `rule:<id>`. Nodes dedup on `cmd_id`, validate against their own ranges, apply, publish state, ack. A cmd is never retained or queued by the hub for offline nodes.
+`by` is `user:<name>`, `agent`, `scene:<id>` or `rule:<id>`. Nodes validate against their own ranges, apply, publish state, ack. **Dedup:** a node keeps the last **16** `cmd_id`s with their cached acks (count-based ring, no TTL, not persisted across reboot). A repeated `cmd_id` is not applied again; the node replays the cached ack. The hub never reuses a `cmd_id` (UUIDv4, one per command). A cmd is never retained or queued by the hub for offline nodes.
 
 **ack**
 ```json
