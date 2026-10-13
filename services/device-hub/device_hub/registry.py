@@ -105,6 +105,7 @@ class Registry:
         self.bus = bus
         self.clock = clock
         self.live = LiveState()
+        self.link_up = lambda: True     # Hub points this at the broker connection: without it nothing is "online"
         self._hooks: list[Any] = []   # called after every committed registry change, before the event is published
 
     # ------------------------------------------------------------------------------------------ infra
@@ -232,7 +233,7 @@ class Registry:
         else:
             status = "online" if self.live.is_online(node_id) else "offline"
         return {"node_id": node_id, "hw": row["hw"], "fw": row["fw"], "status": status,
-                "online": self.live.is_online(node_id), "provisioned": bool(row["provisioned"]),
+                "online": self.link_up() and self.live.is_online(node_id), "provisioned": bool(row["provisioned"]),
                 "endpoints": eps, "pending_endpoints": pending, "first_seen": int(row["first_seen"]),
                 "last_seen": int(row["last_seen"])}
 
@@ -260,7 +261,8 @@ class Registry:
     def _view(self, row: sqlite3.Row, with_state: bool = True) -> dict:
         caps = self._caps(row["endpoint_id"])
         node = self.db.one("SELECT provisioned, deleted FROM nodes WHERE node_id=?", (row["node_id"],))
-        node_up = bool(node and not node["deleted"] and node["provisioned"] and self.live.is_online(row["node_id"]))
+        node_up = bool(node and not node["deleted"] and node["provisioned"] and self.link_up()
+                       and self.live.is_online(row["node_id"]))
         view = {
             "endpoint_id": row["endpoint_id"], "node_id": row["node_id"], "local_id": row["local_id"],
             "name": row["name"], "room": row["room"], "aliases": json.loads(row["aliases"]),

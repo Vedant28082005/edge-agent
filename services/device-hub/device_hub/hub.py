@@ -32,6 +32,7 @@ class Hub:
         self.bus = EventBus()
         self.registry = Registry(self.db, self.contracts, self.bus, self.clock)
         self.transport = transport
+        self.registry.link_up = lambda: bool(transport.connected)
         self.gateway = gateway
         self.dynsec = DynsecClient(transport, cfg.dynsec_timeout_s)
         self.provisioning = Provisioning(self.registry, self.dynsec, cfg, self.clock)

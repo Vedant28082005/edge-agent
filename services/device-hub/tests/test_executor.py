@@ -263,3 +263,13 @@ def test_list_devices_shape_and_filters(home):
     assert set(d) == {"endpoint_id", "name", "room", "type", "online", "risk", "capabilities"}
     assert [x["name"] for x in home.hub.executor.list_devices(room="hall")["devices"]] == ["Front door"]
     assert [x["type"] for x in home.hub.executor.list_devices(etype="fan")["devices"]] == ["fan"]
+
+
+def test_broker_link_down_means_nothing_is_online_and_nothing_is_queued(home):
+    assert home.hub.registry.get_endpoint(home.ids["light"])["online"] is True
+    home.hub.transport.stop()
+    assert home.hub.registry.get_endpoint(home.ids["light"])["online"] is False
+    assert home.hub.registry.get_node("esp32-000000000001")["online"] is False
+    assert set_(home, "light", "power", True)["error"] == "offline"
+    assert home.hub.executor.get_state(endpoint_id=home.ids["light"])["states"][0]["online"] is False
+    assert home.nodes["esp32-000000000001"].cmds_seen == []

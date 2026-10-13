@@ -108,7 +108,9 @@ def stack(tmp_path_factory):
     srv.shutdown()
 
 
-def test_end_to_end_against_real_broker(stack):
+def test_end_to_end_against_real_broker(stack, caplog):
+    import logging
+    caplog.set_level(logging.DEBUG)
     hub, fake_gw, ca_copy = stack
     # --- provisioning session: bundle is what the BLE spec expects, and its CA works for TLS
     sess = hub.admin.create_provision_session({"node_id": N1, "wifi": {"ssid": "it-net", "password": "it-wifi-pass"}}, "it-admin")
@@ -209,3 +211,10 @@ def test_end_to_end_against_real_broker(stack):
         wait_for(lambda: bad.connect_error, timeout=8, what="refusal after TTL cleanup")
     finally:
         bad.stop()
+
+    # --- no secret in the logs of this whole real-broker run
+    logged = " | ".join(r.getMessage() for r in caplog.records)
+    for secret in (b["mqtt"]["password"], sess2["bundle"]["mqtt"]["password"], s3["bundle"]["mqtt"]["password"], "it-wifi-pass",
+                   Path(hub.cfg.mqtt.password_file).read_text(), fake_gw.secret, tok):
+        assert secret not in logged
+    assert "device_hub" in " ".join(r.name for r in caplog.records)

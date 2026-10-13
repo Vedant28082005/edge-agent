@@ -79,3 +79,45 @@ def test_fails_closed_on_garbage_and_server_errors():
     assert not mk(lambda r: httpx.Response(401, json={"error": "x"})).consume(tok, "u", h).granted
     assert mk(lambda r: httpx.Response(403, json={"consumed": False, "reason": "banana"})).consume(tok, "u", h).reason == "gateway_error"
     assert mk(lambda r: httpx.Response(200, json={"consumed": True, "action_hash": h, "user_id": "u"})).consume(tok, "u", h).granted
+
+
+@pytest.mark.skipif(not hasattr(__import__("socket"), "AF_UNIX"), reason="no AF_UNIX on this platform")
+def test_unix_socket_url(tmp_path):
+    """gateway.url = unix:///path (the preferred internal listener in gateway.yaml)."""
+    import socketserver
+    import threading
+    from http.server import BaseHTTPRequestHandler
+
+    gw = FakeGateway()
+    path = str(tmp_path / "gw.sock")
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("Content-Length", 0))
+            r = gw.handler(httpx.Request("POST", f"http://x{self.path}", headers=dict(self.headers), content=self.rfile.read(n)))
+            self.send_response(r.status_code)
+            self.send_header("Content-Length", str(len(r.content)))
+            self.end_headers()
+            self.wfile.write(r.content)
+
+        def address_string(self):
+            return "unix"
+
+        def log_message(self, *a):
+            pass
+
+    class S(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+
+    try:
+        srv = S(path, H)
+    except OSError as e:                       # e.g. Windows without AF_UNIX server support
+        pytest.skip(f"cannot create a unix socket server here: {e}")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        client = GatewayClient("unix://" + path, gw.secret, 2.0)
+        token = gw.mint("user:v", "a" * 64)
+        assert client.consume(token, "user:v", "a" * 64).granted
+        assert client.consume(token, "user:v", "a" * 64).reason == "used"
+    finally:
+        srv.shutdown()
