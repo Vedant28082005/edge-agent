@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.5.0
+  version: 2.6.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -775,7 +775,7 @@ components:
         expires_at: {type: integer}
         bundle:
           type: object
-          description: Plaintext bundle for the BLE client to encrypt and send (see ble-provisioning.md). Contains secrets; never log.
+          description: Plaintext bundle for the BLE client to encrypt and send (see ble-provisioning.md). mqtt.username is the node_id and is also the MQTT client_id; the node uses a clean session. Contains secrets; never log.
           required: [v, wifi, mqtt, ca_pem]
           properties:
             v: {const: 1}
