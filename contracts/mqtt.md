@@ -109,6 +109,13 @@ TLS certificate dates are checked against the board's clock, and a board without
 
 ## Contract changelog
 
+- **S0c** (announce stays schema 2; `mqtt.md` v2, `mcp-tools.md` v4, `capabilities.md` v2, `gateway.yaml` 2.8.1, new `device-hub-internal.yaml` 1.0.0, ARCHITECTURE v3):
+  - `mcp-tools.md`: automations never touch `risk: confirm` endpoints (removed the admin opt-in sentence); `_meta.user_id` added next to `confirmation_token` (set by the executor, forwarded by the hub, never trusted by it, bound-check done by the gateway consume endpoint).
+  - Endpoint `tags` (admin-set, max 8, each 1..24 of `[a-z0-9_-]`, not in the announce): OpenAPI `Tag`/`Tags`, admin approve/patch and `Endpoint`, scene selector `tag`, `list_devices` returns `tags`; ARCHITECTURE 4.5/4.6/4.7; `capabilities.md` note; invalid sample `announce` with `tags`.
+  - `mcp-tools.md`: `verified` on `set_state`, `scene_name` on `run_scene`, error codes `not_sensor`, `unknown_room`, `unknown_scene`, `scene_broken` (a broken scene refuses to run; offline or capability-less endpoints are still skipped and reported). `gateway.yaml` `SetResult`/`SceneRunResult` aligned.
+  - New `openapi/device-hub-internal.yaml`: device-hub's internal API with MANDATORY caller auth and scopes (`gatewaySecret` = everything, `agentSecret` = `POST /mcp` with the five runtime tools only; only `GET /health` is open; no-auth only with `--insecure-no-auth`, accepted only with `--mock`). `tools\contract_test.py` checks it is valid OpenAPI and that the agent scope has no admin operation. CLAUDE.md rule 10 updated; `setup-pi-brain.sh` and `deploy/README.md` create/describe `gateway.secret` and `agent.secret` with hub-readable verifiers.
+  - Firmware safety: a physical press cancels the pending failsafe for that capability until the hub next sends a command; `max_on_s` always enforced; failsafe liveness is broker-level in v1 (retained hub heartbeat noted as a future option); build aborts if `FW_BUILD_TS` is earlier than 2026-10-01.
+
 - **S0b** (announce stays schema 2, no nodes deployed; `mcp-tools.md` v3, `agent-events.md` v5, `gateway.yaml` 2.6.0):
   - Node connection rules: `client_id` == `username` == `node_id`; clean session.
   - Connect lifecycle on every connect: status `online`, retained announce, subscribe `cmd`, state. Identical announce is a hub no-op.
