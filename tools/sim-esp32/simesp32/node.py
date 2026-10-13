@@ -90,7 +90,11 @@ class Node:
                         self.on_since[(ep.local_id, c.id)] = now
 
     # ---------------------------------------------------------------- transport callbacks
+    # Callbacks run on the transport's thread. They bail out on `stopped` *before* taking the lock so that
+    # shutdown()/unprovision (which hold the lock while joining that thread) cannot deadlock against them.
     def on_connect(self):
+        if self.stopped:
+            return
         with self.lock:
             if self.stopped:
                 return
@@ -107,6 +111,8 @@ class Node:
             self._publish_state()
 
     def on_disconnect(self):
+        if self.stopped:
+            return
         with self.lock:
             if not self.link_up:
                 return
@@ -115,6 +121,8 @@ class Node:
             self.log.info("link lost")
 
     def on_message(self, topic, payload: bytes):
+        if self.stopped:
+            return
         with self.lock:
             if self.stopped or topic != self.base + "cmd":
                 return
@@ -306,6 +314,7 @@ class Node:
         self.provisioned = False
         self.stopped = True
         self.link_up = False
+        self.t.flush()
         self.t.close()
 
     # ---------------------------------------------------------------- run loop
@@ -357,6 +366,7 @@ class Node:
         with self.lock:
             if self.link_up and not self.stopped:
                 self._publish_status("offline")
+                self.t.flush()
             self.stopped = True
             self.t.close()
 

@@ -57,10 +57,20 @@ class PahoTransport:
         if not self._connected.is_set():
             return False
         info = self.client.publish(topic, payload, qos=qos, retain=retain)
+        self._last = info
         return info.rc == self._mqtt.MQTT_ERR_SUCCESS
 
     def subscribe(self, topic, qos=1):
         self.client.subscribe(topic, qos=qos)
+
+    def flush(self, timeout=2.0):
+        """Wait for the broker to PUBACK the last publish (used before a deliberate disconnect)."""
+        last = getattr(self, "_last", None)
+        if last is not None:
+            try:
+                last.wait_for_publish(timeout)
+            except (ValueError, RuntimeError):
+                pass
 
     def drop(self, down_s: float):
         """Kill the TCP connection without a DISCONNECT so the broker fires the LWT; paho reconnects after down_s."""
@@ -150,6 +160,9 @@ class MemoryTransport:
 
     def subscribe(self, topic, qos=1):
         self.subscriptions.append(topic)
+
+    def flush(self, timeout=2.0):
+        pass
 
     def deliver(self, topic, payload):
         if self.connected:
