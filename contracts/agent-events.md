@@ -22,10 +22,11 @@ The `confirmation_token` itself never appears in any event, `tool_call` or `tool
 ## Confirmation policy
 
 - **No automatic re-prompt.** After `confirmation_declined` or `confirmation_expired` the agent does not ask again and does not re-issue the call. A new request exists only when the user acts.
+- **Retry owner.** Retry is allowed **only for the user who received the original `confirmation_request`**. There is no admin override: another user, including an admin, gets 403 and must start their own request. Retry is also refused for requests created by non-user triggers (those only notify).
 - **Retry.** The UI shows a **Retry** button on a declined/expired request. It calls `POST /confirmations/{request_id}/retry`; the agent re-evaluates the same blocked action against the live registry and emits a **new** `confirmation_request` with a new `request_id` and a fresh TTL. Old request ids and tokens stay dead. Retry never executes anything by itself.
 - **Proactive and automation-triggered actions never prompt.** If a rule, a perception escalation or any non-user trigger hits a `risk: confirm` endpoint, nothing is executed and no `confirmation_request` is emitted; the system sends a `notification` over the gateway WebSocket instead, e.g. `{"type": "notification", "level": "action_blocked", "text": "Rule 'night lights' wanted to unlock the front door. Needs your confirmation; open the app to do it yourself."}`. The user can then ask in chat, which uses the normal confirmation flow.
 - Every outcome (requested, approved, declined, expired, retried, blocked-by-trigger) is written to the audit log.
 
 Rules: the agent never blocks on vision (it emits `final` first, `async_result` later). `route` values mirror the scheduler table. Event payloads never contain secrets or raw device-supplied strings that have not been sanitized. Adding an event name or field is a contract change (bump the header version below).
 
-Contract version: **3** (v3: `confirmation_declined`, `confirmation_expired`, retry policy; v2: `confirm_request` renamed `confirmation_request`, token-based confirmation)
+Contract version: **4** (v4: Retry restricted to the original user, no admin override; v3: `confirmation_declined`, `confirmation_expired`, retry policy; v2: `confirm_request` renamed `confirmation_request`, token-based confirmation)

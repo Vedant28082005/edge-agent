@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.3.0
+  version: 2.4.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -190,7 +190,7 @@ paths:
     post:
       tags: [devices]
       operationId: declineConfirmation
-      description: The user declined a pending `confirmation_request`. Emits `confirmation_declined`; nothing is executed.
+      description: The user who received the pending `confirmation_request` declined it (only that user may; others get 403). Emits `confirmation_declined`; nothing is executed.
       parameters:
         - {name: request_id, in: path, required: true, schema: {type: string}}
       responses:
@@ -206,6 +206,9 @@ paths:
         (new request_id, fresh TTL) for the same blocked action, re-validated against the live registry.
         It never executes anything and never reuses an old token. There is no automatic re-prompt; only this
         explicit user action creates a new request.
+
+        Only the user who received the original request may retry it. There is NO admin override: any other
+        caller, including an admin, gets 403 and must start their own request.
       parameters:
         - {name: request_id, in: path, required: true, schema: {type: string}}
       responses:
