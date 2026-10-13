@@ -14,7 +14,12 @@
 #      (the mosquitto container user): server.key and dynamic-security.json mode 600, certs 644
 #   3. writes MOSQUITTO_STATE_DIR into ~/edge-agent/deploy/.env so docker compose uses that dir
 #   4. installs chrony (apt) and the edge-agent config (serve the LAN, free-run if offline)
-#   5. securely deletes the staged secret files
+#   5. creates one service-secret file per calling service (today: device-hub only; the agent gets none),
+#      mode 600 and owned by that service's user, plus a SHA-256 verifier owned by the gateway user
+#   6. securely deletes the staged secret files
+#
+# Service users (system users, created if missing): HUB_USER (default edge-device-hub), GATEWAY_USER (default edge-gateway).
+# Containers for those services must run as these users' uids. ROTATE_SECRETS=1 regenerates the secrets.
 #
 # Environment overrides: STAGE_DIR, STATE_DIR, EDGE_DIR, LAN_CIDR (default 192.168.1.0/24), SKIP_CHRONY=1
 set -euo pipefail
@@ -23,6 +28,9 @@ STAGE_DIR="${STAGE_DIR:-$HOME/edge-agent-setup}"
 STATE_DIR="${STATE_DIR:-/etc/edge-agent/mosquitto}"
 EDGE_DIR="${EDGE_DIR:-$HOME/edge-agent}"
 LAN_CIDR="${LAN_CIDR:-192.168.1.0/24}"
+HUB_USER="${HUB_USER:-edge-device-hub}"
+GATEWAY_USER="${GATEWAY_USER:-edge-gateway}"
+SECRETS_DIR="${SECRETS_DIR:-/etc/edge-agent/secrets}"
 MQ_UID=1883
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
@@ -44,6 +52,30 @@ $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 644 "$STAGE_DIR/ca.crt"     "$STATE_D
 $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 644 "$STAGE_DIR/server.crt" "$STATE_DIR/certs/server.crt"
 $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 600 "$STAGE_DIR/server.key" "$STATE_DIR/certs/server.key"
 $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 600 "$STAGE_DIR/dynamic-security.json" "$STATE_DIR/data/dynamic-security.json"
+
+echo "== service secrets ($SECRETS_DIR)"
+for u in "$HUB_USER" "$GATEWAY_USER"; do
+  id -u "$u" >/dev/null 2>&1 || $SUDO useradd --system --no-create-home --shell /usr/sbin/nologin "$u"
+done
+# Directories are traverse-only (711): names are not listable, files are protected by their own mode/owner.
+$SUDO install -d -o root -g root -m 711 "$SECRETS_DIR"
+$SUDO install -d -o "$GATEWAY_USER" -g "$GATEWAY_USER" -m 700 "$SECRETS_DIR/verifiers"
+make_secret() {  # $1 = service name, $2 = owning user
+  local f="$SECRETS_DIR/$1.secret" v="$SECRETS_DIR/verifiers/$1.sha256"
+  if [ "${ROTATE_SECRETS:-0}" = "1" ] || ! $SUDO test -f "$f"; then
+    openssl rand -base64 32 | tr -d '
+' | $SUDO tee "$f" >/dev/null
+    $SUDO chown "$2:$2" "$f"; $SUDO chmod 600 "$f"
+    # verifier for the gateway: SHA-256 of the secret; the gateway can verify but cannot impersonate the service
+    $SUDO cat "$f" | openssl dgst -sha256 -r | cut -d' ' -f1 | $SUDO tee "$v" >/dev/null
+    $SUDO chown "$GATEWAY_USER:$GATEWAY_USER" "$v"; $SUDO chmod 600 "$v"
+    echo "created $f (owner $2, mode 600) and verifier $v (owner $GATEWAY_USER, mode 600)"
+  else
+    echo "keeping existing $f"
+  fi
+}
+make_secret device-hub "$HUB_USER"
+# Deliberately no secret for the agent: it has no internal access and cannot mint or consume confirmation tokens.
 
 echo "== writing $EDGE_DIR/deploy/.env"
 mkdir -p "$EDGE_DIR/deploy"

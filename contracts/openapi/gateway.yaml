@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.2.0
+  version: 2.3.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -306,10 +306,15 @@ paths:
   # Everything below is on a separate internal listener, NOT on the public gateway port 8000:
   #   * unix socket /run/edge-agent/gateway-internal.sock (preferred), or
   #   * http://127.0.0.1:8001 bound to loopback only.
-  # The public listener must answer 404 for any /internal/* path. Callers authenticate with the shared
-  # service secret (X-Service-Secret), not with a user JWT. The secret is read from a file
-  # (EDGE_SERVICE_SECRET_FILE, default /etc/edge-agent/service-secret, mode 600, owner = service user),
-  # shared by gateway and device-hub only. The agent does NOT have it and cannot mint or consume tokens.
+  # The public listener must answer 404 for any /internal/* path. Callers authenticate with a per-service secret
+  # in the X-Service-Secret header, never with a user JWT. ONE SECRET PER CALLING SERVICE, each scoped to the
+  # operations that service needs (one OpenAPI security scheme per service, see components.securitySchemes):
+  #   * deviceHubSecret : device-hub only. Authorizes /internal/confirmations/consume and nothing else.
+  #   * the agent has NO secret and no internal access at all; it cannot mint or consume tokens.
+  # Secret files: /etc/edge-agent/secrets/<service>.secret, mode 600, owned by THAT service's user (256-bit random,
+  # base64). The gateway cannot read them; it holds only a SHA-256 verifier per service in
+  # /etc/edge-agent/secrets/verifiers/<service>.sha256 (mode 600, owned by the gateway user) and compares in
+  # constant time. A secret is read from its file, never from env vars or argv, and never logged.
   /internal/confirmations/consume:
     servers:
       - url: http://127.0.0.1:8001
@@ -319,8 +324,9 @@ paths:
     post:
       tags: [internal]
       operationId: internalConsumeConfirmation
+      x-internal-callers: [device-hub]
       security:
-        - serviceSecret: []
+        - deviceHubSecret: []
       description: |
         INTERNAL. Called by device-hub just before it executes a `risk: confirm` action.
         Atomically validates and consumes a confirmation token, failing closed. The decision is ONE atomic
@@ -354,7 +360,7 @@ paths:
         '403':
           description: Denied. The caller must NOT execute the action.
           content: {application/json: {schema: {$ref: '#/components/schemas/ConsumeDenied'}}}
-        '401': {description: Missing or wrong X-Service-Secret, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {description: Missing or wrong X-Service-Secret (or a secret not scoped to this operation), content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
 
   # ------------------------------------------------------------ /admin/* (admin only)
   /admin/provision-sessions:
@@ -576,11 +582,13 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: Access token carrying the role. Every /admin/* path additionally requires role admin.
-    serviceSecret:
+    deviceHubSecret:
       type: apiKey
       in: header
       name: X-Service-Secret
-      description: Shared service secret read from a file (never from env/args, never logged). Internal endpoints only.
+      description: |
+        device-hub's service secret (file /etc/edge-agent/secrets/device-hub.secret, mode 600, owned by the
+        device-hub user). Scope: POST /internal/confirmations/consume only. Not valid anywhere else.
   parameters:
     EndpointId: {name: endpoint_id, in: path, required: true, schema: {$ref: '#/components/schemas/EndpointId'}}
     NodeId: {name: node_id, in: path, required: true, schema: {$ref: '#/components/schemas/NodeId'}}

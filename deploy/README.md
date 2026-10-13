@@ -29,7 +29,18 @@ ssh -t pi@pi-brain "LAN_CIDR=192.168.1.0/24 bash ~/edge-agent/tools/setup-pi-bra
 tools\deploy.ps1 -Target brain -Up                  # starts the broker
 ```
 
-`setup-pi-brain.sh` checks that the key matches the cert and chains to the CA, installs everything under `/etc/edge-agent/mosquitto` owned by uid 1883 (the container user; `server.key` and `dynamic-security.json` mode 600), points compose at it through `deploy/.env` (`MOSQUITTO_STATE_DIR`), installs chrony with the edge-agent config, and shreds the staged secrets. It is safe to re-run (stage new files first) after renewing the server cert or changing dynsec. Needs an interactive sudo password, not passwordless sudo.
+`setup-pi-brain.sh` checks that the key matches the cert and chains to the CA, installs everything under `/etc/edge-agent/mosquitto` owned by uid 1883 (the container user; `server.key` and `dynamic-security.json` mode 600), points compose at it through `deploy/.env` (`MOSQUITTO_STATE_DIR`), creates the per-service secret files (below), installs chrony with the edge-agent config, and shreds the staged secrets. It is safe to re-run (stage new files first) after renewing the server cert or changing dynsec. Needs an interactive sudo password, not passwordless sudo.
+
+## Service secrets (internal gateway API)
+
+Internal endpoints (`/internal/*` in `gateway.yaml`, unix socket or loopback only) are authenticated with **one secret per calling service**, each scoped to the operations that service needs:
+
+| Service | Secret file (mode 600, owned by that service's user) | Authorizes |
+|---|---|---|
+| device-hub | `/etc/edge-agent/secrets/device-hub.secret` (owner `edge-device-hub`) | `POST /internal/confirmations/consume` only |
+| agent | **none** | nothing: it cannot mint or consume confirmation tokens |
+
+`setup-pi-brain.sh` creates the system users, generates each secret (256-bit, `openssl rand`), and writes a SHA-256 **verifier** per service to `/etc/edge-agent/secrets/verifiers/` (mode 600, owned by the gateway user). The gateway checks `X-Service-Secret` against the verifier in constant time, so it can authenticate callers without being able to impersonate them, and a compromised service leaks only its own scope. Services read their secret from the file at start-up (never from env vars or argv) and never log it. Containers for device-hub and the gateway must run as the matching uid. Rotate with `ROTATE_SECRETS=1` and restart the affected services. The secrets are generated on the Pi and are never copied from or to the PC or git.
 
 ## Certificate lifecycle
 

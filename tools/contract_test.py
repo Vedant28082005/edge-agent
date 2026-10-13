@@ -100,12 +100,18 @@ for path, item in spec["paths"].items():
             continue
         is_internal = path.startswith("/internal/")
         sec = [list(x) for x in op.get("security", [])]
-        if is_internal and (sec != [["serviceSecret"]] or "internal" not in op.get("tags", [])):
+        if is_internal:
+            callers = op.get("x-internal-callers", [])
+            want = [[c.replace("-", " ").title().replace(" ", "")[0].lower() + c.replace("-", " ").title().replace(" ", "")[1:] + "Secret"] for c in callers]
+            if not callers or sec != want or "internal" not in op.get("tags", []):
+                failures += 1
+                print(f"FAIL openapi {method.upper()} {path}: internal ops must be tagged internal and use exactly one <service>Secret scheme per x-internal-callers entry")
+        if not is_internal and any(k.endswith("Secret") for x in sec for k in x):
             failures += 1
-            print(f"FAIL openapi {method.upper()} {path}: internal operations must be tagged internal and use only serviceSecret")
-        if not is_internal and any("serviceSecret" in x for x in sec):
+            print(f"FAIL openapi {method.upper()} {path}: service secrets are for /internal/* only")
+        if is_internal and "agent" in op.get("x-internal-callers", []):
             failures += 1
-            print(f"FAIL openapi {method.upper()} {path}: serviceSecret is for /internal/* only")
+            print(f"FAIL openapi {method.upper()} {path}: the agent must not be an internal caller")
 print("ok   openapi internal section checked")
 
 # --- canonical action hash vectors -------------------------------------------------
