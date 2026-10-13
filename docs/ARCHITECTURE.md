@@ -1,4 +1,4 @@
-# Edge Agentic IoT Framework: Architecture and Build Plan (v2)
+# Edge Agentic IoT Framework: Architecture and Build Plan (v3)
 
 Minor project: LLM-based multimodal agentic AI framework for intelligent IoT systems (PDEU).
 
@@ -182,10 +182,12 @@ BOOT → LOAD_CONFIG
         (this exact sequence repeats on every reconnect, not only at boot; an identical announce is a no-op for the hub)
 RUN: handle cmd (dedup cmd_id, validate vs own ranges, apply, publish state, ack)
      publish state on change + heartbeat; sensors on interval
-     link lost → reconnect with backoff in its own task; after failsafe_after_s apply failsafe_value
+     link lost (= MQTT session to the broker down) → reconnect with backoff in its own task; after failsafe_after_s apply failsafe_value
+     a physical press cancels that capability's pending failsafe until the hub next sends a cmd for it; max_on_s is always enforced
      local buttons keep working offline
 ```
 
+- **Firmware safety rules** (normative text in `contracts/mqtt.md`): (1) a **physical press wins over failsafe**: it cancels the pending failsafe for that capability until the hub next sends a command for it; (2) **`max_on_s` is always enforced**, whatever turned the output on (hub, press, boot value or failsafe value), and re-asserting "on" does not restart the timer; (3) **failsafe liveness in v1 is broker-level** (the node's MQTT session is down), so a dead device-hub behind a live broker does not trigger failsafe; a retained hub heartbeat the nodes watch is a possible future option, not part of v1; (4) the firmware **build timestamp** (`FW_BUILD_TS`) comes from the build host and the build **aborts if it is earlier than 2026-10-01**.
 - Core library (option A, [decision]): one declarative call per capability (e.g. `addBool("power", setRelay)`, `addInt("speed", 1, 5, setSpeed)`, `addSensorFloat("temperature", 30, readDht)`). The library does Wi-Fi, NTP, TLS, MQTT, announce JSON, acks, dedup, safety timers, BLE provisioning, `identify`, `unprovision`.
 - FreeRTOS tasks: network/MQTT, provisioning, sensor sampling, actuator control. Pin-level code stays in the user's callbacks.
 - TLS needs a valid clock, so NTP sync happens before the MQTT connect. Time earlier than the firmware build timestamp is never accepted: the board keeps retrying NTP (LAN chrony on `pi-brain` first, `pool.ntp.org` fallback) and does not connect over TLS until the time is plausible. The Pi 5 keeps time across power cuts with an RTC backup battery (`deploy/README.md`). Open item: verify behavior when there is no internet (section 11).
@@ -210,13 +212,13 @@ Notes and limits:
 
 ### 4.5 Registry (SQLite WAL, owned by device-hub)
 
-Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, aliases, risk, enabled), `capabilities`, `rooms`, `scenes`, `scene_actions`, `users`, `user_rooms`, `sources`, `provision_sessions`, `audit_log`. A registry change emits an event so the agent rebuilds (a) the prompt's device list and (b) the constrained-decoding schema.
+Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, aliases, tags, risk, enabled), `capabilities`, `rooms`, `scenes`, `scene_actions`, `users`, `user_rooms`, `sources`, `provision_sessions`, `audit_log`. `tags` are admin-set labels (max 8 per endpoint, each 1..24 chars of `[a-z0-9_-]`), edited with `PATCH /admin/endpoints/{id}`; they are **not part of the announce** and a device cannot set them. A registry change emits an event so the agent rebuilds (a) the prompt's device list and (b) the constrained-decoding schema.
 
 ### 4.6 Management (admin) vs runtime control
 
 **Admin REST (gateway `/admin/*`, role `admin` only; both clients use the same endpoints)**
 
-`POST /admin/provision-sessions`, `GET /admin/nodes`, `POST /admin/nodes/{id}/approve` (name and place each endpoint), `PATCH /admin/endpoints/{id}` (rename, room, aliases, risk, enable/disable), `POST /admin/endpoints/{id}/rebind`, `POST /admin/nodes/{id}/identify`, `POST /admin/nodes/{id}/unprovision`, `DELETE /admin/nodes/{id}` (forget).
+`POST /admin/provision-sessions`, `GET /admin/nodes`, `POST /admin/nodes/{id}/approve` (name and place each endpoint), `PATCH /admin/endpoints/{id}` (rename, room, aliases, tags, risk, enable/disable), `POST /admin/endpoints/{id}/rebind`, `POST /admin/nodes/{id}/identify`, `POST /admin/nodes/{id}/unprovision`, `DELETE /admin/nodes/{id}` (forget).
 
 - **Forget:** the hub shows what uses it ("2 scenes, 1 automation"). On confirmation it deletes the board's MQTT user and role (**real revocation**), clears retained topics, soft-deletes registry rows, and marks dependent scenes/automations as broken (not silently deleted).
 - Every admin action is audit-logged.
@@ -233,11 +235,11 @@ Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, 
 
 The LLM can **propose** a scene or automation as JSON, but it is saved only after a user approves it in the UI.
 
-**Confirmation tokens.** `risk: confirm` actions need a `confirmation_token`: opaque, single-use, bound to the user and the exact action, 60 s TTL, minted by the gateway (`POST /confirmations`) only when the user approves in the UI. It is **not** in any tool schema the LLM sees; the agent executor attaches it out-of-band (MCP `_meta`), and device-hub validates and consumes it through the gateway. Without a valid token the tool returns `confirmation_required` / `needs_confirmation` and the agent emits a `confirmation_request` event. A decline or timeout produces `confirmation_declined` / `confirmation_expired`; there is **no automatic re-prompt**, the UI offers a **Retry** that creates a brand-new request. Proactive and automation-triggered actions never prompt: for `risk: confirm` endpoints they only notify. Details in `contracts/mcp-tools.md` and `contracts/agent-events.md`.
+**Confirmation tokens.** `risk: confirm` actions need a `confirmation_token`: opaque, single-use, bound to the user and the exact action, 60 s TTL, minted by the gateway (`POST /confirmations`) only when the user approves in the UI. It is **not** in any tool schema the LLM sees; the agent executor attaches it out-of-band (MCP `_meta`, together with `user_id`, which device-hub forwards but never trusts; the gateway checks the token is bound to that user), and device-hub validates and consumes it through the gateway. device-hub's own API is authenticated per caller with scoped secrets (`contracts/openapi/device-hub-internal.yaml`): the agent's secret reaches only the five runtime tools. Without a valid token the tool returns `confirmation_required` / `needs_confirmation` and the agent emits a `confirmation_request` event. A decline or timeout produces `confirmation_declined` / `confirmation_expired`; there is **no automatic re-prompt**, the UI offers a **Retry** that creates a brand-new request. Proactive and automation-triggered actions never prompt: for `risk: confirm` endpoints they only notify. Details in `contracts/mcp-tools.md` and `contracts/agent-events.md`.
 
 ### 4.7 Scenes (v1)
 
-- A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time, so a new light added to the bedroom automatically joins "good night".
+- A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time (`tag` matches the endpoint's admin-set `tags`, section 4.5; fields combine with AND), so a new light added to the bedroom automatically joins "good night".
 - Run semantics: validate each action, run through the same executor as everything else (range checks, `risk`, verify). **Endpoints that are offline, or lack the capability, are skipped and reported** ("fan offline, skipped"); commands are never queued, so a stale "unlock" cannot fire later. Results are per action (partial failure is visible).
 - `risk: confirm` endpoints in a scene need a `confirmation_token` from the user running it. If any action targets such an endpoint without a valid token, **the scene executes nothing** (not even its non-risky actions) and returns `needs_confirmation` listing those endpoints; the token is bound to the scene and to the exact risky actions it resolved to.
 - Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only. Automations (later) never execute actions on `risk: confirm` endpoints, with **no admin opt-in**, and never prompt: they notify instead, and the user can then act through the normal confirmation flow. A future **standing approval** (a user pre-approving a specific `risk: confirm` action for an automation, with limits and expiry) is an idea explicitly **out of scope** for this project.
