@@ -56,7 +56,7 @@ class CurtainController {
     if (phase_ == Phase::Opening || phase_ == Phase::Closing) endRun(now);
     pendingDir_ = want;
     startAfter_ = (lastDir_ != Phase::Idle && lastDir_ != want) ? lastStop_ + c_.deadMs : now;
-    if ((int32_t)(startAfter_ - now) <= 0) beginRun(want, now);
+    if ((int32_t)(startAfter_ - now) <= 0) beginRun(want, now, atOpenLimit, atClosedLimit);
     else phase_ = Phase::Dead;
     return ApplyResult::Ok;
   }
@@ -66,7 +66,7 @@ class CurtainController {
   void tick(uint32_t now, bool atOpenLimit, bool atClosedLimit) {
     integrate(now);
     if (phase_ == Phase::Dead) {
-      if ((int32_t)(now - startAfter_) >= 0) beginRun(pendingDir_, now);
+      if ((int32_t)(now - startAfter_) >= 0) beginRun(pendingDir_, now, atOpenLimit, atClosedLimit);
       return;
     }
     if (phase_ == Phase::Idle) return;
@@ -100,13 +100,13 @@ class CurtainController {
     }
     lastInt_ = now;
   }
-  void beginRun(Phase dir, uint32_t now) {
+  void beginRun(Phase dir, uint32_t now, bool atOpenLimit, bool atClosedLimit) {
     phase_ = dir;
     runStart_ = now;
     lastInt_ = now;
     fault_ = false;
-    startedAtKnownEnd_ = (dir == Phase::Opening) ? atClosedEnd_ : atOpenEnd_;
-    atOpenEnd_ = atClosedEnd_ = false;
+    // A run that starts with the opposite limit switch pressed starts from a known end: it can teach us the travel time.
+    startedAtKnownEnd_ = (dir == Phase::Opening) ? (c_.limitClosed && atClosedLimit) : (c_.limitOpen && atOpenLimit);
   }
   void endRun(uint32_t now) {  // motor off; remembers the direction/time for the dead-time rule
     lastDir_ = phase_;
@@ -125,7 +125,6 @@ class CurtainController {
       tm = tm > 0 ? (tm * 3 + took) / 4 : took;
     }
     pos_ = p;
-    (opening ? atOpenEnd_ : atClosedEnd_) = true;
     endRun(now);
   }
 
@@ -133,7 +132,7 @@ class CurtainController {
   Phase phase_ = Phase::Idle, pendingDir_ = Phase::Idle, lastDir_ = Phase::Idle;
   float pos_ = 0, target_ = 0, lastReported_ = 0;
   uint32_t runStart_ = 0, lastInt_ = 0, lastStop_ = 0, startAfter_ = 0;
-  bool fault_ = false, startedAtKnownEnd_ = false, atOpenEnd_ = false, atClosedEnd_ = false;
+  bool fault_ = false, startedAtKnownEnd_ = false;
 };
 
 class CurtainMotor : public Actuator {
