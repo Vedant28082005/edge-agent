@@ -210,13 +210,13 @@ Notes and limits:
 
 ### 4.5 Registry (SQLite WAL, owned by device-hub)
 
-Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, aliases, risk, enabled), `capabilities`, `rooms`, `scenes`, `scene_actions`, `users`, `user_rooms`, `sources`, `provision_sessions`, `audit_log`. A registry change emits an event so the agent rebuilds (a) the prompt's device list and (b) the constrained-decoding schema.
+Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, aliases, tags, risk, enabled), `capabilities`, `rooms`, `scenes`, `scene_actions`, `users`, `user_rooms`, `sources`, `provision_sessions`, `audit_log`. `tags` are admin-set labels (max 8 per endpoint, each 1..24 chars of `[a-z0-9_-]`), edited with `PATCH /admin/endpoints/{id}`; they are **not part of the announce** and a device cannot set them. A registry change emits an event so the agent rebuilds (a) the prompt's device list and (b) the constrained-decoding schema.
 
 ### 4.6 Management (admin) vs runtime control
 
 **Admin REST (gateway `/admin/*`, role `admin` only; both clients use the same endpoints)**
 
-`POST /admin/provision-sessions`, `GET /admin/nodes`, `POST /admin/nodes/{id}/approve` (name and place each endpoint), `PATCH /admin/endpoints/{id}` (rename, room, aliases, risk, enable/disable), `POST /admin/endpoints/{id}/rebind`, `POST /admin/nodes/{id}/identify`, `POST /admin/nodes/{id}/unprovision`, `DELETE /admin/nodes/{id}` (forget).
+`POST /admin/provision-sessions`, `GET /admin/nodes`, `POST /admin/nodes/{id}/approve` (name and place each endpoint), `PATCH /admin/endpoints/{id}` (rename, room, aliases, tags, risk, enable/disable), `POST /admin/endpoints/{id}/rebind`, `POST /admin/nodes/{id}/identify`, `POST /admin/nodes/{id}/unprovision`, `DELETE /admin/nodes/{id}` (forget).
 
 - **Forget:** the hub shows what uses it ("2 scenes, 1 automation"). On confirmation it deletes the board's MQTT user and role (**real revocation**), clears retained topics, soft-deletes registry rows, and marks dependent scenes/automations as broken (not silently deleted).
 - Every admin action is audit-logged.
@@ -237,7 +237,7 @@ The LLM can **propose** a scene or automation as JSON, but it is saved only afte
 
 ### 4.7 Scenes (v1)
 
-- A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time, so a new light added to the bedroom automatically joins "good night".
+- A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time (`tag` matches the endpoint's admin-set `tags`, section 4.5; fields combine with AND), so a new light added to the bedroom automatically joins "good night".
 - Run semantics: validate each action, run through the same executor as everything else (range checks, `risk`, verify). **Endpoints that are offline, or lack the capability, are skipped and reported** ("fan offline, skipped"); commands are never queued, so a stale "unlock" cannot fire later. Results are per action (partial failure is visible).
 - `risk: confirm` endpoints in a scene need a `confirmation_token` from the user running it. If any action targets such an endpoint without a valid token, **the scene executes nothing** (not even its non-risky actions) and returns `needs_confirmation` listing those endpoints; the token is bound to the scene and to the exact risky actions it resolved to.
 - Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only. Automations (later) never execute actions on `risk: confirm` endpoints, with **no admin opt-in**, and never prompt: they notify instead, and the user can then act through the normal confirmation flow. A future **standing approval** (a user pre-approving a specific `risk: confirm` action for an automation, with limits and expiry) is an idea explicitly **out of scope** for this project.

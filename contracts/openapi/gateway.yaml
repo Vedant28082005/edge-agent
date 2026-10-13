@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.6.0
+  version: 2.7.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -425,6 +425,7 @@ paths:
                       name: {type: string, maxLength: 48}
                       room: {type: string, maxLength: 48}
                       aliases: {type: array, maxItems: 8, items: {type: string, maxLength: 48}}
+                      tags: {$ref: '#/components/schemas/Tags'}
                       risk: {$ref: '#/components/schemas/Risk'}
       responses:
         '200': {description: Approved endpoints, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Endpoint'}}}}}
@@ -478,7 +479,7 @@ paths:
       tags: [admin]
       operationId: adminPatchEndpoint
       x-required-role: admin
-      description: Rename, room, aliases, risk, enable/disable. The id never changes.
+      description: Rename, room, aliases, tags, risk, enable/disable. The id never changes. `tags` replaces the whole tag list (admin-set labels, never part of the announce).
       parameters:
         - {$ref: '#/components/parameters/EndpointId'}
       requestBody:
@@ -493,6 +494,7 @@ paths:
                 name: {type: string, maxLength: 48}
                 room: {type: string, maxLength: 48}
                 aliases: {type: array, maxItems: 8, items: {type: string, maxLength: 48}}
+                tags: {$ref: '#/components/schemas/Tags'}
                 risk: {$ref: '#/components/schemas/Risk'}
                 enabled: {type: boolean}
       responses:
@@ -617,6 +619,13 @@ components:
     Risk: {type: string, enum: [normal, confirm]}
     NodeId: {type: string, pattern: '^esp32-[0-9a-f]{12}$'}
     EndpointId: {type: string, pattern: '^ep_[0-9a-f]{8}$'}
+    Tag: {type: string, minLength: 1, maxLength: 24, pattern: '^[a-z0-9_-]+$'}
+    Tags:
+      type: array
+      maxItems: 8
+      uniqueItems: true
+      description: Admin-set labels on an endpoint, used by scene selectors (`tag`). Not part of the announce; a device can never set or change them.
+      items: {$ref: '#/components/schemas/Tag'}
     EndpointType: {type: string, enum: [light, fan, outlet, lock, cover, thermostat, sensor, generic]}
     Capability:
       type: object
@@ -639,6 +648,7 @@ components:
         name: {type: string}
         room: {type: string}
         aliases: {type: array, items: {type: string}}
+        tags: {$ref: '#/components/schemas/Tags'}
         type: {$ref: '#/components/schemas/EndpointType'}
         risk: {$ref: '#/components/schemas/Risk'}
         online: {type: boolean}
@@ -668,7 +678,7 @@ components:
               properties:
                 room: {type: string}
                 type: {$ref: '#/components/schemas/EndpointType'}
-                tag: {type: string}
+                tag: {$ref: '#/components/schemas/Tag'}
         capability: {type: string}
         value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
     SceneInput:

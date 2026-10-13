@@ -1,6 +1,6 @@
 # Capability vocabulary (v1, fixed)
 
-Contract version: **1** (paired with announce schema 2). New capabilities or endpoint types are added **only** by a contract change (edit this file, `announce.schema.json`, samples, bump versions). A device can never invent one.
+Contract version: **2** (v2: note that endpoint `tags` are not part of the announce) (paired with announce schema 2). New capabilities or endpoint types are added **only** by a contract change (edit this file, `announce.schema.json`, samples, bump versions). A device can never invent one.
 
 ## Capabilities
 
@@ -38,6 +38,10 @@ Contract version: **1** (paired with announce schema 2). New capabilities or end
 - `settle_s` (number, 1-120 s): optional on actuators, not allowed on sensors, **required when `id` is `position`**. Worst-case time for the motion to reach a commanded target. For a capability with `settle_s` the ack means "accepted, motion started" and `state` reports actual progress; the hub verifies convergence within `settle_s` (see `mcp-tools.md`). Added within announce schema 2 (no nodes deployed yet).
 - `max_on_s` = continuous on-time limit in seconds, 0 = unlimited (firmware-enforced).
 - Node-level optional `failsafe_after_s` (default 60, 0 = keep last values).
+
+## Not in the announce
+
+Names, rooms, aliases and **`tags`** are admin-set registry labels, never announced by a device (an announce containing them is rejected by the schema). Tags: max 8 per endpoint, each 1..24 chars of `[a-z0-9_-]`; used by scene selectors (`mcp-tools.md`).
 
 ## Hub-enforced rules (not expressible in JSON Schema)
 

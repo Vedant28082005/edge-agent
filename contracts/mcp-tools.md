@@ -8,6 +8,10 @@ Version 4 change: see the Contract changelog in `mqtt.md` (S0c). Items are descr
 Version 3 change: motion capabilities (those announcing `settle_s`) return `status: "moving"` and are verified asynchronously (see `set_state`); `run_scene` per-action statuses are `done|moving|...`.
 Version 2 change: the boolean `confirmed` argument is gone; confirmation is a `confirmation_token` (below).
 
+## Endpoint tags
+
+Endpoints carry an optional admin-set `tags` list: **at most 8 tags, each 1..24 characters of `[a-z0-9_-]`**, unique per endpoint. Tags are labels set through `PATCH /admin/endpoints/{id}` (or at approve time); they are **not part of the announce** and a device can never set them. They are read-only to the LLM: `list_devices` shows them and scene selectors use them, but no tool can change them. A selector `{tag: "night"}` matches every enabled endpoint whose `tags` contain `night`; combined with `room` and/or `type` it is an AND.
+
 ## Confirmation tokens (`risk: confirm` endpoints)
 
 - A token is **opaque** (256-bit random, base64url), **single-use**, bound to **user + exact action + short TTL (60 s)**, and **minted by the gateway** only when the user approves in the UI (`POST /confirmations`, see `openapi/gateway.yaml`). The agent cannot mint one.
@@ -38,7 +42,7 @@ Both the gateway (when minting) and device-hub (when consuming) must compute the
 
 ## list_devices
 Args: `room?: string`, `type?: string` (endpoint type enum).
-Returns: `{"devices": [{"endpoint_id", "name", "room", "type", "online": bool, "risk": "normal|confirm", "capabilities": [{"id", "kind", "type", "min?", "max?", "values?", "unit?"}]}]}`. Excludes disabled endpoints. No live state.
+Returns: `{"devices": [{"endpoint_id", "name", "room", "tags", "type", "online": bool, "risk": "normal|confirm", "capabilities": [{"id", "kind", "type", "min?", "max?", "values?", "unit?"}]}]}`. Excludes disabled endpoints. No live state.
 
 ## get_state
 Args: exactly one of `endpoint_id: string` | `room: string`.
@@ -57,7 +61,7 @@ Error codes: `unknown_endpoint`, `disabled`, `offline`, `unknown_capability`, `n
 
 ## run_scene
 Args: `scene: string` (scene id or exact name). (Nothing else.)
-Behavior: resolves the scene's targets (selectors included) and validates every action, then:
+Behavior: resolves the scene's targets (selectors `{room?, type?, tag?}` included; `tag` matches endpoints whose admin-set `tags` contain it, see "Endpoint tags") and validates every action, then:
 1. If **any** action targets a `risk: confirm` endpoint and there is **no valid `confirmation_token`** (attached out-of-band) covering exactly those actions, **nothing is executed at all**, including the non-risky actions. The result is `needs_confirmation`, listing the risky actions so the UI can ask the user.
 2. Otherwise all actions run through the same executor as `set_state`. Offline or incapable endpoints are skipped and reported; nothing is queued. Actions on capabilities with `settle_s` report `moving` and are verified asynchronously per action (`action_settled` / `action_settle_timeout`).
 
