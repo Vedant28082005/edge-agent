@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.8.0
+  version: 2.8.1
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -313,7 +313,8 @@ paths:
   # in the X-Service-Secret header, never with a user JWT. ONE SECRET PER CALLING SERVICE, each scoped to the
   # operations that service needs (one OpenAPI security scheme per service, see components.securitySchemes):
   #   * deviceHubSecret : device-hub only. Authorizes /internal/confirmations/consume and nothing else.
-  #   * the agent has NO secret and no internal access at all; it cannot mint or consume tokens.
+  #   * the agent has NO secret for this gateway API and no internal access at all; it cannot mint or consume tokens.
+  #     (Calls into device-hub use a different file: openapi/device-hub-internal.yaml.)
   # Secret files: /etc/edge-agent/secrets/<service>.secret, mode 600, owned by THAT service's user (256-bit random,
   # base64). The gateway cannot read them; it holds only a SHA-256 verifier per service in
   # /etc/edge-agent/secrets/verifiers/<service>.sha256 (mode 600, owned by the gateway user) and compares in
