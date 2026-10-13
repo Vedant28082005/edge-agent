@@ -1,6 +1,12 @@
 # MQTT contract (v1)
 
-Broker: Mosquitto on `pi-brain`, **TLS on 8883** (1883 disabled), dynamic-security plugin, anonymous access off. Prefix for all topics: `home/v1/`. Payloads: JSON, UTF-8, max 16 KiB. MQTT client id = `node_id` for nodes.
+Broker: Mosquitto on `pi-brain`, **TLS on 8883** (1883 disabled), dynamic-security plugin, anonymous access off. Prefix for all topics: `home/v1/`. Payloads: JSON, UTF-8, max 16 KiB.
+
+## Node connection rules
+
+- MQTT `client_id` == MQTT `username` == `node_id`. Always all three equal.
+- **Clean session** (`clean_session=true` / MQTT 5 clean start with session expiry 0). The `cmd` topic is never retained, so there are no queued old commands to deliver after a reconnect; a persistent session would add nothing but risk.
+- LWT: topic `status`, payload `offline`, QoS 1, retained (see `status` below).
 
 ## Topics
 
