@@ -149,11 +149,48 @@ for path, item in hub["paths"].items():
             print(f"FAIL hub-internal {label}: security {names} does not match x-scopes {scopes}")
         if "agent" in scopes:
             agent_ops.append((path, op))
-admin_like = lambda p: p.startswith(("/admin", "/scenes", "/devices", "/events", "/registry", "/rooms", "/mock"))
+FORBIDDEN_AGENT_EVENTS = {"scenes_changed", "pending_node", "provision", "provisioning", "admin", "audit", "confirmation",
+                          "credential", "secret", "token", "wifi", "bundle", "session"}
+agent_set = sorted((p, m) for p, op in agent_ops for m in [next(k for k, v in hub["paths"][p].items() if v is op)])
+if agent_set != [("/events", "get"), ("/mcp", "post")]:
+    failures += 1
+    print(f"FAIL hub-internal agent scope must contain exactly POST /mcp and GET /events, found {agent_set}")
 for path, op in agent_ops:
-    if admin_like(path) or path != "/mcp" or sorted(op.get("x-mcp-tools", [])) != sorted(RUNTIME_TOOLS):
+    if path == "/mcp" and sorted(op.get("x-mcp-tools", [])) != sorted(RUNTIME_TOOLS):
         failures += 1
-        print(f"FAIL hub-internal agent scope may only call POST /mcp exposing exactly the 5 runtime tools, found {path}")
+        print("FAIL hub-internal POST /mcp must expose exactly the 5 runtime tools")
+    if path == "/events":
+        allow = op.get("x-agent-event-allowlist")
+        gw_only = op.get("x-gateway-only-event-types", [])
+        envelope_types = hub["components"]["schemas"]["EventEnvelope"]["properties"]["type"]["enum"]
+        if not allow or not isinstance(allow, list):
+            failures += 1
+            print("FAIL hub-internal GET /events must document x-agent-event-allowlist")
+        else:
+            bad = [t for t in allow if t in FORBIDDEN_AGENT_EVENTS or any(w in t for w in ("admin", "provision", "credential", "secret", "token", "wifi", "bundle"))]
+            if bad:
+                failures += 1
+                print(f"FAIL hub-internal agent event allowlist contains admin/provisioning types: {bad}")
+            if any(t in gw_only for t in allow) or set(allow) & set(gw_only):
+                failures += 1
+                print("FAIL hub-internal agent allowlist overlaps x-gateway-only-event-types")
+            if not set(allow) <= set(envelope_types):
+                failures += 1
+                print(f"FAIL hub-internal allowlist types not in EventEnvelope.type: {sorted(set(allow) - set(envelope_types))}")
+            # every allowlisted type must have its payload documented in the operation description
+            undoc = [t for t in allow if f"* `{t}`" not in op.get("description", "")]
+            if undoc:
+                failures += 1
+                print(f"FAIL hub-internal GET /events does not document the payload of {undoc}")
+            for t in ("action_settled", "action_settle_timeout"):
+                if t not in allow:
+                    failures += 1
+                    print(f"FAIL hub-internal allowlist must contain {t}")
+for path, item in hub["paths"].items():
+    for method, op in item.items():
+        if method in ("get", "post", "put", "patch", "delete") and "agent" in (op.get("x-scopes") or []) and (path, method) not in (("/events", "get"), ("/mcp", "post")):
+            failures += 1
+            print(f"FAIL hub-internal agent scope may only call POST /mcp and GET /events, found {method.upper()} {path}")
 if not agent_ops:
     failures += 1
     print("FAIL hub-internal: agent scope has no operation at all (it must reach /mcp)")
@@ -161,7 +198,7 @@ if "agentSecret" not in hub["components"]["securitySchemes"] or "gatewaySecret" 
     failures += 1
     print("FAIL hub-internal: gatewaySecret and agentSecret schemes are required")
 if failures == _f0:
-    print("ok   hub-internal auth mandatory; agent scope = runtime tools only")
+    print("ok   hub-internal auth mandatory; agent scope = POST /mcp + allowlisted GET /events only")
 
 # --- canonical action hash vectors -------------------------------------------------
 import copy

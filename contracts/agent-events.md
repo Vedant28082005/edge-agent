@@ -29,6 +29,21 @@ The `confirmation_token` itself never appears in any event, `tool_call` or `tool
 - **Proactive and automation-triggered actions never prompt.** If a rule, a perception escalation or any non-user trigger hits a `risk: confirm` endpoint, nothing is executed and no `confirmation_request` is emitted; the system sends a `notification` over the gateway WebSocket instead, e.g. `{"type": "notification", "level": "action_blocked", "text": "Rule 'night lights' wanted to unlock the front door. Needs your confirmation; open the app to do it yourself."}`. The user can then ask in chat, which uses the normal confirmation flow.
 - Every outcome (requested, approved, declined, expired, retried, blocked-by-trigger) is written to the audit log.
 
+## Where the agent gets settle and registry events
+
+The agent subscribes to device-hub `GET /events` with its **agent secret** (read-only, server-side allowlist: `registry_changed`, `node_status`, `state`, `action_settled`, `action_settle_timeout`; see `openapi/device-hub-internal.yaml`). It never sees provisioning, admin or scene-CRUD events.
+
+**Settle events.** For every `set_state` / `run_scene` action that returned `status: "moving"` the executor sent `_meta.call_id` (see `mcp-tools.md`). The hub echoes it, and the agent forwards the event on the SSE stream of the request that made the call:
+
+| device-hub event (`data.data`) | agent SSE event | Mapping |
+|---|---|---|
+| `action_settled` `{endpoint_id, capability, value, observed, elapsed_ms, call_id}` | `action_settled` `{call_id, endpoint_id, capability, value, observed, elapsed_ms}` | Same fields; `call_id` selects the request/stream by the executor's own `call_id` table. |
+| `action_settle_timeout` `{endpoint_id, capability, value, observed, settle_s, call_id}` | `action_settle_timeout` `{call_id, endpoint_id, capability, value, observed, settle_s}` | Same fields. |
+
+If the hub event has no `call_id` (call without `_meta.call_id`, or the agent restarted and lost its table) the agent cannot attribute it to a request: it does not emit an SSE event for it and instead sends a gateway WebSocket `notification` when the outcome is a timeout. The agent never retries on its own after `action_settle_timeout`. Values in these events come from the registry/state (sanitized), never from free device text.
+
+**Registry changes.** The agent learns of them only from `registry_changed` `{version, reason, endpoint_ids}` on that stream. On receipt it reloads `list_devices` and rebuilds its prompt device list and constrained-decoding schema (so renamed, added, forgotten, disabled or re-risked endpoints take effect without a restart). It reconnects with `Last-Event-ID`; if the id is stale or the `hello.version` differs from its cached version it reloads anyway. `node_status` updates `online` in the cached list; `state` is opt-in and the agent normally uses `get_state` instead. No other source (admin routes, MQTT) is available to the agent.
+
 Rules: the agent never blocks on vision (it emits `final` first, `async_result` later). `route` values mirror the scheduler table. Event payloads never contain secrets or raw device-supplied strings that have not been sanitized. Adding an event name or field is a contract change (bump the header version below).
 
-Contract version: **5** (v5: `action_settled`, `action_settle_timeout`; v4: Retry restricted to the original user, no admin override; v3: `confirmation_declined`, `confirmation_expired`, retry policy; v2: `confirm_request` renamed `confirmation_request`, token-based confirmation)
+Contract version: **6** (v6: settle events carry the `call_id` of the originating call and are mapped from device-hub `GET /events`; registry-change source documented; v5: `action_settled`, `action_settle_timeout`; v4: Retry restricted to the original user, no admin override; v3: `confirmation_declined`, `confirmation_expired`, retry policy; v2: `confirm_request` renamed `confirmation_request`, token-based confirmation)

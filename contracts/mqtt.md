@@ -1,4 +1,4 @@
-# MQTT contract (v2)
+# MQTT contract (v3)
 
 Broker: Mosquitto on `pi-brain`, **TLS on 8883** (1883 disabled), dynamic-security plugin, anonymous access off. Prefix for all topics: `home/v1/`. Payloads: JSON, UTF-8, max 16 KiB.
 
@@ -108,6 +108,13 @@ TLS certificate dates are checked against the board's clock, and a board without
 - `deploy/mosquitto/dynsec-bootstrap.ps1` creates only the initial config with the hub admin account.
 
 ## Contract changelog
+
+- **S0d** (announce stays schema 2; `mqtt.md` v3, `mcp-tools.md` v5, `agent-events.md` v6, `device-hub-internal.yaml` 1.1.0, ARCHITECTURE v4):
+  - `device-hub-internal.yaml`: agent scope = exactly `POST /mcp` + read-only `GET /events` with a SERVER-SIDE allowlist (`registry_changed`, `node_status`, `state`, `action_settled`, `action_settle_timeout`), applied to live delivery and replay; a requested type outside it is 403 `forbidden_event_type`; `scenes_changed`, `pending_node`, provisioning/admin and any credential-bearing event are gateway-only. Payloads of every event type documented (including `call_id?` on the two settle events), plus the wire envelope `{seq, type, ts, data}`. Aligned with the S1 hub (names `node_status`/`state`, see the S0d report for discrepancies).
+  - `mcp-tools.md`: optional `_meta.call_id` (max 64 chars), set by the agent executor, echoed by the hub on `action_settled` / `action_settle_timeout`, never trusted for any decision.
+  - `agent-events.md`: hub settle events map to the agent SSE events with `call_id`; the agent learns registry changes via hub `/events` with the agent scope.
+  - `tools\contract_test.py`: asserts the agent scope is exactly `POST /mcp` + `GET /events`, that `/events` documents an allowlist with no admin or provisioning type and every allowlisted payload, and that the file is valid OpenAPI. CLAUDE.md rule 10 and ARCHITECTURE 4.6 reworded for the new agent scope.
+  - `--insecure-dev` -> `--insecure-no-auth`: no occurrence exists on this branch or any local branch (only `--insecure-no-auth`), nothing to change.
 
 - **S0c** (announce stays schema 2; `mqtt.md` v2, `mcp-tools.md` v4, `capabilities.md` v2, `gateway.yaml` 2.8.1, new `device-hub-internal.yaml` 1.0.0, ARCHITECTURE v3):
   - `mcp-tools.md`: automations never touch `risk: confirm` endpoints (removed the admin opt-in sentence); `_meta.user_id` added next to `confirmation_token` (set by the executor, forwarded by the hub, never trusted by it, bound-check done by the gateway consume endpoint).
