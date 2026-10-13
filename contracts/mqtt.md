@@ -1,4 +1,4 @@
-# MQTT contract (v1)
+# MQTT contract (v2)
 
 Broker: Mosquitto on `pi-brain`, **TLS on 8883** (1883 disabled), dynamic-security plugin, anonymous access off. Prefix for all topics: `home/v1/`. Payloads: JSON, UTF-8, max 16 KiB.
 
@@ -77,6 +77,12 @@ On failure `ok:false` and `error` is a short code string (`unknown_endpoint`, `u
 {"ts": 1760000000, "service": "vision-node", "cpu_pct": 41.0, "mem_available_mb": 812, "temp_c": 62.5, "queue_depth": 0}
 ```
 
+## Firmware safety rules (enforced by the firmware, independent of the hub)
+
+- **A physical press wins over failsafe.** A local button/switch press on a capability **cancels that capability's pending failsafe** (the `failsafe_after_s` countdown or an armed failsafe action): the board keeps the value the person chose. The cancellation lasts until the hub next sends a `cmd` that sets that capability; from then on failsafe is armed again for the next link loss. A press made after the failsafe value was already applied simply sets the new value. Local buttons work offline at all times.
+- **`max_on_s` is always enforced.** If a capability announces `max_on_s > 0`, the firmware forces it off after that much **continuous** on-time, whatever turned it on: a hub command, a local press, `boot_value`, or `failsafe_value`. Re-asserting "on" while already on does not restart the timer; a new on period starts only after it was off. The forced-off is reported in `state`. A physical press or failsafe never overrides it.
+- **Failsafe liveness in v1 is broker-level.** "Hub connection lost" means the node's **MQTT session to the broker is down** (Wi-Fi lost, broker down, TLS failure), counted from the disconnect for `failsafe_after_s`. A dead or hung device-hub process behind a live broker does **not** trigger failsafe in v1. *Future option (not in v1, would need a contract bump and an ACL change): a retained hub heartbeat topic the nodes subscribe to, with failsafe when it goes stale.*
+
 ## Firmware time requirement (TLS)
 
 TLS certificate dates are checked against the board's clock, and a board without a valid clock must not guess.
@@ -86,6 +92,7 @@ TLS certificate dates are checked against the board's clock, and a board without
 - Until valid time is obtained the board **does not start the TLS/MQTT connection**. It keeps retrying NTP (LAN `ntp_host` from the provisioning bundle first, then `pool.ntp.org`) with backoff, keeps local buttons and failsafe timers working, and never disables certificate verification or date checks to get online.
 - Once the time is valid it is used for `ts` fields; `ts` in `state` is Unix seconds UTC and the schemas reject values before 2001.
 - A valid-looking NTP answer that moves the clock backwards past `FW_BUILD_TS` is rejected the same way.
+- **Build-time sanity check.** `FW_BUILD_TS` must come from the build host's clock, and the build **aborts** if it is earlier than **2026-10-01T00:00:00Z (1790812800)**, since a build machine with a wrong clock would otherwise ship firmware that accepts 'time' from before the certificates were issued (or never accepts valid time). The floor is a constant in the build script; raise it when the contract is next revised. A build with a clock before that date is a build failure, not a warning.
 
 ## ACL rules (enforced through dynamic-security)
 

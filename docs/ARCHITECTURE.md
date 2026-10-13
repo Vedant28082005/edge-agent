@@ -1,4 +1,4 @@
-# Edge Agentic IoT Framework: Architecture and Build Plan (v2)
+# Edge Agentic IoT Framework: Architecture and Build Plan (v3)
 
 Minor project: LLM-based multimodal agentic AI framework for intelligent IoT systems (PDEU).
 
@@ -182,10 +182,12 @@ BOOT → LOAD_CONFIG
         (this exact sequence repeats on every reconnect, not only at boot; an identical announce is a no-op for the hub)
 RUN: handle cmd (dedup cmd_id, validate vs own ranges, apply, publish state, ack)
      publish state on change + heartbeat; sensors on interval
-     link lost → reconnect with backoff in its own task; after failsafe_after_s apply failsafe_value
+     link lost (= MQTT session to the broker down) → reconnect with backoff in its own task; after failsafe_after_s apply failsafe_value
+     a physical press cancels that capability's pending failsafe until the hub next sends a cmd for it; max_on_s is always enforced
      local buttons keep working offline
 ```
 
+- **Firmware safety rules** (normative text in `contracts/mqtt.md`): (1) a **physical press wins over failsafe**: it cancels the pending failsafe for that capability until the hub next sends a command for it; (2) **`max_on_s` is always enforced**, whatever turned the output on (hub, press, boot value or failsafe value), and re-asserting "on" does not restart the timer; (3) **failsafe liveness in v1 is broker-level** (the node's MQTT session is down), so a dead device-hub behind a live broker does not trigger failsafe; a retained hub heartbeat the nodes watch is a possible future option, not part of v1; (4) the firmware **build timestamp** (`FW_BUILD_TS`) comes from the build host and the build **aborts if it is earlier than 2026-10-01**.
 - Core library (option A, [decision]): one declarative call per capability (e.g. `addBool("power", setRelay)`, `addInt("speed", 1, 5, setSpeed)`, `addSensorFloat("temperature", 30, readDht)`). The library does Wi-Fi, NTP, TLS, MQTT, announce JSON, acks, dedup, safety timers, BLE provisioning, `identify`, `unprovision`.
 - FreeRTOS tasks: network/MQTT, provisioning, sensor sampling, actuator control. Pin-level code stays in the user's callbacks.
 - TLS needs a valid clock, so NTP sync happens before the MQTT connect. Time earlier than the firmware build timestamp is never accepted: the board keeps retrying NTP (LAN chrony on `pi-brain` first, `pool.ntp.org` fallback) and does not connect over TLS until the time is plausible. The Pi 5 keeps time across power cuts with an RTC backup battery (`deploy/README.md`). Open item: verify behavior when there is no internet (section 11).
