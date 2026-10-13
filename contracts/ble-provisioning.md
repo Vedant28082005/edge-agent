@@ -47,7 +47,7 @@ Plaintext bundle (UTF-8 JSON, max 4096 bytes):
  "ntp_host": "192.168.1.10",
  "ca_pem": "-----BEGIN CERTIFICATE-----\n..."}
 ```
-`ntp_host` optional: the LAN NTP server the board should use first (chrony on `pi-brain`, see `docs`/`deploy/README.md`). The firmware falls back to `pool.ntp.org` if `ntp_host` is absent or unreachable. If the board has no internet and chrony is down, TLS cannot validate the certificate dates. The bundle contains secrets: never logged, never stored anywhere but NVS.
+`mqtt.username` is the `node_id`, and the board must also use it as its MQTT `client_id` (no separate field). The board connects with a clean session (`mqtt.md`, Node connection rules). `ntp_host` optional: the LAN NTP server the board should use first (chrony on `pi-brain`, see `docs`/`deploy/README.md`). The firmware falls back to `pool.ntp.org` if `ntp_host` is absent or unreachable. If the board has no internet and chrony is down, TLS cannot validate the certificate dates. The bundle contains secrets: never logged, never stored anywhere but NVS.
 
 Encryption: AES-256-GCM with the session key, random 12-byte nonce. Transmitted blob = `nonce(12) || ciphertext || tag(16)`. AAD = `node_id` UTF-8.
 

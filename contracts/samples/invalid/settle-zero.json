@@ -1,0 +1,25 @@
+{
+  "schema": 2,
+  "node_id": "esp32-0a1b2c3d4e5f",
+  "hw": "esp32-curtain",
+  "fw": "0.1.0",
+  "failsafe_after_s": 0,
+  "endpoints": [
+    {
+      "local_id": "cur1",
+      "type": "cover",
+      "capabilities": [
+        {
+          "id": "position",
+          "kind": "actuator",
+          "type": "int",
+          "min": 0,
+          "max": 100,
+          "unit": "%",
+          "boot_value": 0,
+          "settle_s": 0
+        }
+      ]
+    }
+  ]
+}

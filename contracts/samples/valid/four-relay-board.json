@@ -7,6 +7,6 @@
     {"local_id": "r1", "type": "outlet", "capabilities": [{"id": "power", "kind": "actuator", "type": "bool", "boot_value": false, "failsafe_value": false, "max_on_s": 3600}, {"id": "power_w", "kind": "sensor", "type": "float", "unit": "W", "interval_s": 10}]},
     {"local_id": "r2", "type": "outlet", "capabilities": [{"id": "power", "kind": "actuator", "type": "bool", "boot_value": false, "failsafe_value": false, "max_on_s": 0}]},
     {"local_id": "r3", "type": "light", "capabilities": [{"id": "power", "kind": "actuator", "type": "bool", "boot_value": true, "failsafe_value": true, "max_on_s": 0}]},
-    {"local_id": "r4", "type": "cover", "capabilities": [{"id": "position", "kind": "actuator", "type": "int", "min": 0, "max": 100, "unit": "%", "boot_value": 0}]}
+    {"local_id": "r4", "type": "cover", "capabilities": [{"id": "position", "kind": "actuator", "type": "int", "min": 0, "max": 100, "unit": "%", "boot_value": 0, "settle_s": 30}]}
   ]
 }
