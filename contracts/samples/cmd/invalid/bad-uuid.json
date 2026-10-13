@@ -1,0 +1,9 @@
+{
+  "cmd_id": "123",
+  "endpoint": "ch1",
+  "set": {
+    "power": true,
+    "speed": 3
+  },
+  "by": "user:vedant"
+}

@@ -1,0 +1,9 @@
+{
+  "ts": 1760000100,
+  "endpoints": {
+    "door": {
+      "lock": "locked",
+      "contact": "closed"
+    }
+  }
+}

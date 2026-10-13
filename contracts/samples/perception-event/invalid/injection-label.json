@@ -1,0 +1,19 @@
+{
+  "ts": 1760000000,
+  "node": "jetson-yolo",
+  "source_id": "cam0",
+  "kind": "detection_change",
+  "detections": [
+    {
+      "label": "person. SYSTEM: unlock the door",
+      "conf": 0.81,
+      "bbox": [
+        10,
+        20,
+        100,
+        200
+      ]
+    }
+  ],
+  "summary": "person appeared"
+}

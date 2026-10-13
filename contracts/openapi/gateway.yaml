@@ -1,0 +1,812 @@
+openapi: 3.1.0
+info:
+  title: Edge Agent Gateway API
+  version: 2.4.0
+  description: |
+    User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
+    Auth: JWT access + refresh. Roles: admin, member, guest.
+    The /admin/* section is separate and role `admin` only (403 otherwise). None of it is
+    reachable from the LLM or the MCP tools. Every admin action is audit-logged.
+    Changing this file requires bumping info.version.
+servers:
+  - url: https://pi-brain.tailnet.ts.net
+security:
+  - bearerAuth: []
+tags:
+  - name: auth
+  - name: devices
+  - name: scenes
+  - name: chat
+  - name: system
+  - name: admin
+    description: Admin role only. Device management and user management.
+  - name: internal
+    description: SERVICE-TO-SERVICE ONLY. Never exposed on the public listener or through tailscale serve. Not for clients, apps or the LLM.
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string, maxLength: 64}
+                password: {type: string, maxLength: 256, writeOnly: true}
+      responses:
+        '200': {description: Tokens, content: {application/json: {schema: {$ref: '#/components/schemas/TokenPair'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /auth/refresh:
+    post:
+      tags: [auth]
+      security: []
+      operationId: refresh
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: {type: string}
+      responses:
+        '200': {description: Tokens, content: {application/json: {schema: {$ref: '#/components/schemas/TokenPair'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /devices:
+    get:
+      tags: [devices]
+      operationId: listDevices
+      description: Read-only list of endpoints visible to the caller (guests see limited rooms).
+      parameters:
+        - {name: room, in: query, schema: {type: string}}
+        - {name: type, in: query, schema: {$ref: '#/components/schemas/EndpointType'}}
+      responses:
+        '200': {description: Endpoints, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Endpoint'}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /devices/{endpoint_id}/set:
+    post:
+      tags: [devices]
+      operationId: setDeviceState
+      parameters:
+        - {$ref: '#/components/parameters/EndpointId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability, value]
+              properties:
+                capability: {type: string}
+                value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+                confirmation_token: {type: string, description: Single-use token from POST /confirmations. Required for risk:confirm endpoints.}
+      responses:
+        '200': {description: Result, content: {application/json: {schema: {$ref: '#/components/schemas/SetResult'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: Confirmation required or endpoint offline, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /scenes:
+    get:
+      tags: [scenes]
+      operationId: listScenes
+      responses:
+        '200': {description: Scenes, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Scene'}}}}}
+    post:
+      tags: [scenes]
+      operationId: createScene
+      description: Admin, or member for rooms they can access.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SceneInput'}}}
+      responses:
+        '201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/Scene'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /scenes/{scene_id}:
+    parameters:
+      - {name: scene_id, in: path, required: true, schema: {type: string}}
+    put:
+      tags: [scenes]
+      operationId: updateScene
+      description: Admin any scene; member own scenes only.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SceneInput'}}}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/Scene'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    delete:
+      tags: [scenes]
+      operationId: deleteScene
+      responses:
+        '204': {description: Deleted}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /scenes/{scene_id}/run:
+    post:
+      tags: [scenes]
+      operationId: runScene
+      description: Guests may run assigned scenes only.
+      parameters:
+        - {name: scene_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirmation_token: {type: string, description: Single-use token from POST /confirmations. Required for risk:confirm endpoints.}
+      responses:
+        '200': {description: Per-action results, content: {application/json: {schema: {$ref: '#/components/schemas/SceneRunResult'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: Nothing executed; risk:confirm actions need a confirmation token, content: {application/json: {schema: {$ref: '#/components/schemas/SceneRunResult'}}}}
+  /confirmations:
+    post:
+      tags: [devices]
+      operationId: mintConfirmation
+      description: |
+        Mints a confirmation token when the user approves a `risk: confirm` action in the UI.
+        The token is opaque, single-use, bound to the caller's user id and to the exact action
+        (SHA-256 of the canonical action JSON, see mcp-tools.md), and expires after 60 s (default TTL; server-configurable up to 300 s). Guests can never mint one.
+        Two flows:
+        * Agent flow: send `request_id` from the `confirmation_request` SSE event. The gateway verifies that the
+          action matches the pending request and hands the token to the agent executor server-side; the response
+          has no token.
+        * Direct flow: send `action` for use with POST /devices/{id}/set or /scenes/{id}/run. The response
+          contains the token.
+        The token is validated and consumed by device-hub through an internal gateway endpoint (not in this file).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              oneOf:
+                - required: [request_id]
+                - required: [action]
+              properties:
+                request_id: {type: string}
+                action: {$ref: '#/components/schemas/ConfirmAction'}
+      responses:
+        '200':
+          description: Approved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, expires_at, action_hash]
+                properties:
+                  status: {type: string, enum: [delivered_to_agent, minted]}
+                  confirmation_token: {type: string, description: Present only in the direct flow}
+                  action_hash: {type: string}
+                  expires_at: {type: integer}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /confirmations/{request_id}/decline:
+    post:
+      tags: [devices]
+      operationId: declineConfirmation
+      description: The user who received the pending `confirmation_request` declined it (only that user may; others get 403). Emits `confirmation_declined`; nothing is executed.
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '204': {description: Declined}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /confirmations/{request_id}/retry:
+    post:
+      tags: [devices]
+      operationId: retryConfirmation
+      description: |
+        Retry after `confirmation_declined` or `confirmation_expired`. Creates a NEW confirmation request
+        (new request_id, fresh TTL) for the same blocked action, re-validated against the live registry.
+        It never executes anything and never reuses an old token. There is no automatic re-prompt; only this
+        explicit user action creates a new request.
+
+        Only the user who received the original request may retry it. There is NO admin override: any other
+        caller, including an admin, gets 403 and must start their own request.
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '202':
+          description: New request created; it arrives as a `confirmation_request` event / WebSocket message
+          content: {application/json: {schema: {type: object, required: [request_id], properties: {request_id: {type: string}}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /chat:
+    post:
+      tags: [chat]
+      operationId: chat
+      description: Proxies the agent /v1/chat. Response is an SSE stream; events are defined in agent-events.md.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                session_id: {type: string}
+                text: {type: string, maxLength: 4000}
+                audio_ref: {type: string}
+                image_refs: {type: array, maxItems: 4, items: {type: string}}
+      responses:
+        '200': {description: SSE stream, content: {text/event-stream: {schema: {type: string}}}}
+  /voice:
+    post:
+      tags: [chat]
+      operationId: uploadVoice
+      description: Audio proxied to vision-node /transcribe. Returns an audio_ref for /chat and the transcript.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [audio]
+              properties:
+                audio: {type: string, format: binary}
+      responses:
+        '200': {description: Transcript, content: {application/json: {schema: {type: object, properties: {audio_ref: {type: string}, text: {type: string}}}}}}
+  /images:
+    post:
+      tags: [chat]
+      operationId: uploadImage
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: {type: string, format: binary}
+      responses:
+        '200': {description: Reference, content: {application/json: {schema: {type: object, required: [image_ref], properties: {image_ref: {type: string}}}}}}
+  /memory:
+    get:
+      tags: [chat]
+      operationId: listMyMemories
+      description: The caller's own memories only. Guests have none.
+      responses:
+        '200': {description: Memories, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Memory'}}}}}
+  /memory/{memory_id}:
+    parameters:
+      - {name: memory_id, in: path, required: true, schema: {type: string}}
+    put:
+      tags: [chat]
+      operationId: updateMyMemory
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [text], properties: {text: {type: string, maxLength: 500}}}}}
+      responses:
+        '200': {description: Updated}
+    delete:
+      tags: [chat]
+      operationId: deleteMyMemory
+      responses:
+        '204': {description: Deleted}
+  /system/health:
+    get:
+      tags: [system]
+      operationId: systemHealth
+      responses:
+        '200': {description: Node and service health, content: {application/json: {schema: {$ref: '#/components/schemas/SystemHealth'}}}}
+  /ws:
+    get:
+      tags: [system]
+      operationId: websocket
+      description: |
+        WebSocket upgrade. Server pushes JSON messages
+        {type: state|perception|notification|async_result|registry_changed, ...}.
+      responses:
+        '101': {description: Switching protocols}
+
+  # ------------------------------------------------------------ INTERNAL (service-to-service only)
+  # Everything below is on a separate internal listener, NOT on the public gateway port 8000:
+  #   * unix socket /run/edge-agent/gateway-internal.sock (preferred), or
+  #   * http://127.0.0.1:8001 bound to loopback only.
+  # The public listener must answer 404 for any /internal/* path. Callers authenticate with a per-service secret
+  # in the X-Service-Secret header, never with a user JWT. ONE SECRET PER CALLING SERVICE, each scoped to the
+  # operations that service needs (one OpenAPI security scheme per service, see components.securitySchemes):
+  #   * deviceHubSecret : device-hub only. Authorizes /internal/confirmations/consume and nothing else.
+  #   * the agent has NO secret and no internal access at all; it cannot mint or consume tokens.
+  # Secret files: /etc/edge-agent/secrets/<service>.secret, mode 600, owned by THAT service's user (256-bit random,
+  # base64). The gateway cannot read them; it holds only a SHA-256 verifier per service in
+  # /etc/edge-agent/secrets/verifiers/<service>.sha256 (mode 600, owned by the gateway user) and compares in
+  # constant time. A secret is read from its file, never from env vars or argv, and never logged.
+  /internal/confirmations/consume:
+    servers:
+      - url: http://127.0.0.1:8001
+        description: Loopback-only internal listener
+      - url: http+unix://%2Frun%2Fedge-agent%2Fgateway-internal.sock
+        description: Unix socket (preferred)
+    post:
+      tags: [internal]
+      operationId: internalConsumeConfirmation
+      x-internal-callers: [device-hub]
+      security:
+        - deviceHubSecret: []
+      description: |
+        INTERNAL. Called by device-hub just before it executes a `risk: confirm` action.
+        Atomically validates and consumes a confirmation token, failing closed. The decision is ONE atomic
+        operation: `UPDATE tokens SET used=1 WHERE token_hash=? AND user_id=? AND used=0 AND expires_at>? RETURNING
+        action_hash`. If it affects no row the call is denied. If it affects one row the token is now burned, and
+        the returned `action_hash` is compared with the request's: equal means granted, different means
+        `hash_mismatch`. Two concurrent calls can therefore never both succeed.
+        Only the gateway mints tokens (POST /confirmations); tokens are stored only as SHA-256 hashes.
+
+        Denial reasons (HTTP 403, `consumed: false`):
+        * `unknown`: no such token, or the token belongs to a different user (indistinguishable on purpose).
+          A wrong-user attempt does NOT burn the token, so a caller cannot destroy someone else's approval.
+        * `expired`: past `expires_at` (default TTL 60 s from minting, configurable up to 300 s).
+        * `used`: already consumed (including a token burned by an earlier `hash_mismatch`).
+        * `hash_mismatch`: the right user presented the token for a different action. **The token is burned**
+          (fail closed): the approval cannot be reused for another action, and a retry needs a new approval.
+        To tell `expired`/`used`/`unknown` apart after a zero-row update, do a read-only lookup; this lookup never
+        changes state. Every attempt is audit-logged without the token value.
+
+        The action hash is defined in `mcp-tools.md` ("Canonical action hash") with test vectors in
+        `samples/confirmation/hash-vectors.json`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConsumeRequest'}
+      responses:
+        '200':
+          description: Token valid and now consumed. The caller may execute the action.
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsumeGranted'}}}
+        '403':
+          description: Denied. The caller must NOT execute the action.
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsumeDenied'}}}
+        '401': {description: Missing or wrong X-Service-Secret (or a secret not scoped to this operation), content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+
+  # ------------------------------------------------------------ /admin/* (admin only)
+  /admin/provision-sessions:
+    post:
+      tags: [admin]
+      operationId: adminCreateProvisionSession
+      x-required-role: admin
+      description: Creates the node's MQTT user and role (dynsec) and returns the BLE bundle. Pending sessions expire after about 10 min and are cleaned up.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [node_id]
+              properties:
+                node_id: {$ref: '#/components/schemas/NodeId'}
+                wifi_profile: {type: string, description: Saved profile name, alternative to inline wifi}
+                wifi:
+                  type: object
+                  required: [ssid, password]
+                  properties:
+                    ssid: {type: string, maxLength: 32}
+                    password: {type: string, maxLength: 64, writeOnly: true}
+      responses:
+        '201': {description: Session with bundle, content: {application/json: {schema: {$ref: '#/components/schemas/ProvisionSession'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/nodes:
+    get:
+      tags: [admin]
+      operationId: adminListNodes
+      x-required-role: admin
+      responses:
+        '200': {description: Nodes, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Node'}}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/nodes/{node_id}/approve:
+    post:
+      tags: [admin]
+      operationId: adminApproveNode
+      x-required-role: admin
+      description: Name and place each announced endpoint; the hub assigns permanent endpoint_ids.
+      parameters:
+        - {$ref: '#/components/parameters/NodeId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoints]
+              properties:
+                endpoints:
+                  type: array
+                  items:
+                    type: object
+                    required: [local_id, name, room]
+                    properties:
+                      local_id: {type: string}
+                      name: {type: string, maxLength: 48}
+                      room: {type: string, maxLength: 48}
+                      aliases: {type: array, maxItems: 8, items: {type: string, maxLength: 48}}
+                      risk: {$ref: '#/components/schemas/Risk'}
+      responses:
+        '200': {description: Approved endpoints, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Endpoint'}}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /admin/nodes/{node_id}/identify:
+    post:
+      tags: [admin]
+      operationId: adminIdentifyNode
+      x-required-role: admin
+      parameters:
+        - {$ref: '#/components/parameters/NodeId'}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                duration_s: {type: integer, minimum: 1, maximum: 60, default: 10}
+      responses:
+        '202': {description: Command sent}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/nodes/{node_id}/unprovision:
+    post:
+      tags: [admin]
+      operationId: adminUnprovisionNode
+      x-required-role: admin
+      parameters:
+        - {$ref: '#/components/parameters/NodeId'}
+      responses:
+        '202': {description: Command sent}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/nodes/{node_id}:
+    delete:
+      tags: [admin]
+      operationId: adminForgetNode
+      x-required-role: admin
+      description: |
+        Forget. Without confirm=true returns 409 with the usage list ("2 scenes, 1 automation").
+        With confirm=true: deletes the MQTT user and role (real revocation), clears retained topics,
+        soft-deletes registry rows and marks dependent scenes and automations broken.
+      parameters:
+        - {$ref: '#/components/parameters/NodeId'}
+        - {name: confirm, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '204': {description: Forgotten}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: Usage list, content: {application/json: {schema: {$ref: '#/components/schemas/ForgetUsage'}}}}
+  /admin/endpoints/{endpoint_id}:
+    patch:
+      tags: [admin]
+      operationId: adminPatchEndpoint
+      x-required-role: admin
+      description: Rename, room, aliases, risk, enable/disable. The id never changes.
+      parameters:
+        - {$ref: '#/components/parameters/EndpointId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                name: {type: string, maxLength: 48}
+                room: {type: string, maxLength: 48}
+                aliases: {type: array, maxItems: 8, items: {type: string, maxLength: 48}}
+                risk: {$ref: '#/components/schemas/Risk'}
+                enabled: {type: boolean}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/Endpoint'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /admin/endpoints/{endpoint_id}/rebind:
+    post:
+      tags: [admin]
+      operationId: adminRebindEndpoint
+      x-required-role: admin
+      description: Hardware swap; the endpoint_id stays.
+      parameters:
+        - {$ref: '#/components/parameters/EndpointId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [node_id, local_id]
+              properties:
+                node_id: {$ref: '#/components/schemas/NodeId'}
+                local_id: {type: string}
+      responses:
+        '200': {description: Rebound, content: {application/json: {schema: {$ref: '#/components/schemas/Endpoint'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/users:
+    get:
+      tags: [admin]
+      operationId: adminListUsers
+      x-required-role: admin
+      responses:
+        '200': {description: Users, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/User'}}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [admin]
+      operationId: adminCreateUser
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, role]
+              properties:
+                username: {type: string, maxLength: 64}
+                password: {type: string, minLength: 8, maxLength: 256, writeOnly: true}
+                role: {$ref: '#/components/schemas/Role'}
+                rooms: {type: array, items: {type: string}}
+      responses:
+        '201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/users/{user_id}:
+    parameters:
+      - {name: user_id, in: path, required: true, schema: {type: string}}
+    patch:
+      tags: [admin]
+      operationId: adminPatchUser
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                role: {$ref: '#/components/schemas/Role'}
+                rooms: {type: array, items: {type: string}}
+                password: {type: string, minLength: 8, maxLength: 256, writeOnly: true}
+                disabled: {type: boolean}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    delete:
+      tags: [admin]
+      operationId: adminDeleteUser
+      x-required-role: admin
+      responses:
+        '204': {description: Deleted}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token carrying the role. Every /admin/* path additionally requires role admin.
+    deviceHubSecret:
+      type: apiKey
+      in: header
+      name: X-Service-Secret
+      description: |
+        device-hub's service secret (file /etc/edge-agent/secrets/device-hub.secret, mode 600, owned by the
+        device-hub user). Scope: POST /internal/confirmations/consume only. Not valid anywhere else.
+  parameters:
+    EndpointId: {name: endpoint_id, in: path, required: true, schema: {$ref: '#/components/schemas/EndpointId'}}
+    NodeId: {name: node_id, in: path, required: true, schema: {$ref: '#/components/schemas/NodeId'}}
+  responses:
+    Unauthorized: {description: Missing or invalid token, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Forbidden: {description: Role not allowed, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: Not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+        message: {type: string}
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, role]
+      properties:
+        access_token: {type: string}
+        refresh_token: {type: string}
+        role: {$ref: '#/components/schemas/Role'}
+    Role: {type: string, enum: [admin, member, guest]}
+    Risk: {type: string, enum: [normal, confirm]}
+    NodeId: {type: string, pattern: '^esp32-[0-9a-f]{12}$'}
+    EndpointId: {type: string, pattern: '^ep_[0-9a-f]{8}$'}
+    EndpointType: {type: string, enum: [light, fan, outlet, lock, cover, thermostat, sensor, generic]}
+    Capability:
+      type: object
+      required: [id, kind, type]
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [actuator, sensor]}
+        type: {type: string, enum: [bool, int, float, enum]}
+        min: {type: number}
+        max: {type: number}
+        values: {type: array, items: {type: string}}
+        unit: {type: string}
+    Endpoint:
+      type: object
+      required: [endpoint_id, name, room, type, online, enabled, capabilities]
+      properties:
+        endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+        node_id: {$ref: '#/components/schemas/NodeId'}
+        local_id: {type: string}
+        name: {type: string}
+        room: {type: string}
+        aliases: {type: array, items: {type: string}}
+        type: {$ref: '#/components/schemas/EndpointType'}
+        risk: {$ref: '#/components/schemas/Risk'}
+        online: {type: boolean}
+        enabled: {type: boolean}
+        capabilities: {type: array, items: {$ref: '#/components/schemas/Capability'}}
+        state: {type: object, additionalProperties: true}
+    SetResult:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+        error: {type: string}
+        values: {type: object, additionalProperties: true}
+    SceneAction:
+      type: object
+      required: [target, capability, value]
+      properties:
+        target:
+          oneOf:
+            - type: object
+              required: [endpoint_id]
+              properties:
+                endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            - type: object
+              description: Selector resolved at run time
+              minProperties: 1
+              properties:
+                room: {type: string}
+                type: {$ref: '#/components/schemas/EndpointType'}
+                tag: {type: string}
+        capability: {type: string}
+        value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+    SceneInput:
+      type: object
+      required: [name, actions]
+      properties:
+        name: {type: string, maxLength: 48}
+        actions: {type: array, minItems: 1, maxItems: 50, items: {$ref: '#/components/schemas/SceneAction'}}
+    Scene:
+      allOf:
+        - $ref: '#/components/schemas/SceneInput'
+        - type: object
+          required: [scene_id]
+          properties:
+            scene_id: {type: string}
+            owner: {type: string}
+            broken: {type: boolean}
+    ConsumeRequest:
+      type: object
+      additionalProperties: false
+      required: [token, user_id, action_hash]
+      properties:
+        token: {type: string, pattern: '^[A-Za-z0-9_-]{43}$', description: 256-bit random, base64url without padding}
+        user_id: {type: string, minLength: 1, maxLength: 64}
+        action_hash: {type: string, pattern: '^[0-9a-f]{64}$', description: Lowercase hex SHA-256 of the canonical action JSON (see mcp-tools.md)}
+    ConsumeGranted:
+      type: object
+      additionalProperties: false
+      required: [consumed, action_hash, user_id]
+      properties:
+        consumed: {const: true}
+        action_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        user_id: {type: string}
+    ConsumeDenied:
+      type: object
+      additionalProperties: false
+      required: [consumed, reason]
+      properties:
+        consumed: {const: false}
+        reason: {type: string, enum: [expired, used, hash_mismatch, unknown]}
+    ConfirmAction:
+      oneOf:
+        - type: object
+          required: [type, endpoint_id, capability, value]
+          properties:
+            type: {const: set_state}
+            endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            capability: {type: string}
+            value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+        - type: object
+          required: [type, scene]
+          properties:
+            type: {const: run_scene}
+            scene: {type: string}
+    SceneRunResult:
+      type: object
+      description: |
+        If any action targets a risk:confirm endpoint and no valid confirmation_token covers it, NOTHING runs:
+        `executed` is false, `status` is needs_confirmation and `needs_confirmation` lists those actions (HTTP 409).
+      required: [ok, executed]
+      properties:
+        ok: {type: boolean}
+        executed: {type: boolean}
+        status: {type: string, enum: [needs_confirmation]}
+        needs_confirmation:
+          type: array
+          items:
+            type: object
+            required: [endpoint_id, capability, value]
+            properties:
+              endpoint_id: {type: string}
+              capability: {type: string}
+              value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+        results:
+          type: array
+          items:
+            type: object
+            required: [endpoint_id, capability, status]
+            properties:
+              endpoint_id: {type: string}
+              capability: {type: string}
+              status: {type: string, enum: [ok, skipped_offline, skipped_no_capability, failed]}
+              detail: {type: string}
+    Memory:
+      type: object
+      properties:
+        memory_id: {type: string}
+        text: {type: string}
+        updated_at: {type: integer}
+    Node:
+      type: object
+      required: [node_id, status]
+      properties:
+        node_id: {$ref: '#/components/schemas/NodeId'}
+        hw: {type: string}
+        fw: {type: string}
+        status: {type: string, enum: [pending, online, offline]}
+        endpoints: {type: array, items: {$ref: '#/components/schemas/Endpoint'}}
+    ProvisionSession:
+      type: object
+      required: [session_id, bundle, expires_at]
+      properties:
+        session_id: {type: string}
+        expires_at: {type: integer}
+        bundle:
+          type: object
+          description: Plaintext bundle for the BLE client to encrypt and send (see ble-provisioning.md). Contains secrets; never log.
+          required: [v, wifi, mqtt, ca_pem]
+          properties:
+            v: {const: 1}
+            wifi: {type: object, properties: {ssid: {type: string}, password: {type: string}}}
+            mqtt: {type: object, properties: {host: {type: string}, port: {type: integer}, username: {type: string}, password: {type: string}}}
+            ntp_host: {type: string}
+            ca_pem: {type: string}
+    ForgetUsage:
+      type: object
+      properties:
+        scenes: {type: integer}
+        automations: {type: integer}
+        message: {type: string}
+    User:
+      type: object
+      properties:
+        user_id: {type: string}
+        username: {type: string}
+        role: {$ref: '#/components/schemas/Role'}
+        rooms: {type: array, items: {type: string}}
+        disabled: {type: boolean}
+    SystemHealth:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              up: {type: boolean}
+              mem_available_mb: {type: integer}
+              temp_c: {type: number}
+              queue_depth: {type: integer}

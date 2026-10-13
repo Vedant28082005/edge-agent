@@ -1,0 +1,821 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edge-agent.local/contracts/announce.schema.json",
+  "title": "Node announce, schema 2",
+  "description": "Self-description a node publishes (retained, QoS 1) to home/v1/nodes/{node_id}/announce on every boot. Names, rooms and aliases are NOT part of the announce; they are admin-set in the registry. Cross-field rules not expressible here (min<=max, boot_value within range, unique local_id and capability ids, node_id equals the topic id) are enforced by the hub. See capabilities.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "node_id",
+    "hw",
+    "fw",
+    "endpoints"
+  ],
+  "properties": {
+    "schema": {
+      "const": 2
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^esp32-[0-9a-f]{12}$",
+      "maxLength": 32
+    },
+    "hw": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,32}$"
+    },
+    "fw": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9.+-]{1,32}$"
+    },
+    "failsafe_after_s": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 86400,
+      "default": 60,
+      "description": "Seconds without hub connection before failsafe_value is applied. 0 = keep last values. Default 60."
+    },
+    "endpoints": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/endpoint"
+      }
+    }
+  },
+  "$defs": {
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_id",
+        "type",
+        "capabilities"
+      ],
+      "properties": {
+        "local_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]{1,16}$"
+        },
+        "type": {
+          "enum": [
+            "light",
+            "fan",
+            "outlet",
+            "lock",
+            "cover",
+            "thermostat",
+            "sensor",
+            "generic"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/capability"
+          }
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "type"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "power",
+            "brightness",
+            "color_temp",
+            "speed",
+            "position",
+            "lock",
+            "target_temp",
+            "mode",
+            "temperature",
+            "humidity",
+            "illuminance",
+            "motion",
+            "contact",
+            "power_w",
+            "current_a",
+            "voltage_v",
+            "battery"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "actuator",
+            "sensor"
+          ]
+        },
+        "type": {
+          "enum": [
+            "bool",
+            "int",
+            "float",
+            "enum"
+          ]
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "values": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]{1,24}$"
+          }
+        },
+        "unit": {
+          "enum": [
+            "C",
+            "%",
+            "lux",
+            "W",
+            "A",
+            "V",
+            "K",
+            "step"
+          ]
+        },
+        "interval_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "boot_value": {
+          "type": [
+            "boolean",
+            "number",
+            "string"
+          ],
+          "maxLength": 24
+        },
+        "failsafe_value": {
+          "type": [
+            "boolean",
+            "number",
+            "string"
+          ],
+          "maxLength": 24
+        },
+        "max_on_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "power"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "actuator"
+              },
+              "type": {
+                "const": "bool"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "brightness"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "actuator"
+              },
+              "type": {
+                "const": "int"
+              },
+              "min": {
+                "minimum": 0,
+                "maximum": 100
+              },
+              "max": {
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "color_temp"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "actuator"
+              },
+              "type": {
+                "const": "int"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "speed"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "actuator"
+              },
+              "type": {
+                "const": "int"
+              }
+            },
+            "required": [
+              "min",
+              "max"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "position"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "actuator"
+              },
+              "type": {
+                "const": "int"
+              },
+              "min": {
+                "minimum": 0,
+                "maximum": 100
+              },
+              "max": {
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "lock"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "actuator"
+              },
+              "type": {
+                "const": "enum"
+              },
+              "values": {
+                "const": [
+                  "locked",
+                  "unlocked"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "target_temp"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "actuator"
+              },
+              "type": {
+                "const": "float"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "mode"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "actuator"
+              },
+              "type": {
+                "const": "enum"
+              }
+            },
+            "required": [
+              "values"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "temperature"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              },
+              "type": {
+                "const": "float"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "humidity"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              },
+              "type": {
+                "const": "float"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "illuminance"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              },
+              "type": {
+                "const": "float"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "motion"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              },
+              "type": {
+                "const": "bool"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "contact"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              },
+              "type": {
+                "const": "enum"
+              },
+              "values": {
+                "const": [
+                  "open",
+                  "closed"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "power_w"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              },
+              "type": {
+                "const": "float"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "current_a"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              },
+              "type": {
+                "const": "float"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "voltage_v"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              },
+              "type": {
+                "const": "float"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "battery"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              },
+              "type": {
+                "const": "int"
+              },
+              "min": {
+                "minimum": 0,
+                "maximum": 100
+              },
+              "max": {
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "sensor"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "interval_s"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "boot_value"
+                  ]
+                },
+                {
+                  "required": [
+                    "failsafe_value"
+                  ]
+                },
+                {
+                  "required": [
+                    "max_on_s"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "actuator"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "boot_value"
+            ],
+            "not": {
+              "required": [
+                "interval_s"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "bool"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "boot_value": {
+                "type": "boolean"
+              },
+              "failsafe_value": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "int"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "boot_value": {
+                "type": "integer"
+              },
+              "failsafe_value": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "float"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "boot_value": {
+                "type": "number"
+              },
+              "failsafe_value": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "enum"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "boot_value": {
+                "type": "string"
+              },
+              "failsafe_value": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "bool",
+                  "enum"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "min"
+                  ]
+                },
+                {
+                  "required": [
+                    "max"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "bool",
+                  "int",
+                  "float"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "values"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "enum"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "values"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

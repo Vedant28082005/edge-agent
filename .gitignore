@@ -18,3 +18,13 @@ out/
 
 # temporary: original mangled doc, pending confirmation
 docs/ARCHITECTURE.mangled.md
+
+# generated TLS material and dynsec state
+deploy/mosquitto/certs/
+deploy/mosquitto/data/
+deploy/mosquitto/dynamic-security.json
+deploy/mosquitto/.env
+deploy/mosquitto/passwd
+*.crt
+*.csr
+*.srl

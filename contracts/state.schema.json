@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edge-agent.local/contracts/state.schema.json",
+  "title": "Node state payload (home/v1/nodes/{id}/state)",
+  "description": "Retained, QoS 1. Values for every capability of every endpoint. Value types per capability are checked by the hub against the announce.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ts",
+    "endpoints"
+  ],
+  "properties": {
+    "ts": {
+      "type": "integer",
+      "minimum": 1000000000,
+      "description": "Unix seconds UTC (NTP)"
+    },
+    "endpoints": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 16,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9_]{1,16}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 16,
+        "propertyNames": {
+          "enum": [
+            "power",
+            "brightness",
+            "color_temp",
+            "speed",
+            "position",
+            "lock",
+            "target_temp",
+            "mode",
+            "temperature",
+            "humidity",
+            "illuminance",
+            "motion",
+            "contact",
+            "power_w",
+            "current_a",
+            "voltage_v",
+            "battery"
+          ]
+        },
+        "additionalProperties": {
+          "type": [
+            "boolean",
+            "number",
+            "string"
+          ],
+          "maxLength": 24
+        }
+      }
+    }
+  }
+}

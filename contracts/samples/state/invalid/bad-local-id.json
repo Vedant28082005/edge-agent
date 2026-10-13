@@ -1,0 +1,15 @@
+{
+  "ts": 1760000000,
+  "endpoints": {
+    "ch1": {
+      "power": true,
+      "speed": 3
+    },
+    "t1": {
+      "temperature": 27.4
+    },
+    "Bad/Id": {
+      "power": true
+    }
+  }
+}

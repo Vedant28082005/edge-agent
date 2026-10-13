@@ -1,0 +1,19 @@
+# Production stack on pi-brain. Broker only for now; other services are added by their sessions.
+# Run from the deploy/ folder:  docker compose -f compose.yml up -d
+#
+# MOSQUITTO_STATE_DIR holds the secret/stateful parts (certs/ and data/). Default ./mosquitto is for the dev PC.
+# On the Pi, tools/setup-pi-brain.sh installs them under /etc/edge-agent/mosquitto (owned by uid 1883, key mode 600)
+# and writes MOSQUITTO_STATE_DIR into deploy/.env, so routine deploys never touch secrets or need root.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20   # multi-arch (linux/arm64 for the Pi)
+    container_name: edge-mosquitto
+    restart: unless-stopped
+    ports:
+      - "8883:8883"                   # TLS only; 1883 is not configured
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ${MOSQUITTO_STATE_DIR:-./mosquitto}/certs/ca.crt:/mosquitto/certs/ca.crt:ro
+      - ${MOSQUITTO_STATE_DIR:-./mosquitto}/certs/server.crt:/mosquitto/certs/server.crt:ro
+      - ${MOSQUITTO_STATE_DIR:-./mosquitto}/certs/server.key:/mosquitto/certs/server.key:ro
+      - ${MOSQUITTO_STATE_DIR:-./mosquitto}/data:/mosquitto/data

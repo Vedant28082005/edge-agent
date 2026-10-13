@@ -1,0 +1,17 @@
+{
+  "schema": 2,
+  "node_id": "esp32-0123456789ab",
+  "hw": "esp32-c3",
+  "fw": "1.2.3-rc1",
+  "endpoints": [
+    {
+      "local_id": "l1",
+      "type": "light",
+      "capabilities": [
+        {"id": "power", "kind": "actuator", "type": "bool", "boot_value": false},
+        {"id": "brightness", "kind": "actuator", "type": "int", "min": 0, "max": 100, "unit": "%", "boot_value": 50},
+        {"id": "color_temp", "kind": "actuator", "type": "int", "min": 2700, "max": 6500, "unit": "K", "boot_value": 2700}
+      ]
+    }
+  ]
+}

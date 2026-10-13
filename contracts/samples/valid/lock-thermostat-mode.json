@@ -1,0 +1,27 @@
+{
+  "schema": 2,
+  "node_id": "esp32-fedcba987654",
+  "hw": "esp32-devkit",
+  "fw": "0.3.0",
+  "failsafe_after_s": 120,
+  "endpoints": [
+    {
+      "local_id": "door",
+      "type": "lock",
+      "capabilities": [
+        {"id": "lock", "kind": "actuator", "type": "enum", "values": ["locked", "unlocked"], "boot_value": "locked", "failsafe_value": "locked"},
+        {"id": "contact", "kind": "sensor", "type": "enum", "values": ["open", "closed"], "interval_s": 5}
+      ]
+    },
+    {
+      "local_id": "ac",
+      "type": "thermostat",
+      "capabilities": [
+        {"id": "target_temp", "kind": "actuator", "type": "float", "min": 16, "max": 30, "unit": "C", "boot_value": 24.0},
+        {"id": "mode", "kind": "actuator", "type": "enum", "values": ["off", "cool", "fan_only"], "boot_value": "off", "failsafe_value": "off"},
+        {"id": "temperature", "kind": "sensor", "type": "float", "unit": "C", "interval_s": 60},
+        {"id": "humidity", "kind": "sensor", "type": "float", "unit": "%", "interval_s": 60}
+      ]
+    }
+  ]
+}

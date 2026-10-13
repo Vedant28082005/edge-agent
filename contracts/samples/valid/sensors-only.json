@@ -1,0 +1,16 @@
+{
+  "schema": 2,
+  "node_id": "esp32-112233445566",
+  "hw": "esp32-devkit",
+  "fw": "0.1.0",
+  "endpoints": [
+    {"local_id": "env", "type": "sensor", "capabilities": [
+      {"id": "temperature", "kind": "sensor", "type": "float", "unit": "C", "interval_s": 30},
+      {"id": "illuminance", "kind": "sensor", "type": "float", "unit": "lux", "interval_s": 30},
+      {"id": "motion", "kind": "sensor", "type": "bool", "interval_s": 1},
+      {"id": "battery", "kind": "sensor", "type": "int", "unit": "%", "interval_s": 600},
+      {"id": "voltage_v", "kind": "sensor", "type": "float", "unit": "V", "interval_s": 600},
+      {"id": "current_a", "kind": "sensor", "type": "float", "unit": "A", "interval_s": 600}
+    ]}
+  ]
+}

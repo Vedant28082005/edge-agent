@@ -124,7 +124,7 @@ Prefix `home/v1/`. Payloads JSON, UTF-8. Client id = `node_id`. Each node has it
 | `nodes/{id}/ack` | node→hub | 1 | Command result |
 | `nodes/{id}/ota` | reserved | | Not implemented (D8) |
 | `perception/{node}/events` | node→agent | 1 | Detection/change events |
-| `services/{name}/health` | node→hub | 0, retained | CPU, MemAvailable, temp, queue depth |
+| `services/{name}/health` | service→hub | 0, retained | CPU, MemAvailable, temp, queue depth |
 
 **announce (schema 2)**
 
@@ -177,7 +177,7 @@ BOOT → LOAD_CONFIG
   ├─ no config, or BOOT button held 3 s → PROVISIONING (BLE, 5 min window, LED pattern)
   │     ├─ success → save to NVS → reboot
   │     └─ timeout → idle (no BLE) until the button is pressed or power-cycled
-  └─ config present → apply boot_value → WIFI → NTP → MQTT_TLS (LWT=offline)
+  └─ config present → apply boot_value → WIFI → NTP (valid only if ≥ firmware build timestamp; retry, no TLS before) → MQTT_TLS (LWT=offline)
         → ANNOUNCE (retained) → subscribe cmd → publish state → RUN
 RUN: handle cmd (dedup cmd_id, validate vs own ranges, apply, publish state, ack)
      publish state on change + heartbeat; sensors on interval
@@ -187,7 +187,7 @@ RUN: handle cmd (dedup cmd_id, validate vs own ranges, apply, publish state, ack
 
 - Core library (option A, [decision]): one declarative call per capability (e.g. `addBool("power", setRelay)`, `addInt("speed", 1, 5, setSpeed)`, `addSensorFloat("temperature", 30, readDht)`). The library does Wi-Fi, NTP, TLS, MQTT, announce JSON, acks, dedup, safety timers, BLE provisioning, `identify`, `unprovision`.
 - FreeRTOS tasks: network/MQTT, provisioning, sensor sampling, actuator control. Pin-level code stays in the user's callbacks.
-- TLS needs a valid clock, so NTP sync happens before the MQTT connect. Open item: verify behavior when there is no internet (section 11).
+- TLS needs a valid clock, so NTP sync happens before the MQTT connect. Time earlier than the firmware build timestamp is never accepted: the board keeps retrying NTP (LAN chrony on `pi-brain` first, `pool.ntp.org` fallback) and does not connect over TLS until the time is plausible. The Pi 5 keeps time across power cuts with an RTC backup battery (`deploy/README.md`). Open item: verify behavior when there is no internet (section 11).
 
 ### 4.4 BLE provisioning (admin-initiated)
 
@@ -226,18 +226,20 @@ Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, 
 |---|---|---|
 | `list_devices` | `room?`, `type?` | Endpoints with room, type, online status |
 | `get_state` | `endpoint_id` or `room` | Current values |
-| `set_state` | `endpoint_id`, `capability`, `value` | Validated against the registry; waits for ack (3 s timeout); `risk: confirm` needs `confirmed: true`, set only after the user confirms |
-| `run_scene` | `scene` | See 4.7 |
+| `set_state` | `endpoint_id`, `capability`, `value` | Validated against the registry; waits for ack (3 s timeout); `risk: confirm` endpoints need a `confirmation_token` (see below) |
+| `run_scene` | `scene` | See 4.7. Same `confirmation_token` rule; if any action needs confirmation and has no valid token, **nothing runs** |
 | `read_sensor` | `endpoint_id`, `capability` | Last value, timestamp, staleness flag |
 
 The LLM can **propose** a scene or automation as JSON, but it is saved only after a user approves it in the UI.
+
+**Confirmation tokens.** `risk: confirm` actions need a `confirmation_token`: opaque, single-use, bound to the user and the exact action, 60 s TTL, minted by the gateway (`POST /confirmations`) only when the user approves in the UI. It is **not** in any tool schema the LLM sees; the agent executor attaches it out-of-band (MCP `_meta`), and device-hub validates and consumes it through the gateway. Without a valid token the tool returns `confirmation_required` / `needs_confirmation` and the agent emits a `confirmation_request` event. A decline or timeout produces `confirmation_declined` / `confirmation_expired`; there is **no automatic re-prompt**, the UI offers a **Retry** that creates a brand-new request. Proactive and automation-triggered actions never prompt: for `risk: confirm` endpoints they only notify. Details in `contracts/mcp-tools.md` and `contracts/agent-events.md`.
 
 ### 4.7 Scenes (v1)
 
 - A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time, so a new light added to the bedroom automatically joins "good night".
 - Run semantics: validate each action, run through the same executor as everything else (range checks, `risk`, verify). **Endpoints that are offline, or lack the capability, are skipped and reported** ("fan offline, skipped"); commands are never queued, so a stale "unlock" cannot fire later. Results are per action (partial failure is visible).
-- `risk: confirm` endpoints in a scene need confirmation from the user running it.
-- Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only. Automations (later) cannot touch `risk: confirm` endpoints unless an admin opted that endpoint in.
+- `risk: confirm` endpoints in a scene need a `confirmation_token` from the user running it. If any action targets such an endpoint without a valid token, **the scene executes nothing** (not even its non-risky actions) and returns `needs_confirmation` listing those endpoints; the token is bound to the scene and to the exact risky actions it resolved to.
+- Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only. Automations (later) never execute actions on `risk: confirm` endpoints, with **no admin opt-in**, and never prompt: they notify instead, and the user can then act through the normal confirmation flow. A future **standing approval** (a user pre-approving a specific `risk: confirm` action for an automation, with limits and expiry) is an idea explicitly **out of scope** for this project.
 - The registry re-validates all scenes and automations on every registry change and flags the broken ones.
 
 ### 4.8 Perception APIs
@@ -376,7 +378,7 @@ Parallelism: after S0 run S1, S2a, S2c, S6, S7 in parallel; S2b starts with its 
 3. Action log with `reason` and `trigger` fields.
 4. Executor separate from planner. Planner output = a list of validated tool calls.
 5. Per-request budgets (max steps, time, retries).
-6. `needs_confirmation(action, trigger)` policy function (reuses `risk`).
+6. `needs_confirmation(action, trigger)` policy function (reuses `risk`). For a user-initiated trigger it yields a `confirmation_request`; for any proactive or automation trigger on a `risk: confirm` endpoint it yields `notify_only` (never a prompt, never an execution).
 7. Empty `rules` table and a stub rules engine that subscribes to the bus.
 
 **Later, in this order (cut from the bottom if time runs out):**
@@ -386,7 +388,7 @@ Parallelism: after S0 run S1, S2a, S2c, S6, S7 in parallel; S2b starts with its 
 3. **Proactive perception:** YOLO change → VLM check → notify or act.
 4. **Routine mining:** propose automations from repeated patterns in the action log (optional).
 
-Autonomy: low risk and high confidence acts and notifies; medium or ambiguous asks first; `risk: confirm` always asks. Proactive actions are rate-limited, undoable where possible and always logged with a reason. With only v1 built, describe the system as an LLM-driven multimodal control framework with an agent loop; with closed-loop verification and compiled automations the "agentic" claim is stronger.
+Autonomy: low risk and high confidence acts and notifies; medium or ambiguous asks first; `risk: confirm` always asks the user who is interacting (never auto-retried); proactive and automation-triggered actions on `risk: confirm` endpoints never prompt and only notify. Proactive actions are rate-limited, undoable where possible and always logged with a reason. With only v1 built, describe the system as an LLM-driven multimodal control framework with an agent loop; with closed-loop verification and compiled automations the "agentic" claim is stronger.
 
 ---
 
