@@ -97,7 +97,7 @@ Whisper runs on a different Pi from the 7B, so STT and LLM can overlap. Whisper 
 | `brightness` | actuator | int 0-100 | % |
 | `color_temp` | actuator | int | K |
 | `speed` | actuator | int, min/max from announce | step |
-| `position` | actuator | int 0-100 | % |
+| `position` | actuator | int 0-100 | % (motion capability: the announce must carry `settle_s`, 1..120 s) |
 | `lock` | actuator | enum `locked`/`unlocked` | |
 | `target_temp` | actuator | float | °C |
 | `mode` | actuator | enum (values from announce) | |
