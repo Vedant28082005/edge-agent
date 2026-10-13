@@ -64,7 +64,7 @@ Subscribing to `cmd` only after the announce means the hub never sends a command
 ```json
 {"cmd_id": "3f0c...uuid", "ok": true, "endpoint": "ch1", "values": {"power": true, "speed": 3}, "error": null}
 ```
-On failure `ok:false` and `error` is a short code string (`unknown_endpoint`, `unknown_capability`, `out_of_range`, `bad_type`, `busy`, `unsupported`, `bad_request`; free text is not allowed). The hub waits 3 s for an ack.
+On failure `ok:false` and `error` is a short code string (`unknown_endpoint`, `unknown_capability`, `out_of_range`, `bad_type`, `busy`, `unsupported`, `bad_request`; free text is not allowed). The hub waits 3 s for an ack. **The ack means "accepted, motion started"**: `values` echo the accepted target, not the position reached. `state` reports actual progress, and for capabilities with `settle_s` the hub verifies convergence within `settle_s` (`mcp-tools.md`). The 3 s timeout is unchanged.
 
 **perception event**
 ```json

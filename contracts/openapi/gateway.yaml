@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.4.0
+  version: 2.5.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -750,7 +750,7 @@ components:
             properties:
               endpoint_id: {type: string}
               capability: {type: string}
-              status: {type: string, enum: [ok, skipped_offline, skipped_no_capability, failed]}
+              status: {type: string, enum: [done, moving, skipped_offline, skipped_no_capability, failed]}
               detail: {type: string}
     Memory:
       type: object

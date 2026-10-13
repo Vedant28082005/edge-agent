@@ -1,9 +1,10 @@
-# MCP tools (device-hub), runtime only (v2)
+# MCP tools (device-hub), runtime only (v3)
 
 The MCP server exposes **exactly five tools**. The list is fixed and never changes as devices come and go. There is **no** tool to add, remove, rename, rebind or re-provision a device, to change a risk level, to create/edit/delete scenes or users, or to touch MQTT credentials. All of that is `/admin/*` (see `openapi/gateway.yaml`) and is unreachable from the LLM. A review rule: any PR adding a sixth tool needs a contract version bump and owner sign-off.
 
 Endpoint identity is always the permanent `endpoint_id` (`ep_` + 8 lowercase hex, e.g. `ep_3fa91c02`). Names/rooms are labels. Any device-supplied text in results is sanitized and length-limited.
 
+Version 3 change: motion capabilities (those announcing `settle_s`) return `status: "moving"` and are verified asynchronously (see `set_state`); `run_scene` per-action statuses are `done|moving|...`.
 Version 2 change: the boolean `confirmed` argument is gone; confirmation is a `confirmation_token` (below).
 
 ## Confirmation tokens (`risk: confirm` endpoints)
@@ -44,18 +45,22 @@ Returns: `{"states": [{"endpoint_id", "online": bool, "values": {"<cap>": <value
 ## set_state
 Args: `endpoint_id: string`, `capability: string`, `value: bool|number|string`. (Nothing else.)
 Behavior: validated against the registry (endpoint exists, enabled, online, capability is an actuator, type and range ok). Sends a desired-state `cmd`, waits up to **3 s** for the `ack`, then verifies.
+
+**Ack semantics.** The node's `ack` means "accepted, motion started" and its `values` echo the accepted target, not the position reached. Actual progress is reported only in `state`. The ack timeout stays 3 s for all capabilities.
+- **No `settle_s`** (instant capabilities such as `power`): the hub verifies the state against the target right after the ack and returns `status: "done"`.
+- **With `settle_s`** (motion, e.g. `position`): the tool returns `status: "moving"` as soon as the ack arrives. The hub then watches `state` and checks that it converges to the target within `settle_s` seconds. Tolerance: **+/-2** for `position` (other motion capabilities: exact match for enum/bool, +/-2 for int percentages unless a later contract says otherwise). Success emits the `action_settled` event, failure `action_settle_timeout` (see `agent-events.md`). The tool call itself does not block for `settle_s`.
 If the endpoint is `risk: confirm` and no valid `confirmation_token` is attached out-of-band, nothing is sent and the result is `{"ok": false, "error": "confirmation_required"}`.
-Returns: `{"ok": bool, "endpoint_id", "capability", "value", "error?": code}`.
+Returns: `{"ok": bool, "status?": "done|moving", "endpoint_id", "capability", "value", "error?": code}`. `status` is present when `ok` is true. `ok:true, status:"moving"` means accepted and started, not yet reached.
 Error codes: `unknown_endpoint`, `disabled`, `offline`, `unknown_capability`, `not_actuator`, `bad_type`, `out_of_range`, `confirmation_required`, `ack_timeout`, `device_error`.
 
 ## run_scene
 Args: `scene: string` (scene id or exact name). (Nothing else.)
 Behavior: resolves the scene's targets (selectors included) and validates every action, then:
 1. If **any** action targets a `risk: confirm` endpoint and there is **no valid `confirmation_token`** (attached out-of-band) covering exactly those actions, **nothing is executed at all**, including the non-risky actions. The result is `needs_confirmation`, listing the risky actions so the UI can ask the user.
-2. Otherwise all actions run through the same executor as `set_state`. Offline or incapable endpoints are skipped and reported; nothing is queued.
+2. Otherwise all actions run through the same executor as `set_state`. Offline or incapable endpoints are skipped and reported; nothing is queued. Actions on capabilities with `settle_s` report `moving` and are verified asynchronously per action (`action_settled` / `action_settle_timeout`).
 
 Returns when blocked: `{"ok": false, "executed": false, "status": "needs_confirmation", "needs_confirmation": [{"endpoint_id", "capability", "value"}]}`.
-Returns when run: `{"ok": bool, "executed": true, "scene", "results": [{"endpoint_id", "capability", "status": "ok|skipped_offline|skipped_no_capability|failed", "detail?"}]}`.
+Returns when run: `{"ok": bool, "executed": true, "scene", "results": [{"endpoint_id", "capability", "status": "done|moving|skipped_offline|skipped_no_capability|failed", "detail?"}]}`.
 
 ## read_sensor
 Args: `endpoint_id: string`, `capability: string` (a sensor capability).
