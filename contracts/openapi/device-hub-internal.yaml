@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent device-hub Internal API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     SERVICE-TO-SERVICE ONLY. How the gateway and the agent reach device-hub (pi-brain, loopback). Promoted from the
     S1 proposal (`services/device-hub/INTERNAL_API.md`, branch s1-device-hub). Never exposed through
@@ -10,12 +10,15 @@ info:
     **Caller authentication is MANDATORY.** Every operation except `GET /health` needs `X-Service-Secret`.
     There are two callers, each with its own secret and scope:
     * `gatewaySecret` (scope `gateway`): everything in this file, including `/mcp`.
-    * `agentSecret` (scope `agent`): ONLY the five runtime operations (`list_devices`, `get_state`, `set_state`,
-      `run_scene`, `read_sensor`), which are reachable solely through `POST /mcp`. The agent scope has no admin
-      operation, no `/admin/*`, no scenes CRUD, no audit, no event stream. `tools\contract_test.py` enforces this.
+    * `agentSecret` (scope `agent`): exactly two operations. `POST /mcp` (the five runtime tools `list_devices`,
+      `get_state`, `set_state`, `run_scene`, `read_sensor`) and the read-only `GET /events` restricted to a
+      SERVER-SIDE allowlist of event types (see `x-agent-event-allowlist` on that operation). The agent scope has no
+      admin operation, no `/admin/*`, no scenes CRUD, no audit, no provisioning event and no unfiltered stream.
+      `tools\contract_test.py` enforces this.
 
     The gateway secret allows everything, so a compromised gateway equals a compromised hub; a compromised agent
-    can only do what the five tools allow (and `risk: confirm` still needs a gateway-minted token).
+    can only do what the five tools allow (and `risk: confirm` still needs a gateway-minted token) and observe the
+    allowlisted events, none of which carries credential material.
     Secrets: one per calling service, files `/etc/edge-agent/secrets/<service>.secret` (mode 600, owned by that
     service's user, read from the file, never from env/argv, never logged). The hub holds only SHA-256 verifiers
     (`/etc/edge-agent/secrets/hub-verifiers/<service>.sha256`, hex, mode 600, owned by the hub user) and compares in
@@ -49,7 +52,7 @@ tags:
   - name: scenes
     description: Scene CRUD and run. Scope gateway only.
   - name: events
-    description: Registry change stream and health. Scope gateway only (health is open).
+    description: Registry change stream and health. `/events` is gateway (all types) and agent (allowlist only); health is open.
 paths:
   /mcp:
     post:
@@ -63,8 +66,10 @@ paths:
       description: |
         MCP over streamable HTTP (stateless, JSON responses); `python -m device_hub --mcp-stdio` is the stdio twin.
         Exposes exactly the five tools of `mcp-tools.md` and nothing else. The executor attaches
-        `_meta: {"confirmation_token": "...", "user_id": "..."}` out of band. DNS-rebinding protection: Host header
-        limited to loopback. This is the ONLY operation the agent scope may call.
+        `_meta: {"confirmation_token": "...", "user_id": "...", "call_id": "..."}` out of band (`call_id` optional,
+        a correlation label echoed on the settle events, never trusted; see `mcp-tools.md`). DNS-rebinding
+        protection: Host header limited to loopback. With `GET /events` this is one of the TWO operations the agent
+        scope may call.
       requestBody:
         required: true
         content:
@@ -95,20 +100,58 @@ paths:
     get:
       tags: [events]
       operationId: eventStream
-      x-scopes: [gateway]
+      x-scopes: [gateway, agent]
+      security:
+        - gatewaySecret: []
+        - agentSecret: []
+      x-agent-event-allowlist: [registry_changed, node_status, state, action_settled, action_settle_timeout]
+      x-gateway-only-event-types: [scenes_changed, pending_node]
       description: |
-        SSE registry change stream. `types` default: every type except `state`. `Last-Event-ID` (or `?since=`)
-        replays from a 1000-event ring buffer. A `hello` event first carries `{version, last_event_seq}`; after a stale
-        id compare `GET /registry/version` and reload the device list. Events: `registry_changed {version, reason:
-        approve|patch|rebind|forget|unprovision|announce_changed, endpoint_ids}`, `scenes_changed {reason, scene_ids}`,
-        `node_status {node_id, online}`, `pending_node {node_id, local_ids}`, `state {endpoint_id, values, ts}` (opt-in).
+        Read-only SSE stream. A `hello` event comes first (`{version, last_event_seq}`). `Last-Event-ID` (or
+        `?since=`) replays from a 1000-event ring buffer; after a stale id compare `GET /registry/version` and reload
+        the device list. Each frame is `id: <seq>`, `event: <type>`, `data: <Envelope JSON>` (schema `EventEnvelope`:
+        `{seq, type, ts, data}`; the payload is in `data.data`). Keepalive comment every 5 s.
+
+        **Scope `gateway`**: every type in `types`. Default (no `types`): every type except `state`. Types:
+        `registry_changed`, `scenes_changed`, `node_status`, `pending_node`, `state` (opt-in), `action_settled`,
+        `action_settle_timeout`.
+
+        **Scope `agent`: SERVER-SIDE ALLOWLIST** (`x-agent-event-allowlist`): `registry_changed`, `node_status`,
+        `state` (opt-in), `action_settled`, `action_settle_timeout`. The filter is applied by the hub per connection
+        from the caller's scope, to live delivery AND to replay (`since`/`Last-Event-ID`); the client cannot widen it.
+        Default for the agent: the allowlist minus `state`. Asking `types` for any known type outside the allowlist
+        is 403 `forbidden_event_type` (nothing is streamed); an unknown type is 400 as for the gateway.
+        Provisioning, admin and any event that can carry credential material (provisioning sessions, bundles, MQTT
+        or Wi-Fi secrets, confirmation tokens) are NEVER delivered to the agent; there is no such event on this
+        stream today, and a type added later is gateway-only until this list names it (contract change + version bump).
+        `scenes_changed` and `pending_node` are gateway-only too (`x-gateway-only-event-types`).
+
+        **How the agent learns registry changes:** it subscribes with the agent secret and, on `registry_changed`,
+        reloads `list_devices` and rebuilds its prompt device list and constrained-decoding schema. On reconnect it
+        sends `Last-Event-ID`; if the id is stale or `hello.version` differs from its own it reloads anyway.
+
+        Event payloads (`data.data`):
+        * `registry_changed` `{version: int, reason: approve|patch|rebind|forget|unprovision|announce_changed,
+          endpoint_ids: [ep_...]}`. `version` is the new registry version.
+        * `node_status` `{node_id, online: bool}`. Emitted when a node's retained status goes `online`/`offline`.
+        * `state` `{endpoint_id, values: {<cap>: <value>}, ts: <unix s>}`. Only endpoints whose values changed.
+        * `action_settled` `{endpoint_id, capability, value, observed, elapsed_ms, call_id?}`: a motion (capability
+          with `settle_s`) reached its target within tolerance. `value` is the target, `observed` the last state
+          value. `elapsed_ms` is measured from the ack.
+        * `action_settle_timeout` `{endpoint_id, capability, value, observed, settle_s, call_id?}`: it did not.
+          `observed` is `null` if no state arrived. `settle_s` is the announced window.
+        `call_id` (string, max 64 chars) is present only when the originating MCP call carried `_meta.call_id`. A
+        newer command on the same endpoint+capability supersedes the older watcher, which then emits nothing.
+        The hub does not trust or interpret `call_id`; it is only echoed.
       parameters:
-        - {name: types, in: query, schema: {type: string}, description: Comma-separated event types}
+        - {name: types, in: query, schema: {type: string}, description: 'Comma-separated event types; for scope agent only allowlisted ones'}
         - {name: since, in: query, schema: {type: integer}}
+        - {name: Last-Event-ID, in: header, schema: {type: integer}}
       responses:
         '200': {description: SSE stream, content: {text/event-stream: {schema: {type: string}}}}
+        '400': {description: Unknown event type, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {$ref: '#/components/responses/ForbiddenScope'}
+        '403': {description: 'Wrong scope, or (scope agent) a requested type is outside the allowlist (error `forbidden_event_type`)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   /rooms:
     get:
       tags: [devices]
@@ -567,7 +610,8 @@ components:
       name: X-Service-Secret
       description: |
         The agent's secret (`/etc/edge-agent/secrets/agent.secret`, owner = agent user). Scope `agent`: `POST /mcp`
-        only, i.e. the five runtime tools. No admin operation, no scenes CRUD, no audit, no events.
+        (the five runtime tools) and `GET /events` (allowlisted event types only). No admin operation, no scenes
+        CRUD, no audit, no provisioning or admin event.
   parameters:
     Actor:
       name: X-Actor
@@ -617,6 +661,14 @@ components:
         enabled: {type: boolean}
         capabilities: {type: array, items: {type: object, additionalProperties: true}}
         state: {type: object, additionalProperties: true}
+    EventEnvelope:
+      type: object
+      required: [seq, type, ts, data]
+      properties:
+        seq: {type: integer, description: Monotonic per hub run; also the SSE `id`}
+        type: {type: string, enum: [registry_changed, scenes_changed, node_status, pending_node, state, action_settled, action_settle_timeout]}
+        ts: {type: integer, description: Unix seconds the hub published the event}
+        data: {type: object, additionalProperties: true, description: Payload per type, documented on GET /events}
     Node:
       type: object
       required: [node_id, status]
