@@ -1,9 +1,10 @@
-# MCP tools (device-hub), runtime only (v3)
+# MCP tools (device-hub), runtime only (v4)
 
 The MCP server exposes **exactly five tools**. The list is fixed and never changes as devices come and go. There is **no** tool to add, remove, rename, rebind or re-provision a device, to change a risk level, to create/edit/delete scenes or users, or to touch MQTT credentials. All of that is `/admin/*` (see `openapi/gateway.yaml`) and is unreachable from the LLM. A review rule: any PR adding a sixth tool needs a contract version bump and owner sign-off.
 
 Endpoint identity is always the permanent `endpoint_id` (`ep_` + 8 lowercase hex, e.g. `ep_3fa91c02`). Names/rooms are labels. Any device-supplied text in results is sanitized and length-limited.
 
+Version 4 change: see the Contract changelog in `mqtt.md` (S0c). Items are described inline below.
 Version 3 change: motion capabilities (those announcing `settle_s`) return `status: "moving"` and are verified asynchronously (see `set_state`); `run_scene` per-action statuses are `done|moving|...`.
 Version 2 change: the boolean `confirmed` argument is gone; confirmation is a `confirmation_token` (below).
 
@@ -13,7 +14,7 @@ Version 2 change: the boolean `confirmed` argument is gone; confirmation is a `c
 - **It is not part of any tool's `inputSchema`.** The LLM never sees it, cannot generate it and cannot pass it. The agent **executor** attaches it out-of-band in the MCP call's `_meta` field: `{"name": "set_state", "arguments": {...}, "_meta": {"confirmation_token": "<token>"}}`. The tool schema list sent to the model contains no confirmation field; any `confirmation_token` found in the model's own arguments is stripped and logged by the executor.
 - **Binding.** The token is bound to the requesting `user_id` and to `action_hash` (defined precisely below). The gateway stores only `SHA-256(token)`, the user, the action hash and the expiry.
 - **Validation** is done by device-hub when it runs the action: it calls the gateway's internal consume endpoint (`POST /internal/confirmations/consume`: loopback or unix socket only, shared-secret authenticated; specified in the clearly marked internal section of `openapi/gateway.yaml`) with `{token, user_id, action_hash}`. The gateway validates and marks it used in one atomic operation, so replay and races fail. A token presented for a different action (`hash_mismatch`) is **burned** (fail closed); a different user's attempt returns `unknown` and does not burn it. Any denial (`expired`, `used`, `hash_mismatch`, `unknown`) is treated as **no token**: the tool returns `confirmation_required` / `needs_confirmation`. Only the gateway can mint tokens; the agent holds neither the service secret nor any mint or consume access.
-- A token for `set_state` cannot confirm a `run_scene` and vice versa. Automations and guests can never obtain one for `risk: confirm` endpoints unless the admin opted that endpoint in (see ARCHITECTURE 4.7).
+- A token for `set_state` cannot confirm a `run_scene` and vice versa. Guests can never obtain one. Automations never touch `risk: confirm` endpoints at all (they only notify; there is no admin opt-in, see ARCHITECTURE 4.7).
 
 ## Canonical action hash
 
