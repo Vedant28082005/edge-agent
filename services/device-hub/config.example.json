@@ -1,0 +1,25 @@
+{
+  "db_path": "/var/lib/edge-agent/device-hub.sqlite",
+  "contracts_dir": "",
+  "ack_timeout_s": 3.0,
+  "mqtt": {
+    "host": "localhost",
+    "port": 8883,
+    "ca_file": "/etc/edge-agent/mosquitto/certs/ca.crt",
+    "username": "hub-admin",
+    "password_file": "/etc/edge-agent/secrets/hub-mqtt.password"
+  },
+  "http": {"host": "127.0.0.1", "port": 8100},
+  "gateway": {
+    "url": "unix:///run/edge-agent/gateway-internal.sock",
+    "secret_file": "/etc/edge-agent/secrets/device-hub.secret",
+    "timeout_s": 2.0
+  },
+  "provision": {
+    "broker_host": "192.168.1.10",
+    "broker_port": 8883,
+    "ntp_host": "192.168.1.10",
+    "ttl_s": 600
+  },
+  "auth": {"verifier_dir": "/etc/edge-agent/secrets/hub-verifiers"}
+}
