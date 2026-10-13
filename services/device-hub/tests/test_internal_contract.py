@@ -55,7 +55,7 @@ def test_scopes_match_x_scopes(served, method, path, op):
     url = concrete(path)
     kw = {"json": {}} if method in ("POST", "PUT", "PATCH") else {}
     if path == "/events":
-        return                                       # streaming; scope checked in test_events_scope
+        return                                       # streaming; scopes checked in test_agent_events.py
     no_secret = served.http.request(method, url, **kw)
     if scopes == ["open"]:
         assert no_secret.status_code == 200
@@ -71,14 +71,8 @@ def test_scopes_match_x_scopes(served, method, path, op):
     assert gw.status_code not in (401, 403), f"{method} {path}: gateway scope must reach every operation"
 
 
-def test_events_scope(served):
-    assert served.http.get("/events").status_code == 401
-    assert served.http.get("/events", headers=AG).status_code == 403
-    assert served.http.get("/events?types=bogus", headers=GW).status_code == 400
-
-
-def test_the_agent_scope_is_exactly_the_five_tools(served):
-    assert [(m, p) for m, p, op in OPS if "agent" in op["x-scopes"]] == [("POST", "/mcp")]
+def test_the_agent_scope_is_exactly_two_operations(served):
+    assert sorted((m, p) for m, p, op in OPS if "agent" in op["x-scopes"]) == [("GET", "/events"), ("POST", "/mcp")]
     assert sorted(SPEC["paths"]["/mcp"]["post"]["x-mcp-tools"]) == sorted(
         ["list_devices", "get_state", "set_state", "run_scene", "read_sensor"])
 

@@ -23,7 +23,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from .errors import HubError
-from .events import ALL_TYPES, DEFAULT_TYPES
+from .events import AGENT_ALLOWLIST, AGENT_DEFAULT, ALL_TYPES, DEFAULT_TYPES
 from .hub import Hub
 from .mcp_server import build_mcp_server
 from .util import SECRETS, action_hash, sanitize_text, set_state_action
@@ -242,16 +242,26 @@ def health(hub: Hub, r: Request, b: dict):
 
 async def events(request: Request):
     hub: Hub = request.app.state.hub
+    caller = request.scope.get("state", {}).get("caller", "gateway")
+    agent = caller == "agent"
     types_q = request.query_params.get("types")
-    types = frozenset(t for t in (types_q or "").split(",") if t) if types_q else DEFAULT_TYPES
-    if not types <= ALL_TYPES:
+    requested = frozenset(t for t in (types_q or "").split(",") if t) if types_q else None
+    if requested is not None and not requested <= ALL_TYPES:
         return _err("bad_request", f"types must be within {sorted(ALL_TYPES)}", 400)
+    if agent:
+        if requested is not None and not requested <= AGENT_ALLOWLIST:
+            return _err("forbidden_event_type", "event type not available to this scope", 403)
+        types = requested if requested is not None else AGENT_DEFAULT
+        allowed = AGENT_ALLOWLIST            # second, independent check on every frame below
+    else:
+        types = requested if requested is not None else DEFAULT_TYPES
+        allowed = None
     since = request.headers.get("last-event-id") or request.query_params.get("since")
     try:
         since_seq = int(since) if since is not None else None
     except ValueError:
         return _err("bad_request", "since must be an integer", 400)
-    sub = hub.bus.subscribe(types, since_seq)
+    sub = hub.bus.subscribe(types, since_seq)      # the filter applies to replay and to live delivery
 
     async def gen():
         try:
@@ -260,6 +270,8 @@ async def events(request: Request):
                 ev = await asyncio.to_thread(sub.get, 5.0)
                 if ev is None:
                     yield ": keepalive\n\n"
+                    continue
+                if allowed is not None and ev["type"] not in allowed:
                     continue
                 yield f"id: {ev['seq']}\nevent: {ev['type']}\ndata: {json.dumps(ev)}\n\n"
         finally:
@@ -283,8 +295,7 @@ class CallerAuth:
     """Mandatory caller authentication (contracts/openapi/device-hub-internal.yaml).
 
     `X-Service-Secret` is compared in constant time with the SHA-256 verifiers in `verifier_dir`
-    (`gateway.sha256`, `agent.sha256`, hex). Scopes: gateway = every operation; agent = `POST /mcp` only (the five
-    runtime tools). Only `GET /health` is open. Unknown or missing secret -> 401; valid secret, wrong scope -> 403."""
+    (`gateway.sha256`, `agent.sha256`, hex). Scopes: gateway = every operation; agent = `POST /mcp` and `GET /events` (allowlisted types). Only `GET /health` is open. Unknown or missing secret -> 401; valid secret, wrong scope -> 403."""
 
     def __init__(self, verifier_dir: str) -> None:
         self.verifiers: dict[str, bytes] = {}
@@ -318,8 +329,8 @@ class CallerAuth:
     def allowed(caller: str, method: str, path: str) -> bool:
         if caller == "gateway":
             return True
-        if caller == "agent":
-            return method == "POST" and path == "/mcp"
+        if caller == "agent":          # exactly two operations: the five tools, and the allowlisted event stream
+            return (method == "POST" and path == "/mcp") or (method == "GET" and path == "/events")
         return False
 
 
@@ -341,6 +352,7 @@ class AsgiGate:
                     return await _send_json(send, 401, {"error": "unauthorized", "message": "missing or unknown X-Service-Secret"})
                 if not self.auth.allowed(caller, scope["method"], path):
                     return await _send_json(send, 403, {"error": "forbidden_scope", "message": "secret not scoped to this operation"})
+                scope.setdefault("state", {})["caller"] = caller
             if path == "/mcp" or path.startswith("/mcp/"):
                 return await self.mcp(scope, receive, send)
         return await self.app(scope, receive, send)

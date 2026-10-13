@@ -235,7 +235,7 @@ def test_caller_auth_scopes_401_403(home, tmp_path):
         assert s.http.get("/admin/nodes", headers={"X-Service-Secret": "wrong"}).status_code == 401
         assert s.http.get("/admin/nodes", headers=gw).status_code == 200
         for method, path in (("GET", "/admin/nodes"), ("POST", "/admin/provision-sessions"), ("GET", "/devices"),
-                             ("GET", "/scenes"), ("GET", "/events"), ("GET", "/registry/version"), ("GET", "/rooms"),
+                             ("GET", "/scenes"), ("GET", "/registry/version"), ("GET", "/rooms"),
                              ("GET", "/admin/audit"), ("POST", "/mock/mint"), ("DELETE", "/admin/nodes/esp32-000000000001")):
             assert s.http.request(method, path, headers=ag, json={}).status_code == 403, (method, path)   # valid secret, wrong scope
         assert s.http.post("/mcp", headers={**ag, **mcp}, json=body).status_code == 200      # the agent's only operation

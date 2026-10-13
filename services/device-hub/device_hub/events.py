@@ -23,6 +23,10 @@ log = logging.getLogger("device_hub.events")
 DEFAULT_TYPES = frozenset({"registry_changed", "scenes_changed", "node_status", "pending_node", "action_settled",
                            "action_settle_timeout"})
 ALL_TYPES = DEFAULT_TYPES | {"state"}
+# GET /events for scope "agent" (device-hub-internal.yaml x-agent-event-allowlist). Default-deny: a type that is not
+# named here is never delivered to the agent, whatever else is published on the bus.
+AGENT_ALLOWLIST = frozenset({"registry_changed", "node_status", "state", "action_settled", "action_settle_timeout"})
+AGENT_DEFAULT = AGENT_ALLOWLIST - {"state"}
 
 
 class Subscription:

@@ -10,11 +10,16 @@ Implementation notes that the contract does not spell out:
 - **Caller auth is mandatory.** The hub reads `auth.verifier_dir` (default `/etc/edge-agent/secrets/hub-verifiers`,
   `gateway.sha256` required, `agent.sha256` optional) and refuses to start without it. `--mock --insecure-no-auth` is the
   only way to run without it (the flag is rejected without `--mock`) and logs a warning on every start. Scopes: gateway =
-  every operation; agent = `POST /mcp` only; `GET /health` is open. Unknown or missing secret: 401; valid secret, wrong
-  scope: 403.
-- **Events beyond the contract's list.** `GET /events` also carries `action_settled` and `action_settle_timeout`
-  (`{endpoint_id, capability, value, observed, elapsed_ms | settle_s, call_id?}`) and they are part of the default set.
-  The contract's `/events` text does not list them yet, and the agent scope cannot read `/events`: see the S1 report.
-- **`_meta`** on MCP calls: `confirmation_token`, `user_id` (forwarded, never trusted) and an optional `call_id`
-  (correlation label echoed on the settle events; not in `mcp-tools.md`).
+  every operation; agent = exactly two: `POST /mcp` and `GET /events`; `GET /health` is open. Unknown or missing secret:
+  401; valid secret, wrong scope: 403.
+- **`GET /events` for the agent** is filtered server-side from the caller's scope (`device_hub/events.py`
+  `AGENT_ALLOWLIST`): `registry_changed`, `node_status`, `state` (opt-in), `action_settled`, `action_settle_timeout`.
+  The filter applies to the subscription (live and replay via `Last-Event-ID` / `since`) and again on every frame
+  (default-deny: a type not named in the allowlist, e.g. a future provisioning event, is never sent to the agent).
+  Default for the agent is the allowlist minus `state`; a known type outside the allowlist in `types` is
+  `403 forbidden_event_type`, an unknown type `400`. Frame format is the same for both scopes (`id`, `event`,
+  `data` = `{seq, type, ts, data}`).
+- **`_meta.call_id`** (optional, string, truncated to 64, non-strings ignored) is echoed verbatim as `call_id` on the
+  `action_settled` / `action_settle_timeout` events of that call (each `moving` action of `run_scene` too). It plays no
+  part in any decision.
 - Registry change signal for the agent: `registry_changed` (in-process hook `Hub.bus.add_hook(fn)` or the SSE stream).
