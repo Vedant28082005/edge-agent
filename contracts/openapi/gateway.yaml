@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.7.0
+  version: 2.8.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -660,6 +660,8 @@ components:
       required: [ok]
       properties:
         ok: {type: boolean}
+        status: {type: string, enum: [done, moving]}
+        verified: {type: boolean, description: Read-back matched the target; always false while status is moving (see mcp-tools.md)}
         error: {type: string}
         values: {type: object, additionalProperties: true}
     SceneAction:
@@ -742,6 +744,9 @@ components:
       properties:
         ok: {type: boolean}
         executed: {type: boolean}
+        scene: {type: string, description: Permanent scene id}
+        scene_name: {type: string}
+        error: {type: string, enum: [unknown_scene, scene_broken]}
         status: {type: string, enum: [needs_confirmation]}
         needs_confirmation:
           type: array

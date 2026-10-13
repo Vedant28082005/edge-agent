@@ -47,6 +47,7 @@ Returns: `{"devices": [{"endpoint_id", "name", "room", "tags", "type", "online":
 ## get_state
 Args: exactly one of `endpoint_id: string` | `room: string`.
 Returns: `{"states": [{"endpoint_id", "online": bool, "values": {"<cap>": <value>}, "ts": <unix s>}]}`. Offline endpoints return last known values with `online:false`.
+Errors (`{"ok": false, "error": code}`): `unknown_endpoint`, `unknown_room` (the room name matches no room in the registry; an existing room with no endpoints returns an empty list). `list_devices` with an unknown `room` returns the same `unknown_room` error.
 
 ## set_state
 Args: `endpoint_id: string`, `capability: string`, `value: bool|number|string`. (Nothing else.)
@@ -56,7 +57,8 @@ Behavior: validated against the registry (endpoint exists, enabled, online, capa
 - **No `settle_s`** (instant capabilities such as `power`): the hub verifies the state against the target right after the ack and returns `status: "done"`.
 - **With `settle_s`** (motion, e.g. `position`): the tool returns `status: "moving"` as soon as the ack arrives. The hub then watches `state` and checks that it converges to the target within `settle_s` seconds. Tolerance: **+/-2** for `position` (other motion capabilities: exact match for enum/bool, +/-2 for int percentages unless a later contract says otherwise). Success emits the `action_settled` event, failure `action_settle_timeout` (see `agent-events.md`). The tool call itself does not block for `settle_s`.
 If the endpoint is `risk: confirm` and no valid `confirmation_token` is attached out-of-band, nothing is sent and the result is `{"ok": false, "error": "confirmation_required"}`.
-Returns: `{"ok": bool, "status?": "done|moving", "endpoint_id", "capability", "value", "error?": code}`. `status` is present when `ok` is true. `ok:true, status:"moving"` means accepted and started, not yet reached.
+Returns: `{"ok": bool, "status?": "done|moving", "verified?": bool, "endpoint_id", "capability", "value", "error?": code}`. `status` and `verified` are present when `ok` is true. `ok:true, status:"moving"` means accepted and started, not yet reached.
+`verified` = the hub's read-back of `state` matched the target. It is `true` for `status: "done"` when the state agrees; `false` when the state did not (yet) agree, and always `false` for `status: "moving"` (verification is asynchronous: wait for `action_settled` / `action_settle_timeout`). `ok:true, verified:false, status:"done"` is a warning the agent should report, not a retry trigger.
 Error codes: `unknown_endpoint`, `disabled`, `offline`, `unknown_capability`, `not_actuator`, `bad_type`, `out_of_range`, `confirmation_required`, `ack_timeout`, `device_error`.
 
 ## run_scene
@@ -66,11 +68,14 @@ Behavior: resolves the scene's targets (selectors `{room?, type?, tag?}` include
 2. Otherwise all actions run through the same executor as `set_state`. Offline or incapable endpoints are skipped and reported; nothing is queued. Actions on capabilities with `settle_s` report `moving` and are verified asynchronously per action (`action_settled` / `action_settle_timeout`).
 
 Returns when blocked: `{"ok": false, "executed": false, "status": "needs_confirmation", "needs_confirmation": [{"endpoint_id", "capability", "value"}]}`.
-Returns when run: `{"ok": bool, "executed": true, "scene", "results": [{"endpoint_id", "capability", "status": "done|moving|skipped_offline|skipped_no_capability|failed", "detail?"}]}`.
+Returns when run: `{"ok": bool, "executed": true, "scene", "scene_name", "results": [{"endpoint_id", "capability", "status": "done|moving|skipped_offline|skipped_no_capability|failed", "detail?"}]}`.
+
+Errors (`{"ok": false, "executed": false, "error": code}`, nothing executed): `unknown_scene` (no scene with that id or exact name), `scene_broken` (the scene is flagged broken by the registry, e.g. it references a forgotten endpoint, or a selector or capability no longer resolves: a broken scene **refuses to run at all**, with no partial execution; an admin or the owner must repair it). This is different from a healthy scene whose endpoints are offline or lack the capability: those are still skipped and reported per action (`skipped_offline`, `skipped_no_capability`). `scene` is the permanent scene id and `scene_name` the display name (admin-set label, sanitized); the confirmation hash always uses the id.
 
 ## read_sensor
 Args: `endpoint_id: string`, `capability: string` (a sensor capability).
 Returns: `{"endpoint_id", "capability", "value", "unit", "ts": <unix s>, "stale": bool}`. `stale` = older than 3x the announced `interval_s` or endpoint offline.
+Errors (`{"ok": false, "error": code}`): `unknown_endpoint`, `disabled`, `unknown_capability`, `not_sensor` (the capability exists but is an actuator; use `get_state` for actuator values).
 
 ## Rules
 
