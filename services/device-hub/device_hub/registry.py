@@ -167,7 +167,7 @@ class Registry:
             rows = self.db.query("SELECT * FROM audit_log WHERE action=? ORDER BY id DESC LIMIT ?", (action, limit))
         else:
             rows = self.db.query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
-        return [{"id": r["id"], "ts": r["ts"], "actor": r["actor"], "action": r["action"], "target": r["target"],
+        return [{"id": r["id"], "ts": int(r["ts"]), "actor": r["actor"], "action": r["action"], "target": r["target"],
                  "detail": json.loads(r["detail"]), "result": r["result"]} for r in rows]
 
     def changed(self, reason: str, endpoint_ids: Iterable[str] = ()) -> None:

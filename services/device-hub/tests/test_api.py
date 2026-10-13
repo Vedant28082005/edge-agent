@@ -31,9 +31,9 @@ def free_port() -> int:
 
 
 class Served:
-    def __init__(self, hub, fake_gateway=None):
+    def __init__(self, hub, fake_gateway=None, insecure=True):
         self.port = free_port()
-        self.app = create_app(hub, mock_gateway=fake_gateway)
+        self.app = create_app(hub, mock_gateway=fake_gateway, insecure_no_auth=insecure)
         self.server = uvicorn.Server(uvicorn.Config(self.app, host="127.0.0.1", port=self.port, log_level="warning", access_log=False))
         self.thread = threading.Thread(target=self.server.run, daemon=True)
         self.thread.start()
@@ -215,23 +215,59 @@ def test_mcp_rejects_foreign_host_header(api):
     assert r.status_code in (400, 403, 421)
 
 
-def test_caller_auth_scopes(home, tmp_path):
+def _verifiers(tmp_path, agent=True):
     (tmp_path / "gateway.sha256").write_text(hashlib.sha256(b"gw-secret-value").hexdigest())
-    (tmp_path / "agent.sha256").write_text(hashlib.sha256(b"agent-secret-value").hexdigest())
-    home.hub.cfg.auth.verifier_dir = str(tmp_path)
-    s = Served(home.hub, home.gw)
+    if agent:
+        (tmp_path / "agent.sha256").write_text(hashlib.sha256(b"agent-secret-value").hexdigest())
+    return str(tmp_path)
+
+
+def test_caller_auth_scopes_401_403(home, tmp_path):
+    home.hub.cfg.auth.verifier_dir = _verifiers(tmp_path)
+    s = Served(home.hub, home.gw, insecure=False)
     try:
         gw = {"X-Service-Secret": "gw-secret-value"}
         ag = {"X-Service-Secret": "agent-secret-value"}
-        assert s.http.get("/health").status_code == 200
-        assert s.http.get("/admin/nodes").status_code == 401
+        mcp = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        assert s.http.get("/health").status_code == 200                                   # the only open operation
+        assert s.http.get("/admin/nodes").status_code == 401                              # no secret
         assert s.http.get("/admin/nodes", headers={"X-Service-Secret": "wrong"}).status_code == 401
         assert s.http.get("/admin/nodes", headers=gw).status_code == 200
-        assert s.http.get("/admin/nodes", headers=ag).status_code == 401          # the agent has no admin access
-        assert s.http.post("/admin/provision-sessions", headers=ag, json={}).status_code == 401
-        assert s.http.get("/registry/version", headers=ag).status_code == 200
-        r = httpx.post(s.url + "/mcp", headers={**gw, "Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
-                       json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        assert r.status_code == 401                                               # the gateway has no MCP access
+        for method, path in (("GET", "/admin/nodes"), ("POST", "/admin/provision-sessions"), ("GET", "/devices"),
+                             ("GET", "/scenes"), ("GET", "/events"), ("GET", "/registry/version"), ("GET", "/rooms"),
+                             ("GET", "/admin/audit"), ("POST", "/mock/mint"), ("DELETE", "/admin/nodes/esp32-000000000001")):
+            assert s.http.request(method, path, headers=ag, json={}).status_code == 403, (method, path)   # valid secret, wrong scope
+        assert s.http.post("/mcp", headers={**ag, **mcp}, json=body).status_code == 200      # the agent's only operation
+        assert s.http.get("/mcp", headers=ag).status_code == 403                             # POST only
+        assert s.http.post("/mcp", headers={**gw, **mcp}, json=body).status_code == 200      # gateway scope includes /mcp
+        assert s.http.post("/mcp", headers=mcp, json=body).status_code == 401
     finally:
         s.stop()
+
+
+def test_refuses_to_start_without_caller_auth(home, tmp_path):
+    home.hub.cfg.auth.verifier_dir = ""
+    with pytest.raises(SystemExit):
+        create_app(home.hub)                                       # no verifier dir, no flag
+    with pytest.raises(SystemExit):
+        create_app(home.hub, insecure_no_auth=True)                # the flag without a mock gateway (= without --mock)
+    home.hub.cfg.auth.verifier_dir = str(tmp_path / "missing")
+    with pytest.raises(SystemExit):
+        create_app(home.hub)
+    home.hub.cfg.auth.verifier_dir = _verifiers(tmp_path, agent=False)
+    create_app(home.hub)                                           # gateway verifier alone is enough to start
+
+
+def test_cli_insecure_flag_only_with_mock(capsys):
+    from device_hub.__main__ import main
+    with pytest.raises(SystemExit) as e:
+        main(["--insecure-no-auth"])
+    assert e.value.code == 2 and "--mock" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["--mock", "--port", "0"])                            # --mock alone still needs auth or the flag
+
+
+def test_unknown_routes_are_json_404(api):
+    r = api.http.get("/nope")
+    assert r.status_code == 404 and r.json()["error"] == "not_found"

@@ -46,7 +46,7 @@ class ProvisionConfig:
 class AuthConfig:
     # Directory with <service>.sha256 verifier files (hex SHA-256 of the caller's secret). Empty = no caller auth
     # (loopback-only dev). Scopes: gateway = everything except /mcp; agent = /mcp and GET /events only.
-    verifier_dir: str = ""
+    verifier_dir: str = "/etc/edge-agent/secrets/hub-verifiers"
 
 
 @dataclass

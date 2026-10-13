@@ -61,21 +61,24 @@ TOOLS: list[types.Tool] = [
 ]
 
 
-def meta_fields(meta: Any) -> tuple[str | None, str | None]:
-    """(confirmation_token, user_id) from the request `_meta`. Anything not a string is ignored."""
+def meta_fields(meta: Any) -> tuple[str | None, str | None, str | None]:
+    """(confirmation_token, user_id, call_id) from the request `_meta`. Anything not a string is ignored. user_id is
+    only a claim: the hub forwards it and the gateway's consume endpoint checks the token is bound to it. call_id is
+    an optional correlation label (not in the contract) echoed on settle events."""
     if meta is None:
-        return None, None
+        return None, None, None
     extra = getattr(meta, "model_extra", None) or {}
 
     def get(k: str) -> str | None:
         v = extra.get(k, getattr(meta, k, None))
         return v if isinstance(v, str) else None
 
-    return get("confirmation_token"), get("user_id")
+    cid = get("call_id")
+    return get("confirmation_token"), get("user_id"), (cid[:64] if cid else None)
 
 
 def dispatch(executor: Executor, scenes: SceneService, name: str, args: dict, token: str | None,
-             user_id: str | None) -> dict:
+             user_id: str | None, call_id: str | None = None) -> dict:
     if name == "list_devices":
         return executor.list_devices(args.get("room"), args.get("type"))
     if name == "get_state":
@@ -83,9 +86,10 @@ def dispatch(executor: Executor, scenes: SceneService, name: str, args: dict, to
     if name == "read_sensor":
         return executor.read_sensor(args["endpoint_id"], args["capability"])
     if name == "set_state":
-        return executor.set_state(args["endpoint_id"], args["capability"], args["value"], user_id=user_id, token=token)
+        return executor.set_state(args["endpoint_id"], args["capability"], args["value"], user_id=user_id, token=token,
+                                  call_id=call_id)
     if name == "run_scene":
-        return scenes.run_scene(args["scene"], user_id=user_id, token=token)
+        return scenes.run_scene(args["scene"], user_id=user_id, token=token, call_id=call_id)
     raise ValueError(f"unknown tool {name}")
 
 
@@ -100,14 +104,14 @@ def build_mcp_server(executor: Executor, scenes: SceneService) -> Server:
     async def _call_tool(name: str, arguments: dict) -> dict:
         if name not in TOOL_NAMES:
             raise ValueError(f"unknown tool {name}")
-        if "confirmation_token" in arguments:        # unreachable (additionalProperties:false) but defence in depth
-            log.warning("confirmation_token in tool arguments refused (tool=%s)", name)
-            raise ValueError("confirmation_token is not an argument")
+        if "confirmation_token" in arguments or "user_id" in arguments:   # unreachable (additionalProperties:false)
+            log.warning("out-of-band field in tool arguments refused (tool=%s)", name)
+            raise ValueError("confirmation_token and user_id are not arguments")
         try:
             meta = server.request_context.meta
         except LookupError:
             meta = None
-        token, user_id = meta_fields(meta)
-        return await asyncio.to_thread(dispatch, executor, scenes, name, arguments, token, user_id)
+        token, user_id, call_id = meta_fields(meta)
+        return await asyncio.to_thread(dispatch, executor, scenes, name, arguments, token, user_id, call_id)
 
     return server

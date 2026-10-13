@@ -31,7 +31,6 @@ from .util import SECRETS, action_hash, sanitize_text, set_state_action
 log = logging.getLogger("device_hub.api")
 
 MAX_BODY = 64 * 1024
-AGENT_ALLOWED = ("/mcp", "/events", "/registry/version", "/health")
 
 
 def _err(code: str, message: str, status: int) -> JSONResponse:
@@ -281,30 +280,46 @@ def mock_mint(hub: Hub, r: Request, b: dict):
 
 # ------------------------------------------------------------------------------------------------ auth
 class CallerAuth:
-    """Optional per-caller shared-secret check. verifier_dir holds <service>.sha256 files (hex SHA-256 of the secret).
-    gateway: everything except /mcp.  agent: /mcp, /events, /registry/version, /health only."""
+    """Mandatory caller authentication (contracts/openapi/device-hub-internal.yaml).
+
+    `X-Service-Secret` is compared in constant time with the SHA-256 verifiers in `verifier_dir`
+    (`gateway.sha256`, `agent.sha256`, hex). Scopes: gateway = every operation; agent = `POST /mcp` only (the five
+    runtime tools). Only `GET /health` is open. Unknown or missing secret -> 401; valid secret, wrong scope -> 403."""
 
     def __init__(self, verifier_dir: str) -> None:
         self.verifiers: dict[str, bytes] = {}
-        for p in Path(verifier_dir).glob("*.sha256"):
-            self.verifiers[p.stem] = bytes.fromhex(p.read_text().strip())
+        d = Path(verifier_dir)
+        if not d.is_dir():
+            raise SystemExit(f"auth.verifier_dir {verifier_dir!r} is not a directory: refusing to start without caller "
+                             "authentication (use --mock --insecure-no-auth for a local mock only)")
+        for name in ("gateway", "agent"):
+            f = d / f"{name}.sha256"
+            if f.is_file():
+                try:
+                    self.verifiers[name] = bytes.fromhex(f.read_text().strip())
+                except ValueError:
+                    raise SystemExit(f"{f.name} is not a hex SHA-256 verifier") from None
+        if "gateway" not in self.verifiers:
+            raise SystemExit(f"{d / 'gateway.sha256'} missing: refusing to start without caller authentication")
+        if "agent" not in self.verifiers:
+            log.warning("no agent.sha256 verifier: the agent cannot call the hub until it is created")
 
     def caller(self, header: str | None) -> str | None:
         if not header:
             return None
         digest = hashlib.sha256(header.encode()).digest()
         found = None
-        for name, v in self.verifiers.items():
+        for name, v in self.verifiers.items():       # no early exit: constant work per request
             if hmac.compare_digest(digest, v):
                 found = name
         return found
 
     @staticmethod
-    def allowed(caller: str, path: str) -> bool:
+    def allowed(caller: str, method: str, path: str) -> bool:
         if caller == "gateway":
-            return not path.startswith("/mcp")
+            return True
         if caller == "agent":
-            return any(path == p or path.startswith(p + "/") for p in AGENT_ALLOWED)
+            return method == "POST" and path == "/mcp"
         return False
 
 
@@ -319,11 +334,13 @@ class AsgiGate:
             return await self.app(scope, receive, send)
         path = scope.get("path", "")
         if scope["type"] == "http":
-            if self.auth is not None and path != "/health":
+            if self.auth is not None and not (path == "/health" and scope["method"] == "GET"):
                 hdrs = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
                 caller = self.auth.caller(hdrs.get("x-service-secret"))
-                if caller is None or not self.auth.allowed(caller, path):
-                    return await _send_json(send, 401, {"error": "unauthorized", "message": "missing or unscoped X-Service-Secret"})
+                if caller is None:
+                    return await _send_json(send, 401, {"error": "unauthorized", "message": "missing or unknown X-Service-Secret"})
+                if not self.auth.allowed(caller, scope["method"], path):
+                    return await _send_json(send, 403, {"error": "forbidden_scope", "message": "secret not scoped to this operation"})
             if path == "/mcp" or path.startswith("/mcp/"):
                 return await self.mcp(scope, receive, send)
         return await self.app(scope, receive, send)
@@ -336,7 +353,16 @@ async def _send_json(send, status: int, doc: dict) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-def create_app(hub: Hub, mock_gateway=None, allowed_hosts: list[str] | None = None):
+async def _json_404(request, exc):
+    return _err("not_found", "no such route", 404)
+
+
+async def _json_405(request, exc):
+    return _err("method_not_allowed", "method not allowed", 405)
+
+
+def create_app(hub: Hub, mock_gateway=None, allowed_hosts: list[str] | None = None, insecure_no_auth: bool = False):
+    """insecure_no_auth is accepted ONLY together with a mock gateway (--mock); otherwise auth.verifier_dir is mandatory."""
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from mcp.server.transport_security import TransportSecuritySettings
 
@@ -383,10 +409,17 @@ def create_app(hub: Hub, mock_gateway=None, allowed_hosts: list[str] | None = No
     ]
     if mock_gateway is not None:
         routes.append(R("/mock/mint", handler(mock_mint, "required"), methods=["POST"]))
-    inner = Starlette(routes=routes, lifespan=lifespan)
+    inner = Starlette(routes=routes, lifespan=lifespan, exception_handlers={404: _json_404, 405: _json_405})
     inner.state.hub = hub
     inner.state.fake_gateway = mock_gateway
-    auth = CallerAuth(hub.cfg.auth.verifier_dir) if hub.cfg.auth.verifier_dir else None
-    if auth is None:
-        log.warning("API caller auth is OFF (auth.verifier_dir not set): acceptable on loopback in dev only")
+    if insecure_no_auth:
+        if mock_gateway is None:
+            raise SystemExit("--insecure-no-auth is accepted only together with --mock")
+        auth = None
+        log.warning("INSECURE: caller authentication is OFF (mock mode); every caller has the gateway scope")
+    else:
+        if not hub.cfg.auth.verifier_dir:
+            raise SystemExit("auth.verifier_dir is not set: refusing to start without caller authentication "
+                             "(only --mock --insecure-no-auth may run without it)")
+        auth = CallerAuth(hub.cfg.auth.verifier_dir)
     return AsgiGate(inner, manager.handle_request, auth)

@@ -1,5 +1,5 @@
 """CLI:  python -m device_hub --config hub.json        (real broker, TLS)
-        python -m device_hub --mock                  (in-memory broker + fake gateway + two demo nodes, no network)
+        python -m device_hub --mock --insecure-no-auth   (in-memory broker + fake gateway + two demo nodes, no network)
         python -m device_hub --mock --mcp-stdio      (MCP over stdio instead of HTTP, for local tool testing)
 """
 from __future__ import annotations
@@ -17,11 +17,15 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="device_hub")
     ap.add_argument("--config", help="JSON config file")
     ap.add_argument("--mock", action="store_true", help="in-memory broker and fake gateway; no network except 127.0.0.1")
+    ap.add_argument("--insecure-no-auth", action="store_true",
+                    help="no caller authentication (every caller gets the gateway scope); accepted only with --mock")
     ap.add_argument("--no-seed", action="store_true", help="with --mock: start empty instead of two demo nodes")
     ap.add_argument("--mcp-stdio", action="store_true", help="serve MCP on stdio instead of the HTTP API")
     ap.add_argument("--port", type=int, help="override http.port")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
+    if args.insecure_no_auth and not args.mock:
+        ap.error("--insecure-no-auth is accepted only together with --mock")
 
     install_log_redaction()
     logging.basicConfig(level=args.log_level.upper(), stream=sys.stderr,
@@ -30,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("device_hub")
 
     cfg = load_config(args.config)
+    if not args.insecure_no_auth and not args.mcp_stdio:
+        from .api import CallerAuth
+        CallerAuth(cfg.auth.verifier_dir)          # refuses to start (SystemExit) without caller authentication
     if args.port:
         cfg.http.port = args.port
 
@@ -58,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
     from .api import create_app
-    app = create_app(hub, mock_gateway=fake_gw)
+    app = create_app(hub, mock_gateway=fake_gw, insecure_no_auth=args.insecure_no_auth)
     log.info("device-hub listening on http://%s:%d (MCP at /mcp)", cfg.http.host, cfg.http.port)
     try:
         uvicorn.run(app, host=cfg.http.host, port=cfg.http.port, log_config=None, access_log=False)

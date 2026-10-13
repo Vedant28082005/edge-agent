@@ -279,12 +279,12 @@ class SceneService:
         return used
 
     # ------------------------------------------------------------------------------------------ run
-    def run_scene(self, ref: Any, user_id: str | None = None, token: str | None = None) -> dict:
+    def run_scene(self, ref: Any, user_id: str | None = None, token: str | None = None, call_id: str | None = None) -> dict:
         try:
             scene = self.get_scene(ref)
         except NotFound:
             return {"ok": False, "executed": False, "error": "unknown_scene"}
-        res = self._run(scene, user_id, token)
+        res = self._run(scene, user_id, token, call_id)
         self.registry.audit(make_by(user_id), "scene.run", scene["scene_id"], {
             "executed": res.get("executed"), "status": res.get("status") or res.get("error"),
             "results": {s: sum(1 for r in res.get("results", []) if r["status"] == s)
@@ -292,7 +292,7 @@ class SceneService:
             "ok" if res.get("executed") else "denied")
         return res
 
-    def _run(self, scene: dict, user_id: str | None, token: str | None) -> dict:
+    def _run(self, scene: dict, user_id: str | None, token: str | None, call_id: str | None = None) -> dict:
         if scene["broken"]:
             return {"ok": False, "executed": False, "error": "scene_broken", "detail": scene["broken_reasons"]}
         items = self.resolve(scene)
@@ -325,7 +325,7 @@ class SceneService:
 
         def run_node(batch: list[Resolved]) -> None:
             for it in batch:
-                r = self.executor.apply(it.ep, it.cap, it.coerced, by, it.value)  # type: ignore[arg-type]
+                r = self.executor.apply(it.ep, it.cap, it.coerced, by, it.value, call_id)  # type: ignore[arg-type]
                 it.status = r["status"] if r["ok"] else "failed"          # done | moving | failed
                 it.detail = None if r["ok"] else r.get("detail") or r["error"]
 
