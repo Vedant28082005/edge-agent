@@ -113,8 +113,19 @@ def test_end_to_end_against_real_broker(stack, caplog):
     caplog.set_level(logging.DEBUG)
     hub, fake_gw, ca_copy = stack
     # --- provisioning session: bundle is what the BLE spec expects, and its CA works for TLS
+    first = hub.admin.create_provision_session({"node_id": N1, "wifi": {"ssid": "it-net", "password": "it-wifi-pass"}}, "it-admin")
+    # idempotent dynsec (CLAUDE.md rule 8): a second session for the same node resets the password, never fails
     sess = hub.admin.create_provision_session({"node_id": N1, "wifi": {"ssid": "it-net", "password": "it-wifi-pass"}}, "it-admin")
+    assert sess["bundle"]["mqtt"]["password"] != first["bundle"]["mqtt"]["password"]
     b = sess["bundle"]
+    (ca_copy).write_text(b["ca_pem"])
+    stale = node_transport(first["bundle"], N1, ca_copy)
+    stale.start()
+    try:
+        wait_for(lambda: stale.connect_error, timeout=8, what="old password refused")
+        assert stale.connected is False and "uthori" in stale.connect_error
+    finally:
+        stale.stop()
     assert b["mqtt"]["username"] == N1 and b["mqtt"]["host"] == HOST and b["ca_pem"].startswith("-----BEGIN CERTIFICATE-----")
     ca_copy.write_text(b["ca_pem"])
 

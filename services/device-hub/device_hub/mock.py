@@ -59,6 +59,7 @@ class FakeBroker:
         self.dynsec_commands: list[str] = []      # command names only (never payloads)
         self.dynsec_fail = False                  # respond with an error to every command
         self.dynsec_silent = False                # never respond (timeout path)
+        self._data: dict | None = None
         self.denied_publishes: list[tuple[str, str]] = []
         self._t = threading.Thread(target=self._worker, name="fake-broker", daemon=True)
         self._t.start()
@@ -155,6 +156,8 @@ class FakeBroker:
             self.dynsec_commands.append(name)
             err = "forced failure" if self.dynsec_fail else self._dynsec_one(name, cmd)
             r: dict[str, Any] = {"command": name}
+            if not err and getattr(self, "_data", None):
+                r["data"], self._data = self._data, None
             if err:
                 r["error"] = err
             if "correlationData" in cmd:
@@ -191,14 +194,14 @@ class FakeBroker:
                 if cmd["rolename"] not in self.roles:
                     return "Role not found"
                 if cmd["rolename"] in u["roles"]:
-                    return "Client is already in this role"
+                    return "Internal error"
                 u["roles"].append(cmd["rolename"])
             elif name == "addRoleACL":
                 acls = self.roles.get(cmd["rolename"])
                 if acls is None:
                     return "Role not found"
                 if any(a["acltype"] == cmd["acltype"] and a["topic"] == cmd["topic"] for a in acls):
-                    return "ACL with this type already exists"
+                    return "Internal error"
                 acls.append({k: cmd[k] for k in ("acltype", "topic", "priority", "allow") if k in cmd})
             elif name == "deleteClient":
                 if cmd["username"] not in self.users:
@@ -214,6 +217,12 @@ class FakeBroker:
             elif name == "getClient":
                 if cmd["username"] not in self.users:
                     return "Client not found"
+                self._data = {"client": {"username": cmd["username"],
+                                         "roles": [{"rolename": r} for r in self.users[cmd["username"]]["roles"]]}}
+            elif name == "getRole":
+                if cmd["rolename"] not in self.roles:
+                    return "Role not found"
+                self._data = {"role": {"rolename": cmd["rolename"], "acls": list(self.roles[cmd["rolename"]])}}
             else:
                 return f"unsupported command {name}"
         return None

@@ -116,16 +116,34 @@ class DynsecClient:
             if self._err(r) and not existed:
                 raise DynsecError(f"{r.get('command')} failed: {str(self._err(r))[:120]}")
         created_client = not client_existed
-        # step 2: ensure the rest
+        # step 2: ensure the rest. Look at what exists first: the real plugin answers a duplicate addClientRole /
+        # addRoleACL with a bare "Internal error", so "tolerate already exists" cannot be relied on.
+        has_role = False
+        have_acls: set[tuple[str, str]] = set()
+        probes: list[dict] = []
+        if client_existed:
+            probes.append({"command": "getClient", "username": node_id})
+        if role_existed:
+            probes.append({"command": "getRole", "rolename": role})
+        if probes:
+            for r in self._run(probes):
+                if self._err(r):
+                    raise DynsecError(f"{r.get('command')} failed: {str(self._err(r))[:120]}")
+                data = r.get("data", {})
+                if r.get("command") == "getClient":
+                    has_role = role in [x.get("rolename") for x in data.get("client", {}).get("roles", [])]
+                else:
+                    have_acls = {(x.get("acltype"), x.get("topic")) for x in data.get("role", {}).get("acls", [])}
         cmds: list[dict] = []
         if client_existed:
             cmds.append({"command": "setClientPassword", "username": node_id, "password": password})
         if role_existed:
-            cmds += [{"command": "addRoleACL", "rolename": role, **a} for a in acls]
-        cmds.append({"command": "addClientRole", "username": node_id, "rolename": role, "priority": 1})
+            cmds += [{"command": "addRoleACL", "rolename": role, **a} for a in acls
+                     if (a["acltype"], a["topic"]) not in have_acls]
+        if not has_role:
+            cmds.append({"command": "addClientRole", "username": node_id, "rolename": role, "priority": 1})
         try:
-            results = self._run(cmds)
-            for c, r in zip(cmds, results):
+            for c, r in zip(cmds, self._run(cmds) if cmds else []):
                 e = self._err(r)
                 if e and not (c["command"] in ("addRoleACL", "addClientRole") and self._already(e)):
                     raise DynsecError(f"{c['command']} failed: {str(e)[:120]}")

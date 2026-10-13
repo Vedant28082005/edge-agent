@@ -64,8 +64,8 @@ class MqttBridge:
             self.stats[f"{leaf}_oversize"] += 1
             log.warning("%s payload too large from %s (%d bytes), dropped", leaf, node_id, len(payload))
             return
-        if payload == b"" and retain:
-            return  # a retained-topic clear (our own forget cleanup), nothing to process
+        if payload == b"":
+            return  # a retained-topic clear (our own forget cleanup, delivered with retain=0), nothing to process
         if self.registry.node_exists(node_id, include_deleted=True) and not self.registry.node_exists(node_id):
             self.stats["forgotten_node_messages"] += 1
             return  # forgotten node: ignore everything it sends
