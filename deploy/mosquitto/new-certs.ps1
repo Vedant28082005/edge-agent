@@ -18,6 +18,7 @@
     certs/server.crt, server.key   broker cert and key (Windows ACL: current user only)
   Ownership by the container user (uid 1883, mode 600) cannot be set on Windows; tools\deploy.ps1 does it on the
   Pi (sudo chown 1883:1883 + chmod 600). On Docker Desktop the bind mount ignores POSIX ownership.
+  Both certs start one day in the past (clock skew tolerance; needs OpenSSL >= 3.4).
   Server cert: RSA 2048, SHA-256, -ServerDays (default 1095 = 3 years). CA: RSA 4096, 10 years (3650 days).
   Renewing the server cert under the SAME CA needs no board re-provisioning (boards trust the CA).
 #>
@@ -42,12 +43,20 @@ function Invoke-Ssl {
     if ($LASTEXITCODE -ne 0) { throw "openssl $($args[0]) failed (exit $LASTEXITCODE)" }
 }
 
+# notBefore = one day in the past: boards (and the Pi) may have a clock slightly behind, and a cert that is
+# 'not yet valid' would be rejected. Needs OpenSSL >= 3.4 (-not_before / -not_after); Git for Windows 2.50+ ships it.
+$now = (Get-Date).ToUniversalTime()
+$fmt = 'yyyyMMddHHmmss\Z'
+$notBefore  = $now.AddDays(-1).ToString($fmt)
+$caNotAfter = $now.AddDays(3650).ToString($fmt)
+$srvNotAfter = $now.AddDays($ServerDays).ToString($fmt)
+
 $caKey = Join-Path $caDir 'ca.key'
 $caCrt = Join-Path $caDir 'ca.crt'
 if ($NewCa -or -not (Test-Path $caCrt)) {
     Write-Host 'Generating CA ...'
     Invoke-Ssl genrsa -out $caKey 4096
-    Invoke-Ssl req -x509 -new -key $caKey -sha256 -days 3650 -subj '/CN=edge-agent private CA/O=edge-agent' `
+    Invoke-Ssl req -x509 -new -key $caKey -sha256 -not_before $notBefore -not_after $caNotAfter -subj '/CN=edge-agent private CA/O=edge-agent' `
         -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' -addext 'keyUsage=critical,keyCertSign,cRLSign' -out $caCrt
     $Force = $true
 }
@@ -69,7 +78,7 @@ if ($Force -or -not (Test-Path $srvCrt)) {
         'keyUsage=critical,digitalSignature,keyEncipherment',
         'extendedKeyUsage=serverAuth',
         "subjectAltName=$san")
-    Invoke-Ssl x509 -req -in $csr -CA $caCrt -CAkey $caKey -CAcreateserial -out $srvCrt -days $ServerDays -sha256 -extfile $ext
+    Invoke-Ssl x509 -req -in $csr -CA $caCrt -CAkey $caKey -CAcreateserial -out $srvCrt -not_before $notBefore -not_after $srvNotAfter -sha256 -extfile $ext
     Remove-Item $csr, $ext -Force
     Write-Host "SANs: $san"
 }

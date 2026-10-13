@@ -44,7 +44,7 @@ Internal endpoints (`/internal/*` in `gateway.yaml`, unix socket or loopback onl
 
 ## Certificate lifecycle
 
-- **CA**: 10 years (3650 days). **Server certificate**: 3 years by default (`-ServerDays`), always issued by the same CA.
+- **CA**: 10 years (3650 days). **Server certificate**: 3 years by default (`-ServerDays`), always issued by the same CA. Both certificates are generated with `notBefore` one day in the past so a slightly slow clock on the Pi or a board does not make them "not yet valid" (needs OpenSSL 3.4+; Git for Windows 2.50+ has it).
 - **Before the first Pi deploy, regenerate with the real values** (the dev run used placeholders): `deploy\mosquitto
 ew-certs.ps1 -LanIp <pi-brain static LAN IP> -TailnetName <pi-brain>.<tailnet>.ts.net -Force`. The broker's LAN IP goes into every board's provisioning bundle, so give `pi-brain` a static address or DHCP reservation; a changed IP means a new server cert **and** new bundles.
 - **Back up `certs\ca\ca.key` offline** (encrypted USB or password manager attachment, not cloud sync, not git). It is the root of trust for every board; losing it means you cannot issue a new server cert under the same CA. It never goes to the Pi.
@@ -70,12 +70,13 @@ ESP32s need the CA cert (delivered in the BLE bundle). Their TLS check needs a v
 
 ## NTP (needed for ESP32 TLS)
 
-The ESP32 must know the time before it can verify the broker certificate. The Pi 5 has no battery RTC, so:
+The ESP32 must know the time before it can verify the broker certificate. The Pi 5 has an RTC but no battery by default, so:
 
 1. Install `chrony` on `pi-brain` and use `chrony/chrony-pi-brain.conf` (syncs from `pool.ntp.org`, serves your LAN, keeps serving a free-running clock with `local stratum 10` if the internet is down). Open UDP 123 from the LAN.
 2. The BLE provisioning bundle carries `ntp_host` = the Pi's LAN IP (same address as the broker). The firmware tries `ntp_host` first and falls back to `pool.ntp.org`.
-3. **Pi 5 RTC backup battery.** The Pi 5 has a real-time clock but no battery by default, so after a power cut without internet the Pi would boot with a stale time and then serve that stale time to the boards. Fit the Raspberry Pi RTC battery (rechargeable lithium cell on the J5 connector) and enable charging by adding `dtparam=rtc_bbat_vchg=3000000` to `/boot/firmware/config.txt`, then reboot. Check with `sudo hwclock -r` and `cat /sys/class/rtc/rtc0/time`. The shipped chrony config has `rtcsync`, which keeps the RTC updated while the Pi is synced.
-4. **`local stratum 10` is kept** on purpose: if the internet is down the Pi still serves its own clock (RTC-backed) so the LAN stays consistent and boards can still do TLS. It is only as good as the RTC; hence the battery.
-5. **Firmware safety net** (required in `contracts/mqtt.md`): boards refuse to treat NTP time earlier than their firmware build timestamp as valid and do not open TLS until the time is plausible, so a stale Pi clock makes boards wait and retry instead of connecting with wrong dates.
+3. **Keep `fake-hwclock` enabled** (it is on by default in Raspberry Pi OS). It saves the time periodically and restores it at boot, so after a power cut with no internet the Pi starts from its last known time instead of the 1970/image-build date. Do not disable or remove it.
+4. **RTC backup battery: recommended, not required.** The Pi 5 has an RTC but no battery by default; with one, the clock is exact across power cuts, without it `fake-hwclock` gives a "last saved time" that can be minutes to days stale. Fit the official Raspberry Pi RTC battery (rechargeable lithium cell on the J5 connector). **Only enable charging with a rechargeable cell**: add `dtparam=rtc_bbat_vchg=3000000` to `/boot/firmware/config.txt` and reboot, and **never enable it with a non-rechargeable coin cell (e.g. CR2032): charging a primary cell can make it leak, overheat or burst.** Without a battery, or with a non-rechargeable one, leave the setting out. Check with `sudo hwclock -r`. The chrony config has `rtcsync` so the RTC follows the synced time.
+5. **`local stratum 10` is kept** on purpose: if the internet is down the Pi still serves its own clock (from `fake-hwclock` or the RTC) so the LAN stays consistent and boards can still do TLS. It is only as good as the saved/RTC time, which is why the firmware also rejects times before its build timestamp.
+6. **Firmware safety net** (required in `contracts/mqtt.md`): boards refuse to treat NTP time earlier than their firmware build timestamp as valid and do not open TLS until the time is plausible, so a stale Pi clock makes boards wait and retry instead of connecting with wrong dates.
 
 Status: documented and configured on paper; not tested on hardware.
