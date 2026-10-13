@@ -227,8 +227,8 @@ Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, 
 |---|---|---|
 | `list_devices` | `room?`, `type?` | Endpoints with room, type, online status |
 | `get_state` | `endpoint_id` or `room` | Current values |
-| `set_state` | `endpoint_id`, `capability`, `value` | Validated against the registry; waits for ack (3 s timeout); `risk: confirm` endpoints need a `confirmation_token` (see below) |
-| `run_scene` | `scene` | See 4.7. Same `confirmation_token` rule; if any action needs confirmation and has no valid token, **nothing runs** |
+| `set_state` | `endpoint_id`, `capability`, `value` | Validated against the registry; waits for ack (3 s timeout, unchanged); returns status `done`, or `moving` for capabilities with `settle_s`, after which the hub verifies convergence within `settle_s` (exact for bool/enum, +/-2 for int percentages) and emits `action_settled` or `action_settle_timeout`; `risk: confirm` endpoints need a `confirmation_token` (see below) |
+| `run_scene` | `scene` | See 4.7. Per-action results use the same statuses (`done`, `moving`, skipped, failed). Same `confirmation_token` rule; if any action needs confirmation and has no valid token, **nothing runs** |
 | `read_sensor` | `endpoint_id`, `capability` | Last value, timestamp, staleness flag |
 
 The LLM can **propose** a scene or automation as JSON, but it is saved only after a user approves it in the UI.
