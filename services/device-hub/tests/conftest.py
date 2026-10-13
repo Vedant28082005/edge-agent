@@ -51,6 +51,11 @@ def sensor_ep(local_id="t1") -> dict:
     return {"local_id": local_id, "type": "sensor", "capabilities": [cap_sensor("temperature", "float", unit="C", interval_s=30)]}
 
 
+def curtain_ep(local_id="c1", settle_s=2) -> dict:
+    return {"local_id": local_id, "type": "cover", "capabilities": [
+        cap_actuator("position", "int", min=0, max=100, unit="%", boot_value=0, settle_s=settle_s)]}
+
+
 def lock_ep(local_id="d1") -> dict:
     return {"local_id": local_id, "type": "lock", "capabilities": [
         cap_actuator("lock", "enum", values=["locked", "unlocked"], boot_value="locked")]}

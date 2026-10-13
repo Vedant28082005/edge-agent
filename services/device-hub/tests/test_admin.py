@@ -132,7 +132,7 @@ def test_dynsec_broker_unreachable_is_503(env):
 def test_dynsec_uses_only_mqtt_commands(env):
     env.hub.admin.create_provision_session({"node_id": N1, "wifi": WIFI}, "a")
     env.hub.admin.forget_node(N1, confirm=True, force=False, actor="a")
-    assert set(env.broker.dynsec_commands) <= {"createRole", "createClient", "deleteClient", "deleteRole"}
+    assert set(env.broker.dynsec_commands) <= {"createRole", "createClient", "setClientPassword", "addRoleACL", "addClientRole", "deleteClient", "deleteRole"}
 
 
 # ---------------------------------------------------------------------------------------------- approve / patch / rebind

@@ -6,6 +6,8 @@ Event types:
   scenes_changed    a scene was created/updated/deleted or flagged/unflagged broken. Data: {reason, scene_ids}
   node_status       a node went online/offline.            Data: {node_id, online}
   state             live values changed (opt-in).          Data: {endpoint_id, values, ts}
+  action_settled / action_settle_timeout  a motion (settle_s) reached / missed its target.
+                    Data: {endpoint_id, capability, value, observed, elapsed_ms | settle_s, call_id?}
   pending_node      a node announced and awaits approval.  Data: {node_id}
 """
 from __future__ import annotations
@@ -18,7 +20,8 @@ from typing import Any, Callable
 
 log = logging.getLogger("device_hub.events")
 
-DEFAULT_TYPES = frozenset({"registry_changed", "scenes_changed", "node_status", "pending_node"})
+DEFAULT_TYPES = frozenset({"registry_changed", "scenes_changed", "node_status", "pending_node", "action_settled",
+                           "action_settle_timeout"})
 ALL_TYPES = DEFAULT_TYPES | {"state"}
 
 

@@ -20,7 +20,7 @@ from .contracts import ENDPOINT_TYPES, VOCAB, coerce_value
 from .errors import Conflict, HubError, NotFound
 from .events import EventBus
 from .executor import Executor, make_by
-from .registry import Registry, clean_label
+from .registry import TAG_RE, Registry, clean_label
 from .util import (ENDPOINT_ID_RE, Clock, action_hash, new_scene_id, run_scene_action, safe_repr, sanitize_text)
 
 log = logging.getLogger("device_hub.scenes")
@@ -35,7 +35,7 @@ class Resolved:
     ep: dict
     capability: str
     value: Any
-    status: str = "pending"        # pending | ok | skipped_offline | skipped_no_capability | failed
+    status: str = "pending"        # pending | done | moving | skipped_offline | skipped_no_capability | failed
     detail: str | None = None
     cap: dict | None = None
     coerced: Any = None
@@ -82,6 +82,11 @@ class SceneService:
                 for k, v in t.items():
                     if not isinstance(v, str):
                         raise HubError("bad_request", f"selector {k} must be a string")
+                    if k == "tag":
+                        if not TAG_RE.match(v):
+                            raise HubError("bad_request", "selector tag must be 1..24 characters of [a-z0-9_-]")
+                        target[k] = v
+                        continue
                     v = sanitize_text(v, 48)
                     if not v:
                         raise HubError("bad_request", f"selector {k} is empty")
@@ -283,7 +288,7 @@ class SceneService:
         self.registry.audit(make_by(user_id), "scene.run", scene["scene_id"], {
             "executed": res.get("executed"), "status": res.get("status") or res.get("error"),
             "results": {s: sum(1 for r in res.get("results", []) if r["status"] == s)
-                        for s in ("ok", "skipped_offline", "skipped_no_capability", "failed")} if res.get("executed") else {}},
+                        for s in ("done", "moving", "skipped_offline", "skipped_no_capability", "failed")} if res.get("executed") else {}},
             "ok" if res.get("executed") else "denied")
         return res
 
@@ -321,7 +326,7 @@ class SceneService:
         def run_node(batch: list[Resolved]) -> None:
             for it in batch:
                 r = self.executor.apply(it.ep, it.cap, it.coerced, by, it.value)  # type: ignore[arg-type]
-                it.status = "ok" if r["ok"] else "failed"
+                it.status = r["status"] if r["ok"] else "failed"          # done | moving | failed
                 it.detail = None if r["ok"] else r.get("detail") or r["error"]
 
         futures = [self._pool.submit(run_node, batch) for batch in by_node.values()]

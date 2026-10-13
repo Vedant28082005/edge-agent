@@ -6,7 +6,7 @@ import threading
 from contextlib import contextmanager
 from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     name        TEXT NOT NULL,
     room        TEXT NOT NULL,
     aliases     TEXT NOT NULL DEFAULT '[]',
+    tags        TEXT NOT NULL DEFAULT '[]',   -- admin-set labels, never from an announce
     risk        TEXT NOT NULL DEFAULT 'normal' CHECK (risk IN ('normal','confirm')),
     enabled     INTEGER NOT NULL DEFAULT 1,
     present     INTEGER NOT NULL DEFAULT 1,    -- 0 when the bound node no longer announces this local_id
@@ -109,6 +110,10 @@ class Database:
             self.conn.execute("PRAGMA foreign_keys=ON")
             self.conn.execute("PRAGMA busy_timeout=5000")
             self.conn.executescript(SCHEMA)
+            cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(endpoints)")}
+            if "tags" not in cols:      # v1 database: add the column
+                self.conn.execute("ALTER TABLE endpoints ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+            self.conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
             self.conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             self.conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('registry_version', '0')")
 

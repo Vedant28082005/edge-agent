@@ -6,12 +6,15 @@ burns an approval) -> publish cmd -> wait for ack (3 s) -> read back and compare
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 
 from .bridge import MqttBridge
 from .config import HubConfig
 from .contracts import coerce_value, values_equal
 from .errors import HubError, NotFound
+from .events import EventBus
 from .gateway_client import GatewayClient
 from .registry import Registry
 from .transport import TransportDown
@@ -35,9 +38,20 @@ def make_by(user_id: str | None, scene_id: str | None = None) -> str:
     return "agent"
 
 
+def converged(cap: dict, observed: Any, target: Any) -> bool:
+    """Convergence rule (mcp-tools.md): exact for bool/enum/float, +/-2 for int percentages (unit % or position)."""
+    if cap["type"] == "int" and (cap.get("unit") == "%" or cap["id"] in ("position", "brightness")):
+        return (isinstance(observed, (int, float)) and not isinstance(observed, bool)
+                and abs(observed - target) <= 2)
+    return values_equal(cap, observed, target)
+
+
 class Executor:
     def __init__(self, registry: Registry, bridge: MqttBridge, gateway: GatewayClient, cfg: HubConfig,
-                 clock: Clock) -> None:
+                 clock: Clock, bus: EventBus | None = None) -> None:
+        self.bus = bus or registry.bus
+        self._watch: dict[tuple[str, str], object] = {}     # (endpoint_id, capability) -> current settle watcher token
+        self._watch_lock = threading.Lock()
         self.registry = registry
         self.bridge = bridge
         self.gateway = gateway
@@ -47,12 +61,14 @@ class Executor:
     # ------------------------------------------------------------------------------------------ queries
     def list_devices(self, room: str | None = None, etype: str | None = None) -> dict:
         if etype is not None and etype not in self.registry.endpoint_types():
-            return {"devices": [], "ok": False, "error": "bad_request"}
+            return {"ok": False, "error": "bad_request", "devices": []}
+        if room is not None and room.lower() not in [r.lower() for r in self.registry.rooms()]:
+            return {"ok": False, "error": "unknown_room", "devices": []}
         devices = []
         for ep in self.registry.list_endpoints(room=room, etype=etype, include_disabled=False):
             devices.append({
-                "endpoint_id": ep["endpoint_id"], "name": ep["name"], "room": ep["room"], "type": ep["type"],
-                "online": ep["online"], "risk": ep["risk"],
+                "endpoint_id": ep["endpoint_id"], "name": ep["name"], "room": ep["room"], "tags": ep["tags"],
+                "type": ep["type"], "online": ep["online"], "risk": ep["risk"],
                 "capabilities": [{k: v for k, v in c.items() if k in ("id", "kind", "type", "min", "max", "values", "unit")}
                                  for c in ep["capabilities"]],
             })
@@ -67,7 +83,7 @@ class Executor:
             except NotFound:
                 return {"ok": False, "error": "unknown_endpoint", "states": []}
             if not eps[0]["enabled"]:
-                return {"ok": False, "error": "disabled", "states": []}
+                return {"ok": False, "error": "unknown_endpoint", "states": []}     # disabled endpoints are invisible
         else:
             eps = self.registry.list_endpoints(room=room, include_disabled=False)
             if not eps and room.lower() not in [r.lower() for r in self.registry.rooms()]:
@@ -83,6 +99,8 @@ class Executor:
             ep = self.registry.get_endpoint(endpoint_id)
         except NotFound:
             return {"ok": False, "error": "unknown_endpoint", "endpoint_id": endpoint_id}
+        if not ep["enabled"]:
+            return {"ok": False, "error": "disabled", "endpoint_id": endpoint_id}
         cap = next((c for c in ep["capabilities"] if c["id"] == capability), None)
         if cap is None:
             return {"ok": False, "error": "unknown_capability", "endpoint_id": endpoint_id, "capability": capability}
@@ -114,8 +132,8 @@ class Executor:
 
     # ------------------------------------------------------------------------------------------ set_state
     def set_state(self, endpoint_id: Any, capability: Any, value: Any, user_id: str | None = None,
-                  token: str | None = None) -> dict:
-        res = self._set_state(endpoint_id, capability, value, user_id, token)
+                  token: str | None = None, call_id: str | None = None) -> dict:
+        res = self._set_state(endpoint_id, capability, value, user_id, token, call_id)
         self.registry.audit(make_by(user_id), "device.set_state", str(endpoint_id)[:20],
                             {"capability": safe_repr(capability, 24), "value": safe_repr(value, 24),
                              "result": "ok" if res.get("ok") else res.get("error")},
@@ -128,7 +146,8 @@ class Executor:
             out["detail"] = detail
         return out
 
-    def _set_state(self, endpoint_id: Any, capability: Any, value: Any, user_id: str | None, token: str | None) -> dict:
+    def _set_state(self, endpoint_id: Any, capability: Any, value: Any, user_id: str | None, token: str | None,
+                   call_id: str | None = None) -> dict:
         if not isinstance(endpoint_id, str) or not ENDPOINT_ID_RE.match(endpoint_id):
             return self._fail(endpoint_id, capability, value, "unknown_endpoint")
         try:
@@ -143,7 +162,7 @@ class Executor:
         if ep["risk"] == "confirm":
             if not self.confirm_ok(set_state_action(endpoint_id, capability, value), user_id, token):
                 return self._fail(endpoint_id, capability, value, "confirmation_required")
-        return self.apply(ep, cap, coerced, make_by(user_id), value)
+        return self.apply(ep, cap, coerced, make_by(user_id), value, call_id)
 
     def confirm_ok(self, action: dict, user_id: str | None, token: str | None) -> bool:
         """Validate+consume a confirmation token for exactly `action` (hash computed here from our own view)."""
@@ -155,14 +174,21 @@ class Executor:
                             "ok" if res.granted else "denied")
         return res.granted
 
-    def apply(self, ep: dict, cap: dict, coerced: Any, by: str, echo_value: Any = None) -> dict:
-        """Send the desired-state cmd, wait for the ack, read back. The action has already been validated (and
-        confirmed if risky)."""
+    def apply(self, ep: dict, cap: dict, coerced: Any, by: str, echo_value: Any = None, call_id: str | None = None) -> dict:
+        """Send the desired-state cmd, wait for the ack, verify. The action has already been validated (and confirmed
+        if risky). The ack means "accepted, motion started": its values are NOT used as proof. Verification reads the
+        node's `state` (a state message received AFTER the command was sent):
+          * no settle_s  -> status "done"; verified = state matched within a short grace (cfg.verify_grace_s);
+                            a mismatch is ok:true, verified:false (a warning, not an error);
+          * settle_s     -> status "moving", verified false; a watcher emits action_settled / action_settle_timeout."""
         out_value = coerced if echo_value is None else echo_value
+        node, local = ep["node_id"], ep["local_id"]
+        live = self.registry.live
+        before = live.counter(node, local)
         cmd_id = self.bridge.new_cmd_id()
-        cmd = {"cmd_id": cmd_id, "endpoint": ep["local_id"], "set": {cap["id"]: coerced}, "by": by}
+        cmd = {"cmd_id": cmd_id, "endpoint": local, "set": {cap["id"]: coerced}, "by": by}
         try:
-            pending = self.bridge.send_cmd(ep["node_id"], cmd)
+            pending = self.bridge.send_cmd(node, cmd)
         except TransportDown:
             return self._fail(ep["endpoint_id"], cap["id"], out_value, "offline", "broker_unreachable")
         ack = self.bridge.wait_ack(pending, self.cfg.ack_timeout_s)   # type: ignore[arg-type]
@@ -172,23 +198,44 @@ class Executor:
             code = ack["error"]
             return self._fail(ep["endpoint_id"], cap["id"], out_value,
                               code if code in DEVICE_PASSTHROUGH else "device_error", code)
-        # read back: the ack carries the applied values; fall back to the last reported state
-        node, local = ep["node_id"], ep["local_id"]
-        applied = ack["values"]
-        verified = False
-        if cap["id"] in applied:
-            if not values_equal(cap, applied[cap["id"]], coerced):
-                return self._fail(ep["endpoint_id"], cap["id"], out_value, "device_error", "readback_mismatch")
-            verified = True
-            self.registry.live.merge_values(node, local, applied, int(self.clock.now()))
-        else:
-            got = self.registry.live.get_values(node, local)
-            if got and cap["id"] in got[0]:
-                if not values_equal(cap, got[0][cap["id"]], coerced):
-                    return self._fail(ep["endpoint_id"], cap["id"], out_value, "device_error", "readback_mismatch")
-                verified = True
-        return {"ok": True, "endpoint_id": ep["endpoint_id"], "capability": cap["id"], "value": out_value,
-                "verified": verified}
+        base = {"ok": True, "endpoint_id": ep["endpoint_id"], "capability": cap["id"], "value": out_value}
+        settle_s = cap.get("settle_s")
+        if settle_s:
+            self._start_watch(ep, cap, coerced, before, float(settle_s), call_id)
+            return {**base, "status": "moving", "verified": False}
+        matched, _ = live.wait_for(node, local, before, lambda v: cap["id"] in v and converged(cap, v[cap["id"]], coerced),
+                                   self.cfg.verify_grace_s)
+        return {**base, "status": "done", "verified": bool(matched)}
+
+    # ---- asynchronous verification of motion (settle_s)
+    def _start_watch(self, ep: dict, cap: dict, target: Any, before: int, settle_s: float, call_id: str | None) -> None:
+        key = (ep["endpoint_id"], cap["id"])
+        token = object()
+        with self._watch_lock:
+            self._watch[key] = token          # a newer command on the same capability supersedes the older watcher
+        t0 = time.monotonic()
+
+        def run() -> None:
+            live = self.registry.live
+            node, local = ep["node_id"], ep["local_id"]
+            got, vals = live.wait_for(node, local, before, lambda v: cap["id"] in v and converged(cap, v[cap["id"]], target),
+                                      settle_s)
+            observed = vals.get(cap["id"]) if vals else None
+            with self._watch_lock:
+                if self._watch.get(key) is not token:
+                    return                    # superseded: the newer command reports its own outcome
+                del self._watch[key]
+            data = {"endpoint_id": ep["endpoint_id"], "capability": cap["id"], "value": target, "observed": observed}
+            if call_id:
+                data["call_id"] = call_id
+            if got:
+                self.bus.publish("action_settled", {**data, "elapsed_ms": int((time.monotonic() - t0) * 1000)})
+            else:
+                self.bus.publish("action_settle_timeout", {**data, "settle_s": settle_s})
+            self.registry.audit("system", "device.settle", ep["endpoint_id"],
+                                {"capability": cap["id"], "settled": bool(got)}, "ok" if got else "failed")
+
+        threading.Thread(target=run, name="settle-watch", daemon=True).start()
 
     # ------------------------------------------------------------------------------------------ node commands
     def node_command(self, node_id: str, cmd: dict) -> dict:

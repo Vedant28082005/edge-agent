@@ -93,33 +93,50 @@ class DynsecClient:
     def _err(item: dict) -> str | None:
         return item.get("error")
 
+    @staticmethod
+    def _already(e: str | None) -> bool:
+        return bool(e) and "already" in e.lower()
+
     def create_node_user(self, node_id: str, password: str) -> str:
-        """Create the node's MQTT user and its per-node role. Idempotent: any stale user/role from an earlier
-        session is replaced (credentials rotate). Returns the role name."""
+        """Idempotent (CLAUDE.md rule 8): create the node's MQTT user and per-node role; if the client already exists
+        its password is SET to the new one (never kept, never an error) and the role and its ACLs are ensured.
+        The credentials returned to the caller are always the ones that now work. Returns the role name."""
         if not NODE_ID_RE.match(node_id):
             raise DynsecError("invalid node_id", 400)
         SECRETS.add(password, permanent=False)
         role = node_role_name(node_id)
-        cmds = lambda: [  # noqa: E731
-            {"command": "createRole", "rolename": role, "textdescription": f"ESP32 node {node_id}",
-             "acls": node_role_acls(node_id)},
+        acls = node_role_acls(node_id)
+        # step 1: create what is missing (role with its ACLs, client without roles)
+        r_role, r_client = self._run([
+            {"command": "createRole", "rolename": role, "textdescription": f"ESP32 node {node_id}", "acls": acls},
             {"command": "createClient", "username": node_id, "password": password, "clientid": node_id,
-             "textdescription": "provisioned node", "roles": [{"rolename": role, "priority": 1}]},
-        ]
-        res = self._run(cmds())
-        errs = [self._err(r) for r in res]
-        if any(e and "already exists" in e.lower() for e in errs):
-            self.delete_node_user(node_id)          # replace stale state, then retry once
-            res = self._run(cmds())
-            errs = [self._err(r) for r in res]
-        if any(errs):
-            # roll back whatever was created so we do not leave a half-made user behind
-            try:
-                self.delete_node_user(node_id)
-            except DynsecError:
-                pass
-            raise DynsecError("creating the node user failed: " + "; ".join(str(e) for e in errs if e)[:200])
-        log.info("dynsec: created user+role for %s", node_id)
+             "textdescription": "provisioned node"}])
+        role_existed, client_existed = self._already(self._err(r_role)), self._already(self._err(r_client))
+        for r, existed in ((r_role, role_existed), (r_client, client_existed)):
+            if self._err(r) and not existed:
+                raise DynsecError(f"{r.get('command')} failed: {str(self._err(r))[:120]}")
+        created_client = not client_existed
+        # step 2: ensure the rest
+        cmds: list[dict] = []
+        if client_existed:
+            cmds.append({"command": "setClientPassword", "username": node_id, "password": password})
+        if role_existed:
+            cmds += [{"command": "addRoleACL", "rolename": role, **a} for a in acls]
+        cmds.append({"command": "addClientRole", "username": node_id, "rolename": role, "priority": 1})
+        try:
+            results = self._run(cmds)
+            for c, r in zip(cmds, results):
+                e = self._err(r)
+                if e and not (c["command"] in ("addRoleACL", "addClientRole") and self._already(e)):
+                    raise DynsecError(f"{c['command']} failed: {str(e)[:120]}")
+        except DynsecError:
+            if created_client:            # do not leave a half-made user behind
+                try:
+                    self.delete_node_user(node_id)
+                except DynsecError:
+                    pass
+            raise
+        log.info("dynsec: user+role ready for %s (%s)", node_id, "password reset" if client_existed else "created")
         return role
 
     def delete_node_user(self, node_id: str) -> None:

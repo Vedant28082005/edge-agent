@@ -17,7 +17,8 @@ def set_(home, who, cap, value, **kw):
 
 def test_set_state_round_trip_with_ack_and_readback(home):
     r = set_(home, "light", "brightness", 70)
-    assert r == {"ok": True, "endpoint_id": home.ids["light"], "capability": "brightness", "value": 70, "verified": True}
+    assert r == {"ok": True, "status": "done", "verified": True, "endpoint_id": home.ids["light"],
+                 "capability": "brightness", "value": 70}
     node = home.nodes["esp32-000000000001"]
     assert node.values["l1"]["brightness"] == 70
     assert node.cmds_seen[-1]["by"] == "agent"
@@ -117,10 +118,29 @@ def test_node_side_cmd_dedup_applies_once(home):
     assert len(node.cmds_seen) == 1
 
 
-def test_readback_mismatch_is_a_device_error(home):
+def test_ack_values_are_not_trusted_state_is(home):
+    """The ack only means accepted; a lying ack cannot fake verification, and the real state wins."""
     home.nodes["esp32-000000000001"].lie_about_value = True
     r = set_(home, "light", "power", True)
-    assert r["error"] == "device_error" and r["detail"] == "readback_mismatch"
+    assert r["ok"] is True and r["status"] == "done" and r["verified"] is True      # state really changed
+
+
+def test_state_that_never_follows_is_ok_but_unverified(home):
+    home.nodes["esp32-000000000001"].ignore_state = True
+    home.hub.cfg.verify_grace_s = 0.2
+    r = set_(home, "light", "power", True)
+    assert r["ok"] is True and r["status"] == "done" and r["verified"] is False     # a warning, not an error
+
+
+def test_stale_matching_state_does_not_count_as_verification(home):
+    """State already equals the target before the command: only a state message AFTER the send verifies it."""
+    node = home.nodes["esp32-000000000001"]
+    node.ignore_state = True
+    home.hub.cfg.verify_grace_s = 0.2
+    node.values["l1"]["power"] = True
+    node.publish_state()
+    home.broker.flush()
+    assert set_(home, "light", "power", True)["verified"] is False
 
 
 def test_device_error_codes_map(home):
@@ -260,7 +280,7 @@ def test_list_devices_shape_and_filters(home):
     assert len(out) == 4
     d = next(x for x in out if x["endpoint_id"] == home.ids["lock"])
     assert d["risk"] == "confirm" and d["room"] == "Hall" and d["capabilities"][0]["values"] == ["locked", "unlocked"]
-    assert set(d) == {"endpoint_id", "name", "room", "type", "online", "risk", "capabilities"}
+    assert set(d) == {"endpoint_id", "name", "room", "tags", "type", "online", "risk", "capabilities"} and d["tags"] == []
     assert [x["name"] for x in home.hub.executor.list_devices(room="hall")["devices"]] == ["Front door"]
     assert [x["type"] for x in home.hub.executor.list_devices(etype="fan")["devices"]] == ["fan"]
 

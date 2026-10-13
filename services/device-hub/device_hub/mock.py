@@ -5,6 +5,7 @@ fake gateway implementing /internal/confirmations/consume. No network, no Docker
 from __future__ import annotations
 
 import base64
+import collections
 import hashlib
 import json
 import logging
@@ -178,6 +179,27 @@ class FakeBroker:
                         del self.users[cmd["username"]]
                         return "Role not found"
                     self.users[cmd["username"]]["roles"].append(r["rolename"])
+            elif name == "setClientPassword":
+                if cmd["username"] not in self.users:
+                    return "Client not found"
+                SECRETS.add(cmd["password"])
+                self.users[cmd["username"]]["password"] = cmd["password"]
+            elif name == "addClientRole":
+                u = self.users.get(cmd["username"])
+                if u is None:
+                    return "Client not found"
+                if cmd["rolename"] not in self.roles:
+                    return "Role not found"
+                if cmd["rolename"] in u["roles"]:
+                    return "Client is already in this role"
+                u["roles"].append(cmd["rolename"])
+            elif name == "addRoleACL":
+                acls = self.roles.get(cmd["rolename"])
+                if acls is None:
+                    return "Role not found"
+                if any(a["acltype"] == cmd["acltype"] and a["topic"] == cmd["topic"] for a in acls):
+                    return "ACL with this type already exists"
+                acls.append({k: cmd[k] for k in ("acltype", "topic", "priority", "allow") if k in cmd})
             elif name == "deleteClient":
                 if cmd["username"] not in self.users:
                     return "Client not found"
@@ -280,10 +302,15 @@ class FakeNode:
         self.ack_delay = ack_delay
         self.drop_acks = False          # never ack (ack_timeout path)
         self.duplicate_acks = False     # ack twice (QoS1 redelivery)
-        self.lie_about_value = False    # ack a different value (readback mismatch path)
+        self.lie_about_value = False    # ack a different value (the hub must not trust ack values)
+        self.ignore_state = False       # apply but never publish state (verified:false path)
+        self.motion_delay = 0.05        # capabilities with settle_s: ack at once, state follows after this long
+        self.stall = False              # motion never reaches the target (action_settle_timeout path)
+        self.stop_short = 0             # motion ends this far from the target (int caps)
+        self.midway = True              # publish an intermediate position before the final one
         self.wiped = False
         self.cmds_seen: list[dict] = []
-        self._acks: dict[str, bytes] = {}
+        self._acks: "collections.OrderedDict[str, bytes]" = collections.OrderedDict()   # last 16 cmd_ids (mqtt.md)
         self.values: dict[str, dict[str, Any]] = {}
         for ep in announce["endpoints"]:
             vals = {}
@@ -296,7 +323,6 @@ class FakeNode:
         self._caps = {ep["local_id"]: {c["id"]: c for c in ep["capabilities"]} for ep in announce["endpoints"]}
         self.topic = f"home/v1/nodes/{self.node_id}"
         self.t.add_message_handler(self._on_message)
-        self.t.subscribe(f"{self.topic}/cmd", 1)
 
     @staticmethod
     def will(node_id: str) -> tuple[str, bytes, int, bool]:
@@ -311,9 +337,16 @@ class FakeNode:
         return True
 
     def publish_announce(self) -> None:
-        self.t.publish(f"{self.topic}/announce", json.dumps(self.announce), 1, True)
+        """The connect lifecycle of mqtt.md, in order: status online, retained announce, subscribe cmd, state."""
         self.t.publish(f"{self.topic}/status", b"online", 1, True)
+        self.t.publish(f"{self.topic}/announce", json.dumps(self.announce), 1, True)
+        self.t.subscribe(f"{self.topic}/cmd", 1)
         self.publish_state()
+
+    def reconnect(self, timeout: float = 5.0) -> bool:
+        """Drop the connection and connect again; the full lifecycle (including the announce) runs on EVERY connect."""
+        self.t.stop()
+        return self.start(timeout)
 
     def publish_state(self) -> None:
         self.t.publish(f"{self.topic}/state", json.dumps({"ts": int(time.time()), "endpoints": self.values}), 1, True)
@@ -328,6 +361,8 @@ class FakeNode:
     def _ack(self, cmd_id: str, ok: bool, endpoint: str | None, values: dict, error: str | None) -> None:
         payload = json.dumps({"cmd_id": cmd_id, "ok": ok, "endpoint": endpoint, "values": values, "error": error}).encode()
         self._acks[cmd_id] = payload
+        while len(self._acks) > 16:
+            self._acks.popitem(last=False)
         if self.drop_acks:
             return
 
@@ -380,13 +415,33 @@ class FakeNode:
             if not ok:
                 self._ack(cid, False, ep, {}, code)
                 return
-        self.values[ep].update(cmd["set"])
-        self.publish_state()
-        reported = dict(self.values[ep])
+        moving = {k: v for k, v in cmd["set"].items() if self._caps[ep][k].get("settle_s")}
+        instant = {k: v for k, v in cmd["set"].items() if k not in moving}
+        self.values[ep].update(instant)
+        if instant and not self.ignore_state:
+            self.publish_state()
+        # ack = accepted; values echo the accepted TARGET, not the position reached (mqtt.md)
+        reported = {**self.values[ep], **cmd["set"]}
         if self.lie_about_value:
-            for k, v in cmd["set"].items():
+            for k, v in instant.items():
                 reported[k] = (not v) if isinstance(v, bool) else v
         self._ack(cid, True, ep, reported, None)
+        if moving and not self.stall:
+            threading.Thread(target=self._move, args=(ep, moving), daemon=True).start()
+
+    def _move(self, ep: str, target: dict) -> None:
+        try:
+            if self.midway:
+                time.sleep(self.motion_delay / 2)
+                self.values[ep].update({k: (v // 2 if isinstance(v, int) and not isinstance(v, bool) else v)
+                                        for k, v in target.items()})
+                self.publish_state()
+            time.sleep(self.motion_delay / 2)
+            self.values[ep].update({k: (v - self.stop_short if isinstance(v, int) and not isinstance(v, bool) else v)
+                                    for k, v in target.items()})
+            self.publish_state()
+        except TransportDown:
+            pass
 
 
 # ---------------------------------------------------------------------------------------------- fake gateway

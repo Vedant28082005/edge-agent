@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ log = logging.getLogger("device_hub.registry")
 
 NAME_MAX = 48
 ALIASES_MAX = 8
+TAGS_MAX = 8
+TAG_RE = re.compile(r"^[a-z0-9_-]{1,24}$")
 
 
 @dataclass
@@ -34,46 +37,66 @@ class AnnounceResult:
 
 class LiveState:
     """In-memory live data fed by MQTT: node online flags and last reported endpoint values. Kept apart from the DB
-    so message ordering at start-up (retained status/state before announce) never matters."""
+    so message ordering at start-up (retained status/state before announce) never matters. A condition variable lets
+    the executor wait for a FRESH state message (counter bump) after it sent a command."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._cond = threading.Condition()
         self._online: dict[str, bool] = {}
         self._values: dict[tuple[str, str], tuple[dict, int]] = {}
+        self._counter: dict[tuple[str, str], int] = {}
 
     def set_online(self, node_id: str, online: bool) -> bool:
-        with self._lock:
+        with self._cond:
             changed = self._online.get(node_id) != online
             self._online[node_id] = online
             return changed
 
     def is_online(self, node_id: str) -> bool:
-        with self._lock:
+        with self._cond:
             return self._online.get(node_id, False)
 
     def update_values(self, node_id: str, local_id: str, values: dict, ts: int) -> bool:
-        with self._lock:
+        """Store a state message. Returns True when the values differ from before (state dedup for events); the
+        freshness counter is bumped either way."""
+        with self._cond:
             old = self._values.get((node_id, local_id))
             self._values[(node_id, local_id)] = (dict(values), ts)
+            self._counter[(node_id, local_id)] = self._counter.get((node_id, local_id), 0) + 1
+            self._cond.notify_all()
             return old is None or old[0] != values
 
-    def merge_values(self, node_id: str, local_id: str, values: dict, ts: int) -> None:
-        with self._lock:
-            old = self._values.get((node_id, local_id), ({}, 0))
-            merged = dict(old[0])
-            merged.update(values)
-            self._values[(node_id, local_id)] = (merged, max(ts, old[1]))
+    def counter(self, node_id: str, local_id: str) -> int:
+        with self._cond:
+            return self._counter.get((node_id, local_id), 0)
+
+    def wait_for(self, node_id: str, local_id: str, after: int, pred, timeout: float) -> tuple[bool, dict | None]:
+        """Wait until a state message newer than counter `after` satisfies pred(values). Returns (ok, values of the
+        latest state message received AFTER `after`, or None if none arrived)."""
+        key = (node_id, local_id)
+
+        def ready() -> bool:
+            if self._counter.get(key, 0) <= after:
+                return False
+            return pred(self._values[key][0])
+
+        with self._cond:
+            ok = self._cond.wait_for(ready, timeout)
+            v = self._values.get(key)
+            fresh = v is not None and self._counter.get(key, 0) > after
+            return ok, (dict(v[0]) if fresh else None)
 
     def get_values(self, node_id: str, local_id: str) -> tuple[dict, int] | None:
-        with self._lock:
+        with self._cond:
             v = self._values.get((node_id, local_id))
             return (dict(v[0]), v[1]) if v else None
 
     def drop_node(self, node_id: str) -> None:
-        with self._lock:
+        with self._cond:
             self._online.pop(node_id, None)
             for k in [k for k in self._values if k[0] == node_id]:
                 del self._values[k]
+                self._counter.pop(k, None)
 
 
 def clean_label(value: Any, field: str, required: bool = True) -> str:
@@ -96,6 +119,20 @@ def clean_aliases(value: Any) -> list[str]:
         if s and s.lower() not in [x.lower() for x in out]:
             out.append(s)
     return out
+
+
+def clean_tags(value: Any) -> list[str]:
+    """Admin-set tags: at most 8, each 1..24 of [a-z0-9_-], unique. Strict: invalid input is an error, not repaired."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > TAGS_MAX:
+        raise HubError("bad_request", f"tags must be a list of at most {TAGS_MAX} strings")
+    for t in value:
+        if not isinstance(t, str) or not TAG_RE.match(t):
+            raise HubError("bad_request", "each tag must be 1..24 characters of [a-z0-9_-]")
+    if len(set(value)) != len(value):
+        raise HubError("bad_request", "tags must be unique")
+    return list(value)
 
 
 class Registry:
@@ -266,7 +303,7 @@ class Registry:
         view = {
             "endpoint_id": row["endpoint_id"], "node_id": row["node_id"], "local_id": row["local_id"],
             "name": row["name"], "room": row["room"], "aliases": json.loads(row["aliases"]),
-            "type": row["type"], "risk": row["risk"], "online": node_up and bool(row["present"]),
+            "tags": json.loads(row["tags"]), "type": row["type"], "risk": row["risk"], "online": node_up and bool(row["present"]),
             "enabled": bool(row["enabled"]), "present": bool(row["present"]), "capabilities": caps,
         }
         if with_state:
@@ -299,11 +336,11 @@ class Registry:
         return [self._view(r) for r in self.db.query(sql, tuple(params))]
 
     def select(self, room: str | None = None, etype: str | None = None, tag: str | None = None) -> list[dict]:
-        """Selector resolution (scenes): enabled endpoints matching all given keys. `tag` matches an admin alias
-        (case-insensitive); the contract defines no separate tag field."""
+        """Selector resolution (scenes): enabled endpoints matching ALL given keys. `tag` matches the endpoint's
+        admin-set `tags` (exact, tags are lowercase); aliases are not used."""
         out = []
         for ep in self.list_endpoints(room=room, etype=etype, include_disabled=False):
-            if tag and tag.lower() not in [a.lower() for a in ep["aliases"]]:
+            if tag and tag not in ep["tags"]:
                 continue
             out.append(ep)
         return out
@@ -342,7 +379,7 @@ class Registry:
             for it in items:
                 if not isinstance(it, dict):
                     raise HubError("bad_request", "each endpoint entry must be an object")
-                unknown = set(it) - {"local_id", "name", "room", "aliases", "risk"}
+                unknown = set(it) - {"local_id", "name", "room", "aliases", "tags", "risk"}
                 if unknown:
                     raise HubError("bad_request", f"unknown fields: {sorted(unknown)}")
                 lid = it.get("local_id")
@@ -361,10 +398,10 @@ class Registry:
                 while c.execute("SELECT 1 FROM endpoints WHERE endpoint_id=?", (eid,)).fetchone():
                     eid = new_endpoint_id()
                 ep = announced[lid]
-                c.execute("INSERT INTO endpoints(endpoint_id, node_id, local_id, type, name, room, aliases, risk, enabled,"
-                          " present, created, updated) VALUES (?,?,?,?,?,?,?,?,1,1,?,?)",
+                c.execute("INSERT INTO endpoints(endpoint_id, node_id, local_id, type, name, room, aliases, tags, risk,"
+                          " enabled, present, created, updated) VALUES (?,?,?,?,?,?,?,?,?,1,1,?,?)",
                           (eid, node_id, lid, ep["type"], name, room, json.dumps(clean_aliases(it.get("aliases"))),
-                           risk, now, now))
+                           json.dumps(clean_tags(it.get("tags"))), risk, now, now))
                 for cap in ep["capabilities"]:
                     c.execute("INSERT INTO capabilities(endpoint_id, cap_id, cap_json) VALUES (?,?,?)",
                               (eid, cap["id"], json.dumps(cap, sort_keys=True)))
@@ -376,7 +413,7 @@ class Registry:
     def patch_endpoint(self, endpoint_id: str, patch: dict, actor: str) -> dict:
         if not isinstance(patch, dict) or not patch:
             raise HubError("bad_request", "empty patch")
-        unknown = set(patch) - {"name", "room", "aliases", "risk", "enabled"}
+        unknown = set(patch) - {"name", "room", "aliases", "tags", "risk", "enabled"}
         if unknown:
             raise HubError("bad_request", f"unknown fields: {sorted(unknown)}")
         with self.db.tx() as c:
@@ -386,6 +423,7 @@ class Registry:
             name = clean_label(patch["name"], "name") if "name" in patch else row["name"]
             room = self._canon_room(c, clean_label(patch["room"], "room")) if "room" in patch else row["room"]
             aliases = json.dumps(clean_aliases(patch["aliases"])) if "aliases" in patch else row["aliases"]
+            tags = json.dumps(clean_tags(patch["tags"])) if "tags" in patch else row["tags"]
             risk = patch.get("risk", row["risk"])
             if risk not in ("normal", "confirm"):
                 raise HubError("bad_request", "risk must be normal or confirm")
@@ -394,8 +432,8 @@ class Registry:
                 raise HubError("bad_request", "enabled must be a boolean")
             if name != row["name"] or room != row["room"]:
                 self._check_name_free(c, room, name, exclude=endpoint_id)
-            c.execute("UPDATE endpoints SET name=?, room=?, aliases=?, risk=?, enabled=?, updated=? WHERE endpoint_id=?",
-                      (name, room, aliases, risk, int(enabled), self.clock.now(), endpoint_id))
+            c.execute("UPDATE endpoints SET name=?, room=?, aliases=?, tags=?, risk=?, enabled=?, updated=? WHERE endpoint_id=?",
+                      (name, room, aliases, tags, risk, int(enabled), self.clock.now(), endpoint_id))
         detail = {k: patch[k] for k in patch if k in ("risk", "enabled", "room")}
         self.audit(actor, "endpoint.patch", endpoint_id, {"fields": sorted(patch), **detail})
         self.changed("patch", [endpoint_id])

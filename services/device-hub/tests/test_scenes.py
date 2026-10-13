@@ -30,7 +30,7 @@ def test_fixed_targets_run_with_per_action_results(home):
     s = mk(home, "Reading", [fixed(home.ids["light"], "power", True), fixed(home.ids["light"], "brightness", 30),
                              fixed(home.ids["fan"], "speed", 2)])
     r = home.hub.scenes.run_scene(s["scene_id"])
-    assert r["ok"] and r["executed"] and [x["status"] for x in r["results"]] == ["ok"] * 3
+    assert r["ok"] and r["executed"] and [x["status"] for x in r["results"]] == ["done"] * 3
     assert home.nodes["esp32-000000000001"].values["l1"] == {"power": True, "brightness": 30}
     assert home.nodes["esp32-000000000001"].cmds_seen[-1]["by"] == f"scene:{s['scene_id']}"
 
@@ -48,14 +48,14 @@ def test_selector_resolution_room_type_tag(home):
     r = home.hub.scenes.run_scene(s["scene_id"])
     got = by_ep(r)
     assert set(got) == {(home.ids["light"], "power"), (home.ids["fan"], "power"), (home.ids["temp"], "power")}
-    assert got[(home.ids["light"], "power")]["status"] == "ok"
+    assert got[(home.ids["light"], "power")]["status"] == "done"
     assert got[(home.ids["temp"], "power")]["status"] == "skipped_no_capability"
     # type selector
     s2 = mk(home, "Fans", [sel("speed", 4, type="fan")])
     assert [x["endpoint_id"] for x in home.hub.scenes.run_scene(s2["scene_id"])["results"]] == [home.ids["fan"]]
-    # tag = admin alias
-    home.hub.admin.patch_endpoint(home.ids["light"], {"aliases": ["reading lamp"]}, "t")
-    s3 = mk(home, "Lamps", [sel("power", True, tag="Reading Lamp")])
+    # tag = admin-set tag (aliases do not count)
+    home.hub.admin.patch_endpoint(home.ids["light"], {"aliases": ["reading lamp"], "tags": ["reading"]}, "t")
+    s3 = mk(home, "Lamps", [sel("power", True, tag="reading")])
     assert [x["endpoint_id"] for x in home.hub.scenes.run_scene(s3["scene_id"])["results"]] == [home.ids["light"]]
 
 
@@ -64,7 +64,7 @@ def test_new_light_joins_selector_scene_without_edit(home):
     assert len(home.hub.scenes.run_scene(s["scene_id"])["results"]) == 1
     home.add_node(make_announce("esp32-000000000003", [light_ep("l9")]), {"l9": ("Bed lamp", "Bedroom", None)})
     r = home.hub.scenes.run_scene(s["scene_id"])
-    assert len(r["results"]) == 2 and all(x["status"] == "ok" for x in r["results"])
+    assert len(r["results"]) == 2 and all(x["status"] == "done" for x in r["results"])
 
 
 def test_offline_endpoints_are_skipped_and_reported_not_queued(home):
@@ -75,7 +75,7 @@ def test_offline_endpoints_are_skipped_and_reported_not_queued(home):
     r = home.hub.scenes.run_scene(s["scene_id"])
     got = by_ep(r)
     assert got[(home.ids["light"], "power")]["status"] == "skipped_offline"
-    assert got[(home.ids["fan"], "power")]["status"] == "ok"
+    assert got[(home.ids["fan"], "power")]["status"] == "done"
     assert r["ok"] is True
     node1.t.start()
     home.broker.flush()
@@ -85,7 +85,7 @@ def test_offline_endpoints_are_skipped_and_reported_not_queued(home):
 def test_selector_skips_endpoints_missing_the_capability(home):
     s = mk(home, "Dim all", [sel("brightness", 10, room="Bedroom")])
     got = by_ep(home.hub.scenes.run_scene(s["scene_id"]))
-    assert got[(home.ids["light"], "brightness")]["status"] == "ok"
+    assert got[(home.ids["light"], "brightness")]["status"] == "done"
     assert got[(home.ids["fan"], "brightness")]["status"] == "skipped_no_capability"
 
 
@@ -96,12 +96,12 @@ def test_device_failure_reported_per_action(home):
     got = by_ep(r)
     assert got[(home.ids["fan"], "power")] == {"endpoint_id": home.ids["fan"], "capability": "power", "status": "failed",
                                                "detail": "ack_timeout"}
-    assert got[(home.ids["light"], "power")]["status"] == "ok" and r["ok"] is False
+    assert got[(home.ids["light"], "power")]["status"] == "done" and r["ok"] is False
 
 
 def test_disabled_endpoints_are_excluded_from_selectors(home):
     s = mk(home, "Speed 5", [sel("speed", 5, room="Bedroom")])
-    assert by_ep(home.hub.scenes.run_scene(s["scene_id"]))[(home.ids["fan"], "speed")]["status"] == "ok"
+    assert by_ep(home.hub.scenes.run_scene(s["scene_id"]))[(home.ids["fan"], "speed")]["status"] == "done"
     home.hub.admin.patch_endpoint(home.ids["fan"], {"enabled": False}, "t")
     r = home.hub.scenes.run_scene(s["scene_id"])
     assert home.ids["fan"] not in [x["endpoint_id"] for x in r["results"]]
@@ -153,7 +153,7 @@ def test_offline_risky_action_is_still_part_of_the_approval(home):
     token = home.hub.scenes.action_for_scene(s["scene_id"])["action_hash"]
     r = home.hub.scenes.run_scene(s["scene_id"], user_id=U, token=home.gw.mint(U, token))
     assert by_ep(r)[(home.ids["lock"], "lock")]["status"] == "skipped_offline"
-    assert by_ep(r)[(home.ids["light"], "power")]["status"] == "ok"
+    assert by_ep(r)[(home.ids["light"], "power")]["status"] == "done"
 
 
 # ---------------------------------------------------------------------------------------------- validation

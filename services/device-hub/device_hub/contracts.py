@@ -151,7 +151,7 @@ def normalise_capability(cap: dict) -> dict:
         out["values"] = list(cap.get("values") or spec.get("values") or [])
     if cap.get("unit"):
         out["unit"] = cap["unit"]
-    for k in ("interval_s", "boot_value", "failsafe_value", "max_on_s"):
+    for k in ("interval_s", "boot_value", "failsafe_value", "max_on_s", "settle_s"):
         if k in cap:
             out[k] = cap[k]
     return out

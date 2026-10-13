@@ -56,6 +56,7 @@ class HubConfig:
     ack_timeout_s: float = 3.0
     dynsec_timeout_s: float = 5.0
     stale_factor: float = 3.0
+    verify_grace_s: float = 0.5      # wait for the read-back state after an ack (instant capabilities)
     maintenance_interval_s: float = 15.0
     mqtt: MqttConfig = field(default_factory=MqttConfig)
     http: HttpConfig = field(default_factory=HttpConfig)
