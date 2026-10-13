@@ -31,7 +31,18 @@ JSON Schemas: `announce.schema.json`, `state.schema.json`, `cmd.schema.json`, `a
 
 **announce**: validated against `announce.schema.json` (schema 2). See `samples/valid/`.
 
-**status**: the bare strings `online` or `offline` (not JSON). LWT: topic `status`, payload `offline`, QoS 1, retained. After connecting the node publishes `online` (retained).
+**status**: the bare strings `online` or `offline` (not JSON). LWT: topic `status`, payload `offline`, QoS 1, retained. After connecting the node publishes `online` (retained), see "Connect lifecycle".
+
+## Connect lifecycle
+
+On **every** successful connect, boot and reconnect alike, the node performs these steps in this order:
+
+1. publish `status` = `online` (retained, QoS 1);
+2. publish the retained `announce`;
+3. subscribe to `nodes/<node_id>/cmd` (QoS 1);
+4. publish `state` (every endpoint capability, current values).
+
+Subscribing to `cmd` only after the announce means the hub never sends a command to a node it has not yet seen describe itself. The hub treats an announce identical to the one it already holds as a no-op; a changed announce is handled by the existing rules (validation, registry diff, re-approval where required).
 
 **state**
 ```json
