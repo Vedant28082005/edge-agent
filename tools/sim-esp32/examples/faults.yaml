@@ -1,0 +1,24 @@
+# One node per fault, to exercise the hub's error handling. The announce faults are rejected by the hub on purpose.
+nodes:
+  - node_id: esp32-f00000000001      # hub retries after 3 s; node replays the ack for the repeated cmd_id
+    faults: {drop_first_acks: 1}
+    endpoints: &light
+      - local_id: l1
+        type: light
+        capabilities:
+          - {id: power, boot_value: false, failsafe_value: false}
+  - node_id: esp32-f00000000002      # ack arrives after the hub's 3 s timeout
+    faults: {delay_ack_s: 4}
+    endpoints: *light
+  - node_id: esp32-f00000000003      # every cmd delivered twice, every ack published twice
+    faults: {duplicate_cmd: 1, duplicate_ack: true}
+    endpoints: *light
+  - node_id: esp32-f00000000004      # drops the connection (no DISCONNECT, so the LWT fires) every 20 s for 5 s
+    faults: {flapping: {up_s: 20, down_s: 5}}
+    endpoints: *light
+  - node_id: esp32-f00000000005      # modes: invalid_json missing_field wrong_schema node_id_mismatch oversize unknown_capability
+    faults: {malformed_announce: invalid_json}
+    endpoints: *light
+  - node_id: esp32-f00000000006      # announces a capability outside the vocabulary
+    faults: {malformed_announce: unknown_capability}
+    endpoints: *light
