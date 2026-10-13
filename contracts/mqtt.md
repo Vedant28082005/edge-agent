@@ -42,6 +42,8 @@ On **every** successful connect, boot and reconnect alike, the node performs the
 3. subscribe to `nodes/<node_id>/cmd` (QoS 1);
 4. publish `state` (every endpoint capability, current values).
 
+**No offline queue.** Nodes do not queue QoS 1 publishes (state, ack) while disconnected; the MQTT client's offline queue is disabled and anything not yet sent is dropped. On reconnect the node publishes fresh `state` as step 4 above. An `ack` lost in an outage is covered by the hub's ack timeout (3 s): the hub reports `ack_timeout` and verifies against the fresh state.
+
 Subscribing to `cmd` only after the announce means the hub never sends a command to a node it has not yet seen describe itself. The hub treats an announce identical to the one it already holds as a no-op; a changed announce is handled by the existing rules (validation, registry diff, re-approval where required).
 
 **state**
