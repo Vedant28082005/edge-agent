@@ -119,6 +119,11 @@ class Provisioning:
             done.append(r["session_id"])
         return done
 
+    def cancel(self, node_id: str) -> None:
+        with self.db.tx() as c:
+            c.execute("UPDATE provision_sessions SET state='cancelled' WHERE node_id=? AND state IN ('pending','connected')",
+                      (node_id,))
+
     # ------------------------------------------------------------------------------------------ queries
     @staticmethod
     def _view(r) -> dict:

@@ -113,6 +113,8 @@ class AdminService:
         credentials and removes the node. `force`: still soft-delete the registry rows when the broker/dynsec is
         unreachable; the revocation is then retried by the maintenance loop until it succeeds."""
         node_id = self._node_id(node_id)
+        if not self.registry.node_exists(node_id):
+            return self._cancel_unannounced(node_id, confirm, actor)
         usage = self.forget_usage(node_id)
         if not confirm:
             return {"forgotten": False, **usage}
@@ -135,6 +137,19 @@ class AdminService:
         self.registry.bus.publish("node_status", {"node_id": node_id, "online": False})
         self.registry.changed("forget", eids)
         return {"forgotten": True, "revocation_pending": revocation_pending, **usage}
+
+    def _cancel_unannounced(self, node_id: str, confirm: bool, actor: str) -> dict:
+        """A node that was provisioned but never announced has only a session and an MQTT user: remove both."""
+        active = [x for x in self.provisioning.list_sessions(active_only=True) if x["node_id"] == node_id]
+        if not active:
+            raise NotFound("unknown_node", "no such node")
+        usage = {"scenes": 0, "automations": 0, "scene_list": [], "message": "never announced; only a provisioning session exists"}
+        if not confirm:
+            return {"forgotten": False, **usage}
+        self.dynsec.delete_node_user(node_id)
+        self.provisioning.cancel(node_id)
+        self.registry.audit(actor, "node.forget", node_id, {"session_only": True})
+        return {"forgotten": True, "revocation_pending": False, **usage}
 
     def retry_pending_revocations(self) -> list[str]:
         done = []
