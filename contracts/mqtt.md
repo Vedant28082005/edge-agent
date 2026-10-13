@@ -99,3 +99,15 @@ TLS certificate dates are checked against the board's clock, and a board without
 - Dynsec user/role management by services goes through the dynsec MQTT API (`$CONTROL/dynamic-security/v1`), never through process arguments. `dynsec-node-user.ps1` (docker exec + mosquitto_ctrl, password on the command line) is a dev-PC test helper only.
 - **Idempotent user creation.** Any service that creates node users (device-hub for provisioning sessions) must be idempotent: if the client already exists (e.g. a re-provision after a failed attempt or a hardware reset), it sets the new password (`setClientPassword`) and ensures the role exists and is assigned (`createRole` tolerated if present, `addClientRole` tolerated if present) instead of keeping the old password or failing. The credentials returned in the bundle must always be the ones that now work.
 - `deploy/mosquitto/dynsec-bootstrap.ps1` creates only the initial config with the hub admin account.
+
+## Contract changelog
+
+- **S0b** (announce stays schema 2, no nodes deployed; `mcp-tools.md` v3, `agent-events.md` v5, `gateway.yaml` 2.6.0):
+  - Node connection rules: `client_id` == `username` == `node_id`; clean session.
+  - Connect lifecycle on every connect: status `online`, retained announce, subscribe `cmd`, state. Identical announce is a hub no-op.
+  - Nodes do not queue publishes while disconnected; lost acks are covered by the hub's ack timeout.
+  - Dedup: last 16 `cmd_id`s, count-based, not persisted; cached ack replayed; hub never reuses a `cmd_id`.
+  - Announce: optional `settle_s` (1..120) on actuators, required for `position`. Samples added/updated.
+  - Ack means "accepted, motion started"; `set_state` returns `done`/`moving`; `action_settled` and `action_settle_timeout` events; `run_scene` per-action statuses `done|moving|...`.
+  - BLE bundle / credentials: username and client_id are both `node_id`; clean session.
+  - Idempotent dynsec node-user creation (also in `CLAUDE.md`).

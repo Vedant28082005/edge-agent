@@ -113,7 +113,7 @@ Endpoint types: `light`, `fan`, `outlet`, `lock`, `cover`, `thermostat`, `sensor
 
 ### 4.2 MQTT (broker on pi-brain, TLS on 8883)
 
-Prefix `home/v1/`. Payloads JSON, UTF-8. Client id = `node_id`. Each node has its own MQTT user, created at provisioning time through Mosquitto's dynamic-security plugin, with a role that allows publish/subscribe only on `home/v1/nodes/<its node_id>/#`. The hub has a privileged account. Anonymous access is off.
+Prefix `home/v1/`. Payloads JSON, UTF-8. MQTT `client_id` == MQTT `username` == `node_id`, clean session (cmd is never retained, so no queued old commands). Each node has its own MQTT user, created at provisioning time through Mosquitto's dynamic-security plugin, with a role that allows publish/subscribe only on `home/v1/nodes/<its node_id>/#`. User creation by services is idempotent: if the client exists, set its password and ensure its role. The hub has a privileged account. Anonymous access is off.
 
 | Topic | Dir | QoS / retain | Purpose |
 |---|---|---|---|
@@ -164,9 +164,9 @@ Prefix `home/v1/`. Payloads JSON, UTF-8. Client id = `node_id`. Each node has it
 
 **cmd**: `{"cmd_id": "uuid", "endpoint": "ch1", "set": {"power": true, "speed": 3}, "by": "user:vedant"}`
 
-Commands are **desired-state, never toggles**, so retries are safe. Nodes also accept `{"cmd_id": ..., "cmd": "identify", "duration_s": 10}` and `{"cmd_id": ..., "cmd": "unprovision"}` (wipe stored config, return to provisioning mode).
+Commands are **desired-state, never toggles**, so retries are safe. Nodes keep the last 16 `cmd_id`s (count-based, no TTL, not persisted across reboot) and replay the cached ack for a repeat; the hub never reuses a `cmd_id` (UUIDv4). Nodes also accept `{"cmd_id": ..., "cmd": "identify", "duration_s": 10}` and `{"cmd_id": ..., "cmd": "unprovision"}` (wipe stored config, return to provisioning mode).
 
-**ack**: `{"cmd_id": "uuid", "ok": true, "endpoint": "ch1", "values": {...}, "error": null}`
+**ack**: `{"cmd_id": "uuid", "ok": true, "endpoint": "ch1", "values": {...}, "error": null}`. The ack means "accepted, motion started"; `values` echo the accepted target and `state` reports actual progress. Capabilities that announce `settle_s` (required for `position`, 1..120 s) are verified by the hub: `set_state` returns `moving`, then state must converge (+/-2 for position) within `settle_s`, else an `action_settle_timeout` event. Capabilities without `settle_s` return `done`. The ack timeout stays 3 s. Nodes do not queue publishes while disconnected; an ack lost in an outage is covered by the ack timeout.
 
 **perception event**: `{"ts": ..., "node": "jetson-yolo", "source_id": "cam0", "kind": "detection_change", "detections": [{"label": "person", "conf": 0.81, "bbox": [x,y,w,h]}], "summary": "person appeared"}`
 
@@ -177,8 +177,9 @@ BOOT → LOAD_CONFIG
   ├─ no config, or BOOT button held 3 s → PROVISIONING (BLE, 5 min window, LED pattern)
   │     ├─ success → save to NVS → reboot
   │     └─ timeout → idle (no BLE) until the button is pressed or power-cycled
-  └─ config present → apply boot_value → WIFI → NTP (valid only if ≥ firmware build timestamp; retry, no TLS before) → MQTT_TLS (LWT=offline)
-        → ANNOUNCE (retained) → subscribe cmd → publish state → RUN
+  └─ config present → apply boot_value → WIFI → NTP (valid only if ≥ firmware build timestamp; retry, no TLS before) → MQTT_TLS (client_id = username = node_id, clean session, LWT=offline)
+        → status online → ANNOUNCE (retained) → subscribe cmd → publish state → RUN
+        (this exact sequence repeats on every reconnect, not only at boot; an identical announce is a no-op for the hub)
 RUN: handle cmd (dedup cmd_id, validate vs own ranges, apply, publish state, ack)
      publish state on change + heartbeat; sensors on interval
      link lost → reconnect with backoff in its own task; after failsafe_after_s apply failsafe_value
