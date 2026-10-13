@@ -23,6 +23,13 @@ Project: edge agentic IoT framework (smart home). Read `docs/ARCHITECTURE.md` fo
 - Target nodes (Pi 5, Jetson Nano) are **Linux**: service code stays bash/Python/Docker.
 - Deploy with `tools\deploy.ps1` (ssh/scp). Check nodes with `tools\node-check.ps1`.
 
+## Parallel sessions (several sessions share this PC)
+
+- **Never kill processes by name**: no `taskkill /IM`, `Stop-Process -Name`, `pkill`, `killall`. Stop only a PID you started yourself in this session (record it when you launch the process).
+- **Never touch containers (or networks, volumes) you did not start.** No `docker rm/stop/kill` on others, no `docker system prune`, no `docker compose down` outside your own project.
+- **Any dev broker or compose stack uses a unique compose project name** (`-p <session>-<random>`, e.g. `s1-ab12`) **and a free host port** (check it is free, or let Docker pick an ephemeral one and read it back). Never reuse a fixed container name or the default port 8883 for tests.
+- Tear down only what you started, by its project name or PID.
+
 ## Worktree workflow
 
 - Each session works in its own git worktree (e.g. `edge-agent-s0` on branch `s0-contracts`), only inside that folder.
