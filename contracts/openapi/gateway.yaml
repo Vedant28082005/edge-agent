@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.4.0
+  version: 2.8.1
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -313,7 +313,8 @@ paths:
   # in the X-Service-Secret header, never with a user JWT. ONE SECRET PER CALLING SERVICE, each scoped to the
   # operations that service needs (one OpenAPI security scheme per service, see components.securitySchemes):
   #   * deviceHubSecret : device-hub only. Authorizes /internal/confirmations/consume and nothing else.
-  #   * the agent has NO secret and no internal access at all; it cannot mint or consume tokens.
+  #   * the agent has NO secret for this gateway API and no internal access at all; it cannot mint or consume tokens.
+  #     (Calls into device-hub use a different file: openapi/device-hub-internal.yaml.)
   # Secret files: /etc/edge-agent/secrets/<service>.secret, mode 600, owned by THAT service's user (256-bit random,
   # base64). The gateway cannot read them; it holds only a SHA-256 verifier per service in
   # /etc/edge-agent/secrets/verifiers/<service>.sha256 (mode 600, owned by the gateway user) and compares in
@@ -425,6 +426,7 @@ paths:
                       name: {type: string, maxLength: 48}
                       room: {type: string, maxLength: 48}
                       aliases: {type: array, maxItems: 8, items: {type: string, maxLength: 48}}
+                      tags: {$ref: '#/components/schemas/Tags'}
                       risk: {$ref: '#/components/schemas/Risk'}
       responses:
         '200': {description: Approved endpoints, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Endpoint'}}}}}
@@ -478,7 +480,7 @@ paths:
       tags: [admin]
       operationId: adminPatchEndpoint
       x-required-role: admin
-      description: Rename, room, aliases, risk, enable/disable. The id never changes.
+      description: Rename, room, aliases, tags, risk, enable/disable. The id never changes. `tags` replaces the whole tag list (admin-set labels, never part of the announce).
       parameters:
         - {$ref: '#/components/parameters/EndpointId'}
       requestBody:
@@ -493,6 +495,7 @@ paths:
                 name: {type: string, maxLength: 48}
                 room: {type: string, maxLength: 48}
                 aliases: {type: array, maxItems: 8, items: {type: string, maxLength: 48}}
+                tags: {$ref: '#/components/schemas/Tags'}
                 risk: {$ref: '#/components/schemas/Risk'}
                 enabled: {type: boolean}
       responses:
@@ -617,6 +620,13 @@ components:
     Risk: {type: string, enum: [normal, confirm]}
     NodeId: {type: string, pattern: '^esp32-[0-9a-f]{12}$'}
     EndpointId: {type: string, pattern: '^ep_[0-9a-f]{8}$'}
+    Tag: {type: string, minLength: 1, maxLength: 24, pattern: '^[a-z0-9_-]+$'}
+    Tags:
+      type: array
+      maxItems: 8
+      uniqueItems: true
+      description: Admin-set labels on an endpoint, used by scene selectors (`tag`). Not part of the announce; a device can never set or change them.
+      items: {$ref: '#/components/schemas/Tag'}
     EndpointType: {type: string, enum: [light, fan, outlet, lock, cover, thermostat, sensor, generic]}
     Capability:
       type: object
@@ -639,6 +649,7 @@ components:
         name: {type: string}
         room: {type: string}
         aliases: {type: array, items: {type: string}}
+        tags: {$ref: '#/components/schemas/Tags'}
         type: {$ref: '#/components/schemas/EndpointType'}
         risk: {$ref: '#/components/schemas/Risk'}
         online: {type: boolean}
@@ -650,6 +661,8 @@ components:
       required: [ok]
       properties:
         ok: {type: boolean}
+        status: {type: string, enum: [done, moving]}
+        verified: {type: boolean, description: Read-back matched the target; always false while status is moving (see mcp-tools.md)}
         error: {type: string}
         values: {type: object, additionalProperties: true}
     SceneAction:
@@ -668,7 +681,7 @@ components:
               properties:
                 room: {type: string}
                 type: {$ref: '#/components/schemas/EndpointType'}
-                tag: {type: string}
+                tag: {$ref: '#/components/schemas/Tag'}
         capability: {type: string}
         value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
     SceneInput:
@@ -732,6 +745,9 @@ components:
       properties:
         ok: {type: boolean}
         executed: {type: boolean}
+        scene: {type: string, description: Permanent scene id}
+        scene_name: {type: string}
+        error: {type: string, enum: [unknown_scene, scene_broken]}
         status: {type: string, enum: [needs_confirmation]}
         needs_confirmation:
           type: array
@@ -750,7 +766,7 @@ components:
             properties:
               endpoint_id: {type: string}
               capability: {type: string}
-              status: {type: string, enum: [ok, skipped_offline, skipped_no_capability, failed]}
+              status: {type: string, enum: [done, moving, skipped_offline, skipped_no_capability, failed]}
               detail: {type: string}
     Memory:
       type: object
@@ -775,7 +791,7 @@ components:
         expires_at: {type: integer}
         bundle:
           type: object
-          description: Plaintext bundle for the BLE client to encrypt and send (see ble-provisioning.md). Contains secrets; never log.
+          description: Plaintext bundle for the BLE client to encrypt and send (see ble-provisioning.md). mqtt.username is the node_id and is also the MQTT client_id; the node uses a clean session. Contains secrets; never log.
           required: [v, wifi, mqtt, ca_pem]
           properties:
             v: {const: 1}

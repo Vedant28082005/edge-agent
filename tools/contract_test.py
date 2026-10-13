@@ -114,6 +114,55 @@ for path, item in spec["paths"].items():
             print(f"FAIL openapi {method.upper()} {path}: the agent must not be an internal caller")
 print("ok   openapi internal section checked")
 
+# --- device-hub internal API: valid OpenAPI, mandatory auth, agent scope has no admin operation ----------
+RUNTIME_TOOLS = ["list_devices", "get_state", "set_state", "run_scene", "read_sensor"]
+hub = yaml.safe_load((contracts / "openapi" / "device-hub-internal.yaml").read_text(encoding="utf-8"))
+try:
+    validate_openapi(hub)
+    print("ok   openapi/device-hub-internal.yaml is a valid OpenAPI document")
+except Exception as e:  # noqa: BLE001
+    failures += 1
+    print(f"FAIL openapi/device-hub-internal.yaml: {str(e)[:120]}")
+_f0 = failures
+SCHEME = {"gateway": "gatewaySecret", "agent": "agentSecret"}
+agent_ops = []
+for path, item in hub["paths"].items():
+    for method, op in item.items():
+        if method not in ("get", "post", "put", "patch", "delete"):
+            continue
+        label = f"{method.upper()} {path}"
+        scopes = op.get("x-scopes")
+        sec = op.get("security", hub.get("security", []))
+        names = sorted(k for x in sec for k in x)
+        if scopes == ["open"]:
+            # the only unauthenticated operation is the liveness probe
+            if path != "/health" or sec != []:
+                failures += 1
+                print(f"FAIL hub-internal {label}: only GET /health may be unauthenticated")
+            continue
+        if not scopes or "gateway" not in scopes:
+            failures += 1
+            print(f"FAIL hub-internal {label}: x-scopes must be set and include gateway (the gateway secret allows everything)")
+            continue
+        if names != sorted(SCHEME[x] for x in scopes):
+            failures += 1
+            print(f"FAIL hub-internal {label}: security {names} does not match x-scopes {scopes}")
+        if "agent" in scopes:
+            agent_ops.append((path, op))
+admin_like = lambda p: p.startswith(("/admin", "/scenes", "/devices", "/events", "/registry", "/rooms", "/mock"))
+for path, op in agent_ops:
+    if admin_like(path) or path != "/mcp" or sorted(op.get("x-mcp-tools", [])) != sorted(RUNTIME_TOOLS):
+        failures += 1
+        print(f"FAIL hub-internal agent scope may only call POST /mcp exposing exactly the 5 runtime tools, found {path}")
+if not agent_ops:
+    failures += 1
+    print("FAIL hub-internal: agent scope has no operation at all (it must reach /mcp)")
+if "agentSecret" not in hub["components"]["securitySchemes"] or "gatewaySecret" not in hub["components"]["securitySchemes"]:
+    failures += 1
+    print("FAIL hub-internal: gatewaySecret and agentSecret schemes are required")
+if failures == _f0:
+    print("ok   hub-internal auth mandatory; agent scope = runtime tools only")
+
 # --- canonical action hash vectors -------------------------------------------------
 import copy
 import hashlib

@@ -31,16 +31,19 @@ tools\deploy.ps1 -Target brain -Up                  # starts the broker
 
 `setup-pi-brain.sh` checks that the key matches the cert and chains to the CA, installs everything under `/etc/edge-agent/mosquitto` owned by uid 1883 (the container user; `server.key` and `dynamic-security.json` mode 600), points compose at it through `deploy/.env` (`MOSQUITTO_STATE_DIR`), creates the per-service secret files (below), installs chrony with the edge-agent config, and shreds the staged secrets. It is safe to re-run (stage new files first) after renewing the server cert or changing dynsec. Needs an interactive sudo password, not passwordless sudo.
 
-## Service secrets (internal gateway API)
+## Service secrets (internal APIs)
 
-Internal endpoints (`/internal/*` in `gateway.yaml`, unix socket or loopback only) are authenticated with **one secret per calling service**, each scoped to the operations that service needs:
+Both internal APIs authenticate callers with `X-Service-Secret` (loopback or unix socket only): the gateway's `/internal/*` (`gateway.yaml`) and device-hub's API (`device-hub-internal.yaml`, auth is mandatory; the only exception is the `--insecure-no-auth` dev flag, accepted only with `--mock`). **One secret per calling service**, each scoped to the operations that service needs:
 
-| Service | Secret file (mode 600, owned by that service's user) | Authorizes |
-|---|---|---|
-| device-hub | `/etc/edge-agent/secrets/device-hub.secret` (owner `edge-device-hub`) | `POST /internal/confirmations/consume` only |
-| agent | **none** | nothing: it cannot mint or consume confirmation tokens |
+| Caller | Secret file (mode 600, owned by that service's user) | Called service | Authorizes |
+|---|---|---|---|
+| device-hub | `/etc/edge-agent/secrets/device-hub.secret` (owner `edge-device-hub`) | gateway | `POST /internal/confirmations/consume` only |
+| gateway | `/etc/edge-agent/secrets/gateway.secret` (owner `edge-gateway`) | device-hub | everything (scope `gateway`) |
+| agent | `/etc/edge-agent/secrets/agent.secret` (owner `edge-agent`) | device-hub | the five runtime tools via `POST /mcp` only (scope `agent`) |
 
-`setup-pi-brain.sh` creates the system users, generates each secret (256-bit, `openssl rand`), and writes a SHA-256 **verifier** per service to `/etc/edge-agent/secrets/verifiers/` (mode 600, owned by the gateway user). The gateway checks `X-Service-Secret` against the verifier in constant time, so it can authenticate callers without being able to impersonate them, and a compromised service leaks only its own scope. Services read their secret from the file at start-up (never from env vars or argv) and never log it. Containers for device-hub and the gateway must run as the matching uid. Rotate with `ROTATE_SECRETS=1` and restart the affected services. The secrets are generated on the Pi and are never copied from or to the PC or git.
+The agent has **no** secret for the gateway: it cannot mint or consume confirmation tokens.
+
+`setup-pi-brain.sh` creates the system users, generates each secret (256-bit, `openssl rand`), and writes a SHA-256 **verifier** that only the called service can read: `verifiers/device-hub.sha256` (owned by the gateway user) and `hub-verifiers/gateway.sha256`, `hub-verifiers/agent.sha256` (owned by the device-hub user), all mode 600 under `/etc/edge-agent/secrets/`. The called service checks `X-Service-Secret` against the verifier in constant time, so it can authenticate callers without being able to impersonate them (device-hub reads only verifiers, never a secret), and a compromised service leaks only its own scope. Services read their own secret from its file at start-up (never from env vars or argv) and never log it. Containers for device-hub, the gateway and the agent must run as the matching uid. Rotate with `ROTATE_SECRETS=1` and restart the affected services. The secrets are generated on the Pi and are never copied from or to the PC or git.
 
 ## Certificate lifecycle
 
