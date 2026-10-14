@@ -45,7 +45,7 @@ $allowed = @{
     'agent'      = @('/h/secrets/agent.secret', '/h/secrets/agent-verifiers')
     'mosquitto'  = @()
 }
-$secretNames = 'device-hub.secret', 'hub-mqtt.password', 'hub-verifiers', 'gateway.secret', 'agent-api.secret', 'verifiers', 'agent.secret', 'agent-verifiers'
+$secretNames = 'device-hub.secret', 'hub-mqtt.password', 'hub-verifiers', 'gateway.secret', 'agent-api.secret', 'verifiers', 'agent.secret', 'agent-verifiers'  # scan-ok: test fixture, not a credential
 foreach ($n in $names) {
     $src = @($svc.$n.volumes | ForEach-Object { $_.source.Replace('\', '/') })
     $mine = @($src | Where-Object { $_ -like '/h/secrets*' })

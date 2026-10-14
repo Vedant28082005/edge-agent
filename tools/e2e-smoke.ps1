@@ -197,7 +197,7 @@ services:
         $r = Api POST '/auth/login' @{ username = 'admin'; password = $adminPw }
         Need ($r.Status -eq 200 -and $r.Json.access_token) "status $($r.Status)"
         $script:tok = $r.Json.access_token
-        $bad = Api POST '/auth/login' @{ username = 'admin'; password = 'wrong-password-123' }
+        $bad = Api POST '/auth/login' @{ username = 'admin'; password = 'wrong-password-123' }  # scan-ok: test fixture, not a credential
         Need ($bad.Status -eq 401) "wrong password gave $($bad.Status)"
         $true
     }
@@ -207,7 +207,7 @@ services:
     $credDir = Join-Path $work 'creds'; New-Item -ItemType Directory -Force $credDir | Out-Null
     Step 'provision both simulated nodes (hub creates MQTT users through the dynsec API)' {
         foreach ($n in $n1, $n2) {
-            $r = Api POST '/admin/provision-sessions' @{ node_id = $n; wifi = @{ ssid = 'e2e-sim'; password = 'e2e-sim-wifi-pw' } } $tok
+            $r = Api POST '/admin/provision-sessions' @{ node_id = $n; wifi = @{ ssid = 'e2e-sim'; password = 'e2e-sim-wifi-pw' } } $tok  # scan-ok: test fixture, not a credential
             Need ($r.Status -eq 201 -and $r.Json.bundle.mqtt.username -eq $n) "$n -> $($r.Status) $($r.Text.Length)"
             Put (Join-Path $credDir "$n.cred") "username=$($r.Json.bundle.mqtt.username)`npassword=$($r.Json.bundle.mqtt.password)`n"
         }
