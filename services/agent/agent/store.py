@@ -1,4 +1,4 @@
-"""SQLite persistence: per-user messages and a rolling summary, the action log, and the (empty) rules table.
+"""SQLite persistence: per-user messages and a rolling summary, the action log, turn traces (own table and retention cap), and the (empty) rules table.
 
 Per-user isolation: every read/write of conversation data takes `user_id` and filters on it; there is no query that
 returns another user's rows. Guests have no persistent memory: callers pass `guest=True` (the `role` the authenticated
@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS action_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, user_id TEXT, req_id TEXT, trigger_kind TEXT NOT NULL,
   trigger_ref TEXT, reason TEXT, tool TEXT, args TEXT, status TEXT NOT NULL, ok INTEGER, detail TEXT);
 CREATE INDEX IF NOT EXISTS action_log_ts ON action_log(ts);
+CREATE TABLE IF NOT EXISTS turn_traces(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, user_id TEXT, req_id TEXT, route TEXT, detail TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rules(
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, event_type TEXT NOT NULL, when_json TEXT NOT NULL DEFAULT '{}',
   actions_json TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1);
@@ -36,7 +38,8 @@ CREATE INDEX IF NOT EXISTS memories_user ON memories(user_id, updated_at);
 
 
 class Store:
-    def __init__(self, path: str = ":memory:", guest_cache: int = 64) -> None:
+    def __init__(self, path: str = ":memory:", guest_cache: int = 64, trace_cap: int = 5000) -> None:
+        self.trace_cap = max(1, trace_cap)               # turn_traces retention: newest N rows, independent of action_log
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
         self._lock = threading.Lock()
@@ -164,11 +167,30 @@ class Store:
             return cur.lastrowid or 0
 
     def action_log(self, limit: int = 50, user_id: str | None = None) -> list[dict]:
+        """Audit rows only. Turn traces live in `turn_traces`; the status filter also hides any legacy `trace` rows."""
         if user_id is None:
-            rows = self._q("SELECT * FROM action_log ORDER BY id DESC LIMIT ?", (limit,))
+            rows = self._q("SELECT * FROM action_log WHERE status<>'trace' ORDER BY id DESC LIMIT ?", (limit,))
         else:
-            rows = self._q("SELECT * FROM action_log WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit))
+            rows = self._q("SELECT * FROM action_log WHERE status<>'trace' AND user_id=? ORDER BY id DESC LIMIT ?",
+                           (user_id, limit))
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------------------------------ turn traces (S10)
+    def log_trace(self, *, user_id: str | None, req_id: str | None, route: str, detail: dict) -> int:
+        with self._lock:
+            cur = self._db.execute("INSERT INTO turn_traces(ts,user_id,req_id,route,detail) VALUES(?,?,?,?,?)",
+                                   (time.time(), user_id, req_id, route, json.dumps(detail, sort_keys=True)))
+            rid = cur.lastrowid or 0
+            self._db.execute("DELETE FROM turn_traces WHERE id<=?", (rid - self.trace_cap,))
+            return rid
+
+    def traces(self, limit: int = 50, user_id: str | None = None) -> list[dict]:
+        """Newest first; `detail` is the decoded trace dict."""
+        if user_id is None:
+            rows = self._q("SELECT * FROM turn_traces ORDER BY id DESC LIMIT ?", (limit,))
+        else:
+            rows = self._q("SELECT * FROM turn_traces WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit))
+        return [{**dict(r), "detail": json.loads(r["detail"])} for r in rows]
 
     # ------------------------------------------------------------------------------------------ rules (empty in v1)
     def enabled_rules(self) -> list[dict]:

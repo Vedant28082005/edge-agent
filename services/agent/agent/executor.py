@@ -110,6 +110,9 @@ class Executor:
             await ctx.emit("tool_result", {"call_id": call_id, "tool": tool_s, "result": res, "ok": False})
             self._log(ctx, "rejected", tool_s, shown_args, False, {"error": err})
             return CallOutcome(call_id, tool_s, shown_args, res, False, "rejected", note=err)
+        if _guest_may_not(ctx, tool):
+            await ctx.emit("tool_call", {"call_id": call_id, "tool": tool, "args": _safe_args(args)})
+            return await self._denied(ctx, call_id, tool, args)
         if not ctx.budget.take_call():
             res = {"ok": False, "error": "budget_exceeded"}
             self._log(ctx, "budget_exceeded", tool, args, False, None)
@@ -156,6 +159,8 @@ class Executor:
             res = {"ok": False, "error": err, "rejected_by": "agent"}
             self._log(ctx, "rejected", tool, raw, False, {"error": err})
             return CallOutcome(call_id, tool, raw, res, False, "rejected", note=err)
+        if _guest_may_not(ctx, tool):
+            return await self._denied(ctx, call_id, tool, args, announce=False)
         if not ctx.budget.take_call():
             return CallOutcome(call_id, tool, args, {"ok": False, "error": "budget_exceeded"}, False, "budget")
         self._log(ctx, "confirmation_approved", tool, args, None, None)
@@ -285,7 +290,7 @@ class Executor:
     async def _denied(self, ctx: ReqCtx, call_id: str, tool: str, args: dict, announce: bool = True) -> CallOutcome:
         self.settles.cancel(call_id)
         self._log(ctx, "denied_guest", tool, args, False, None)
-        res = {"ok": False, "error": "not_allowed"}
+        res = {"ok": False, "error": "not_allowed", "reason": "guest_role"}
         if announce:
             await ctx.emit("tool_result", {"call_id": call_id, "tool": tool, "result": res, "ok": False})
         return CallOutcome(call_id, tool, args, res, False, "denied", note="not_allowed")
@@ -298,6 +303,17 @@ class Executor:
 
 
 # ----------------------------------------------------------------------------------------------------- helpers
+# TODO(S0h contract change): guests are denied set_state/run_scene outright because the contract has no room scope on a
+# user/role. Once S0h adds room-scoped guest grants (gateway-supplied allowed rooms), replace this blanket denial with a
+# per-endpoint room check here, still failing closed when the scope is absent or the endpoint's room is unknown.
+GUEST_DENIED_TOOLS = ("set_state", "run_scene")
+
+
+def _guest_may_not(ctx: ReqCtx, tool: str) -> bool:
+    """Fail closed: any guest role (or guest trigger) is denied motion tools on every path (LLM plan, fast path, retry)."""
+    return tool in GUEST_DENIED_TOOLS and (ctx.role == "guest" or ctx.trigger.guest)
+
+
 def _canonical_actions(raw: Any) -> list[dict]:
     """The hub's canonical risk:confirm list: exactly endpoint_id, capability, value; sorted by endpoint_id then capability."""
     out = []

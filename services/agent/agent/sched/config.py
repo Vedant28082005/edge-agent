@@ -7,14 +7,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 
-# source -> (latency_ms, flag). Seeds from the owner's brief; ARCHITECTURE section 5 records the 94 ms YOLOv8n figure as
-# measured on the Pi and the VLM short answer (5.5 s) as measured; they stay `est` here until re-measured by S10.
+# source -> (latency_ms, flag). Seeds from the owner's brief. YOLOv8n 94 ms and VLM yes/no 2.4 s are [measured]; the
+# VLM short-answer seed (5.5 s) is UNVERIFIED until the owner confirms it (kept as `est`); the LLM turn stays [est].
 DEFAULT_COSTS: dict[str, tuple[float, str]] = {
     "sensor": (5.0, "est"),                 # read_sensor through the hub: milliseconds
-    "yolo_jetson": (94.0, "est"),           # YOLOv8n TensorRT; Jetson not yet measured
-    "yolo_pi": (94.0, "est"),               # YOLOv8n on the vision Pi
-    "vlm_yesno": (2400.0, "est"),
-    "vlm_short": (5500.0, "est"),
+    "yolo_jetson": (94.0, "measured"),      # YOLOv8n 94 ms [measured]
+    "yolo_pi": (94.0, "measured"),          # YOLOv8n 94 ms [measured]
+    "vlm_yesno": (2400.0, "measured"),       # VLM yes/no 2.4 s [measured]
+    "vlm_short": (5500.0, "est"),            # UNVERIFIED seed: do not report as measured until the owner confirms
     "vlm_json": (13500.0, "est"),           # bounded JSON, 12-15 s
     "llm": (22500.0, "est"),                # one LLM turn, 15-30 s
 }

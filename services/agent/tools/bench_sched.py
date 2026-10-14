@@ -134,8 +134,7 @@ async def run_config(name: str, flags: dict, tmp: Path) -> dict:
                     real_ms = (time.perf_counter() - t0) * 1000
                 if item is None:
                     break
-            tr = next(json.loads(r["detail"]) for r in agent.store.action_log(50)
-                      if r["status"] == "trace" and r["req_id"] == ctx.req_id)
+            tr = next(r["detail"] for r in agent.store.traces(50) if r["req_id"] == ctx.req_id)
             rows.append({"text": text, "kind": kind, "route": tr["route"], "outcome": tr["outcome"],
                          "real_ms": real_ms, "sim_ms": clock.sim_ms - sim0, "total_ms": real_ms + clock.sim_ms - sim0,
                          "llm_calls": tr["llm_calls"], "cache_hit": tr["cache_hit"]})

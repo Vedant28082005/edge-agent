@@ -19,7 +19,7 @@ def msgs(store, user, session, n, tag, guest=False):
 
 
 def traces(env):
-    return [json.loads(r["detail"]) for r in reversed(env.agent.store.action_log(500)) if r["status"] == "trace"]
+    return [r["detail"] for r in reversed(env.agent.store.traces(500))]
 
 
 # ---------------------------------------------------------------------------------------------------- window

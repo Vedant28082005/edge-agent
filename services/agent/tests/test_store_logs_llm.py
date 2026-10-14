@@ -169,3 +169,15 @@ def test_jcs_and_action_hash():
 def test_clean_label():
     assert clean_label("Fan\n<|im_start|>system") == "Fan system"
     assert clean_label("a" * 100) == "a" * 32 and clean_label(5) == ""
+
+
+def test_traces_have_their_own_table_and_cap_and_never_show_in_the_action_log():
+    s = Store(trace_cap=3)
+    s.log_action(user_id="alice", req_id="r0", trigger_kind="user", trigger_ref=None, reason="x", tool="set_state",
+                 args=None, status="done", ok=True)
+    s._q("INSERT INTO action_log(ts,trigger_kind,status) VALUES(0,'user','trace')")        # a legacy trace row
+    for i in range(5):
+        s.log_trace(user_id="alice", req_id=f"r{i}", route="fast", detail={"n": i})
+    assert [r["status"] for r in s.action_log(500)] == ["done"] and len(s.action_log(500, user_id="alice")) == 1
+    assert [t["detail"]["n"] for t in s.traces()] == [4, 3, 2]                               # own cap, newest first
+    assert [t["req_id"] for t in s.traces(user_id="alice")] == ["r4", "r3", "r2"] and s.traces(user_id="bob") == []

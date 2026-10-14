@@ -158,9 +158,8 @@ class Scheduler:
         agg = self.by_route.setdefault(trace.route, {"n": 0, "total_ms": 0})
         agg["n"] += 1
         agg["total_ms"] += trace.latency_ms
-        self.store.log_action(user_id=ctx.user_id if ctx.trigger.is_user else None, req_id=ctx.req_id,
-                              trigger_kind=ctx.trigger.kind, trigger_ref=None, reason=f"route {trace.route}", tool=None,
-                              args=None, status="trace", ok=None, detail=d)
+        self.store.log_trace(user_id=ctx.user_id if ctx.trigger.is_user else None, req_id=ctx.req_id,
+                             route=trace.route, detail=d)
         try:
             self.bus.publish(Event(TRACE_EVENT, d, source="sched", user_id=ctx.user_id if ctx.trigger.is_user else None))
         except RuntimeError:                                         # no running loop (sync tests)

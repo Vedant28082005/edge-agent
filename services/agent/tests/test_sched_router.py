@@ -75,7 +75,8 @@ def test_presence_prefers_yolo_then_climbs_the_ladder():
     assert d.chosen == "yolo_jetson"
     assert d.ladder == ["yolo_jetson", "yolo_pi", "vlm_yesno", "vlm_short", "llm"]
     assert [c.cost_ms for c in d.candidates] == sorted(c.cost_ms for c in d.candidates)
-    assert all(c.flag == "est" for c in d.candidates)               # seeds stay flagged [est]
+    flags = {c.source: c.flag for c in d.candidates}
+    assert flags["vlm_short"] == "est" and flags["llm"] == "est" and flags["yolo_pi"] == "measured"   # seeds: see DEFAULT_COSTS
 
 
 def test_jetson_down_falls_back_to_the_pi():
@@ -128,7 +129,7 @@ def test_failure_trips_the_breaker_and_recovery_clears_it():
 def test_ewma_updates_and_can_reorder_the_ladder():
     r = router(*ALL_VISION, ewma_alpha=0.5)
     first = r.costs.snapshot()["vlm_yesno"]
-    assert first == {"ms": 2400.0, "flag": "est", "n": 0}
+    assert first == {"ms": 2400.0, "flag": "measured", "n": 0}
     r.observe("vlm_yesno", 1000, ok=True)
     assert r.costs.ms["vlm_yesno"] == 1000.0 and r.costs.flag["vlm_yesno"] == "measured"      # first observation replaces the seed
     r.observe("vlm_yesno", 2000, ok=True)
@@ -144,7 +145,8 @@ def test_ewma_updates_and_can_reorder_the_ladder():
 def test_cost_table_seed_and_config_override():
     assert DEFAULT_COSTS["yolo_pi"][0] == 94.0 and DEFAULT_COSTS["vlm_yesno"][0] == 2400.0
     assert 12000 <= DEFAULT_COSTS["vlm_json"][0] <= 15000 and 15000 <= DEFAULT_COSTS["llm"][0] <= 30000
-    assert all(flag == "est" for _, flag in DEFAULT_COSTS.values())
+    measured = {k for k, (_, flag) in DEFAULT_COSTS.items() if flag == "measured"}
+    assert measured == {"yolo_pi", "yolo_jetson", "vlm_yesno"}          # vlm_short (unverified), vlm_json, llm, sensor stay [est]
     cfg = SchedConfig.from_dict({"costs": {"yolo_pi": [50, "measured"], "llm": [20000, "est"]}})
     r = CostRouter(cfg)
     assert r.costs.ms["yolo_pi"] == 50.0 and r.costs.flag["yolo_pi"] == "measured"

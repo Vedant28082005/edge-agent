@@ -25,7 +25,7 @@ def log_rows(e, status=None):
 
 
 def last_trace(e):
-    return json.loads(log_rows(e, "trace")[0]["detail"])
+    return e.agent.store.traces(1)[0]["detail"]
 
 
 # ---------------------------------------------------------------------------------------------------- fast path
@@ -317,7 +317,7 @@ async def test_one_trace_per_turn_on_the_bus_and_in_the_action_log(tmp_path):
         await e.chat("turn on the bedroom fan")
         await e.chat("hello there")
         await asyncio.sleep(0.1)
-        assert len(log_rows(e, "trace")) == 2 and len(seen) == 2
+        assert len(e.agent.store.traces(50)) == 2 and not log_rows(e, "trace") and len(seen) == 2
         assert [s.data["route"] for s in seen] == ["fast", "llm"]
         need = {"req_id", "route", "source", "candidates", "latency_ms", "prompt_tokens", "cached_tokens", "generated_tokens",
                 "cache_hit", "constrained", "outcome", "flags", "fast_reason", "confidence", "llm_calls"}

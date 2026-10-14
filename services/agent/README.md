@@ -75,7 +75,7 @@ All of it sits behind the five tools; nothing here can add one. Config: `AgentCo
 | Constrained decoding | `grammar.py`, `llm.py` | `schema.build_plan_schema` -> `schema_to_gbnf`; `ConstraintCache` rebuilt only when ids/capabilities/ranges/enums/rooms/scenes change (not on a rename); backends `json_schema` (response_format) or `gbnf` (grammar field) |
 | Prefix cache | `prefix.py`, `prompt.py` | Static prefix first, then history/summary/memories/current; `cache_prompt` + pinned `id_slot`; `PrefixTracker` records same-prefix and server `cache_n` per turn |
 | Memory | `memory.py` | Per-user window by token budget (+ the builder's 4-message cap), rolling summary with its own budget, deterministic summariser (hook for an idle LLM one); guests in-process only |
-| Trace | `trace.py`, `scheduler.py` | One per turn: route, candidates, latency, tokens, cache hit, constrained, outcome, flags. Bus event `sched.trace` + action-log row (`status: trace`); no user text. SSE `route` stays `fast|llm|vision` (sensor answers are `fast`) |
+| Trace | `trace.py`, `scheduler.py` | One per turn: route, candidates, latency, tokens, cache hit, constrained, outcome, flags. Bus event `sched.trace` + a row in the `turn_traces` table (own retention cap, never in the action log); no user text. SSE `route` stays `fast|llm|vision` (sensor answers are `fast`) |
 
 Ablation: `fast_path`, `router`, `constrained_decoding`, `prefix_cache` in `sched` config or live with `POST /v1/runtime`
 (`GET /v1/stats` has per-route counters and the cost table). Benchmark (mock LLM, simulated latency, prints per-route
