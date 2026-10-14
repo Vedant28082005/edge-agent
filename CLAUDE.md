@@ -36,3 +36,5 @@ Project: edge agentic IoT framework (smart home). Read `docs/ARCHITECTURE.md` fo
 - Never switch branches, never touch `main`, never push or merge unless the owner asks.
 - Small logical commits. Do not edit `docs/ARCHITECTURE.md` unless the owner says so.
 - Session brief: "Read CLAUDE.md and contracts/. Build only `<component>`. Provide a mock mode, tests and a README with run steps."
+
+Windows PS 5.1 rules: native-command stderr (docker, pip, git) becomes a terminating error under $ErrorActionPreference='Stop'; wrap native calls with 'Continue' and check $LASTEXITCODE. Tee-Object writes UTF-16; use Out-File -Encoding utf8. $PSScriptRoot is empty in param() defaults.
