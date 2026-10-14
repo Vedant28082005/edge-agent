@@ -76,6 +76,8 @@ services:
     volumes:
       - ${DATA_DIR:-/var/lib/edge-agent}/gateway:/var/lib/edge-agent
       - ${CONFIG_DIR:-/etc/edge-agent/config}/gateway.json:/etc/edge-agent/config/gateway.json:ro
+      # built dashboard (cd dashboard; npm ci; npm run build); gateway.json `static_dir`. Missing dir = bundled placeholder page.
+      - ${DASHBOARD_DIR:-../dashboard/dist}:/srv/dashboard:ro
       # its own secret for device-hub, its own secret for the agent's local API, and the verifier for device-hub's secret:
       - ${SECRETS_DIR:-/etc/edge-agent/secrets}/gateway.secret:/etc/edge-agent/secrets/gateway.secret:ro
       - ${SECRETS_DIR:-/etc/edge-agent/secrets}/agent-api.secret:/etc/edge-agent/secrets/agent-api.secret:ro
