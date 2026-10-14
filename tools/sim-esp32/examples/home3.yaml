@@ -1,0 +1,47 @@
+# 3-node home: a fan, a light, a curtain + room sensor. Node ids must be esp32-<12 hex>.
+# Capabilities use the contract vocabulary; kind/type come from capabilities.md. Names and rooms are
+# admin labels in the hub registry, never part of firmware, so they do not appear here.
+nodes:
+  - node_id: esp32-a1b2c3d4e501
+    hw: esp32-devkit
+    fw: 0.1.0-sim
+    failsafe_after_s: 60          # 0 = keep last values when the hub is lost
+    heartbeat_s: 60
+    dedup_size: 16                # cmd_ids remembered for ack replay (contract: 16)
+    endpoints:
+      - local_id: ch1
+        type: fan
+        capabilities:
+          - {id: power, boot_value: false, failsafe_value: false, max_on_s: 14400}   # forced off after 4 h on
+          - {id: speed, min: 1, max: 5, boot_value: 1}
+
+  - node_id: esp32-a1b2c3d4e502
+    endpoints:
+      - local_id: l1
+        type: light
+        capabilities:
+          - {id: power, boot_value: false, failsafe_value: false}
+          - {id: brightness, min: 0, max: 100, boot_value: 50}
+
+  - node_id: esp32-a1b2c3d4e503
+    endpoints:
+      - local_id: c1
+        type: cover
+        sim: {travel_time_s: 12, interlock_s: 0.5}     # full 0..100 travel and relay dead time on reversal
+        capabilities:
+          - {id: position, min: 0, max: 100, boot_value: 0, failsafe_value: 0}   # settle_s is announced automatically: ceil(12 + 0.5) + 1 = 14
+      - local_id: t1
+        type: sensor
+        capabilities:
+          - id: temperature
+            interval_s: 30
+            generator: {kind: sine, mean: 27.0, amplitude: 2.0, period_s: 900, noise: 0.05}
+          - id: humidity
+            interval_s: 30
+            generator: {kind: random_walk, start: 55, step: 0.8, min: 30, max: 80}
+      - local_id: m1
+        type: sensor
+        capabilities:
+          - id: motion
+            interval_s: 10
+            generator: {kind: random_choice, change_probability: 0.15}
