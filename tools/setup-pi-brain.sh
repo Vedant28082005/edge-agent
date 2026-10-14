@@ -6,8 +6,7 @@
 #   ssh pi@pi-brain "mkdir -p -m 700 ~/edge-agent-setup"
 #   scp deploy\mosquitto\certs\ca.crt deploy\mosquitto\certs\server.crt deploy\mosquitto\certs\server.key `
 #       deploy\mosquitto\data\dynamic-security.json pi@pi-brain:edge-agent-setup/
-#   # the hub's MQTT admin password (from deploy\mosquitto\.env HUB_ADMIN_PASSWORD) as a file named hub-mqtt.password
-#   # (no trailing newline needed), staged the same way. It is only required on the first run.
+#   # nothing else to stage: the hub's MQTT password is generated on the Pi (step 4b)
 #   # then on the Pi (interactive sudo password; no passwordless sudo needed):
 #   ssh -t pi@pi-brain "LAN_IP=192.168.1.10 LAN_CIDR=192.168.1.0/24 bash ~/edge-agent/tools/setup-pi-brain.sh"
 #
@@ -23,8 +22,14 @@
 #        gateway.secret    -> gateway calls device-hub (everything)  ; verifier hub-verifiers/gateway.sha256 (hub user)
 #        agent.secret      -> agent calls device-hub (five tools)    ; verifier hub-verifiers/agent.sha256 (hub user)
 #        agent-api.secret  -> gateway calls the agent's local API    ; verifier agent-verifiers/agent-api.sha256 (agent user)
-#      plus hub-mqtt.password (owner hub user, mode 600), the hub's own MQTT account.
 #      The agent has no secret for the gateway.
+#   4b. the hub's own MQTT account: hub-mqtt.password (owner hub user, mode 600) is generated on the Pi if absent
+#      (a file staged as $STAGE_DIR/hub-mqtt.password is used instead, e.g. to adopt an existing password), and the
+#      hub's dynsec client ($HUB_MQTT_USER, default hub-admin) with the `admin` role is created or refreshed in
+#      $STATE_DIR/data/dynamic-security.json so the PBKDF2 hash always matches the file. The password is never printed
+#      or put in an argument list. The broker only reads the dynsec file at start: restart mosquitto after a change.
+#      The staged dynamic-security.json is installed only if the Pi has none (or REPLACE_DYNSEC=1): a re-run never
+#      discards the node users the broker has since created.
 #   5. creates the data dirs /var/lib/edge-agent/<service> (owned by the service uid), writes the non-secret service
 #      config to /etc/edge-agent/config (device-hub.json rendered with LAN_IP) and deploy/.env for docker compose
 #   6. installs the llama-server systemd unit and an env file template (never overwritten; no model is installed)
@@ -33,7 +38,8 @@
 #
 # Environment overrides: STAGE_DIR, STATE_DIR, EDGE_DIR, SECRETS_DIR, DATA_ROOT, CONFIG_DIR, SYSTEMD_DIR, LLAMA_ENV,
 # LAN_IP (the Pi's static LAN IP boards connect to; required on first run), LAN_CIDR (default 192.168.1.0/24),
-# SKIP_CHRONY=1, SKIP_SYSTEMD=1, ROTATE_SECRETS=1 (regenerates every secret and verifier; restart the services after).
+# SKIP_CHRONY=1, SKIP_SYSTEMD=1, ROTATE_SECRETS=1 (regenerates every secret, verifier and the hub MQTT password; restart the services and the broker after),
+# REPLACE_DYNSEC=1, HUB_MQTT_USER.
 set -euo pipefail
 
 STAGE_DIR="${STAGE_DIR:-$HOME/edge-agent-setup}"
@@ -45,6 +51,7 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/edge-agent/config}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 LLAMA_ENV="${LLAMA_ENV:-/etc/edge-agent/llama-server.env}"
 LAN_CIDR="${LAN_CIDR:-192.168.1.0/24}"
+HUB_MQTT_USER="${HUB_MQTT_USER:-hub-admin}"
 HUB_USER="${HUB_USER:-edge-device-hub}"; HUB_UID=10101
 GATEWAY_USER="${GATEWAY_USER:-edge-gateway}"; GATEWAY_UID=10102
 AGENT_USER="${AGENT_USER:-edge-agent}"; AGENT_UID=10103
@@ -53,12 +60,11 @@ MQ_UID=1883
 
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 
-for f in ca.crt server.crt server.key dynamic-security.json; do
+for f in ca.crt server.crt server.key; do
   [ -f "$STAGE_DIR/$f" ] || { echo "missing $STAGE_DIR/$f (see the header of this script)" >&2; exit 1; }
 done
-if [ ! -f "$STAGE_DIR/hub-mqtt.password" ] && ! $SUDO test -f "$SECRETS_DIR/hub-mqtt.password"; then
-  echo "missing $STAGE_DIR/hub-mqtt.password (the hub's MQTT admin password, first run only)" >&2; exit 1
-fi
+DYNSEC="$STATE_DIR/data/dynamic-security.json"
+[ -f "$STAGE_DIR/dynamic-security.json" ] || $SUDO test -f "$DYNSEC"   || { echo "missing $STAGE_DIR/dynamic-security.json (see the header of this script)" >&2; exit 1; }
 
 echo "== checking certificates"
 cert_pub="$(openssl x509 -in "$STAGE_DIR/server.crt" -noout -pubkey | openssl sha256)"
@@ -74,7 +80,12 @@ $SUDO install -d -o "$MQ_UID" -g "$MQ_UID" -m 750 "$STATE_DIR" "$STATE_DIR/certs
 $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 644 "$STAGE_DIR/ca.crt"     "$STATE_DIR/certs/ca.crt"
 $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 644 "$STAGE_DIR/server.crt" "$STATE_DIR/certs/server.crt"
 $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 600 "$STAGE_DIR/server.key" "$STATE_DIR/certs/server.key"
-$SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 600 "$STAGE_DIR/dynamic-security.json" "$STATE_DIR/data/dynamic-security.json"
+if [ -f "$STAGE_DIR/dynamic-security.json" ] && { ! $SUDO test -f "$DYNSEC" || [ "${REPLACE_DYNSEC:-0}" = "1" ]; }; then
+  $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 600 "$STAGE_DIR/dynamic-security.json" "$DYNSEC"
+  echo "installed dynamic-security.json"
+else
+  echo "keeping the existing dynamic-security.json (REPLACE_DYNSEC=1 replaces it with the staged one)"
+fi
 
 echo "== service users (fixed uids)"
 ensure_user() {  # $1 name, $2 uid ('' = any)
@@ -114,11 +125,56 @@ make_secret gateway    "$GATEWAY_USER" hub-verifiers   "$HUB_USER"
 make_secret agent      "$AGENT_USER"   hub-verifiers   "$HUB_USER"
 make_secret agent-api  "$GATEWAY_USER" agent-verifiers "$AGENT_USER"
 # Deliberately no agent secret for the gateway: the agent cannot mint or consume confirmation tokens.
+echo "== hub MQTT account ($HUB_MQTT_USER)"
+HUB_PW="$SECRETS_DIR/hub-mqtt.password"
 if [ -f "$STAGE_DIR/hub-mqtt.password" ]; then
-  tr -d '\r\n' < "$STAGE_DIR/hub-mqtt.password" | $SUDO tee "$SECRETS_DIR/hub-mqtt.password" >/dev/null
-  $SUDO chown "$HUB_USER:$HUB_USER" "$SECRETS_DIR/hub-mqtt.password"; $SUDO chmod 600 "$SECRETS_DIR/hub-mqtt.password"
-  echo "installed $SECRETS_DIR/hub-mqtt.password (owner $HUB_USER, mode 600)"
+  [ -n "$(tr -d '\r\n' < "$STAGE_DIR/hub-mqtt.password")" ] || { echo "staged hub-mqtt.password is empty" >&2; exit 1; }
+  tr -d '\r\n' < "$STAGE_DIR/hub-mqtt.password" | $SUDO tee "$HUB_PW" >/dev/null
+  hub_pw_state="installed from the staged file"
+elif [ "${ROTATE_SECRETS:-0}" = "1" ] || ! $SUDO test -s "$HUB_PW"; then
+  openssl rand -base64 33 | tr -d '\n=+/' | $SUDO tee "$HUB_PW" >/dev/null
+  hub_pw_state="generated"
+else
+  hub_pw_state="kept"
 fi
+$SUDO chown "$HUB_USER:$HUB_USER" "$HUB_PW"; $SUDO chmod 600 "$HUB_PW"
+echo "$HUB_PW: $hub_pw_state (owner $HUB_USER, mode 600)"
+command -v python3 >/dev/null 2>&1 || { $SUDO apt-get update -qq; $SUDO apt-get install -y -qq python3 >/dev/null; }
+# Create/refresh the hub's dynsec client + role so the stored PBKDF2 hash matches the file. The password is read from
+# the file by this process (never argv/env/stdout); the dynsec file is rewritten atomically as uid $MQ_UID, mode 600.
+$SUDO python3 - "$DYNSEC" "$HUB_PW" "$HUB_MQTT_USER" "$MQ_UID" <<'PYEOF'
+import base64, hashlib, json, os, sys
+path, pwfile, user, uid = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+pw = open(pwfile, "rb").read()
+doc = json.load(open(path))
+roles = doc.setdefault("roles", [])
+role = next((r for r in roles if r.get("rolename") == "admin"), None)
+if role is None:
+    acls = [("publishClientSend", "$CONTROL/dynamic-security/#"), ("publishClientReceive", "$CONTROL/dynamic-security/#"),
+            ("publishClientReceive", "$SYS/#"), ("publishClientReceive", "#"), ("publishClientSend", "#"),
+            ("subscribePattern", "$CONTROL/dynamic-security/#"), ("subscribePattern", "$SYS/#"),
+            ("subscribePattern", "#"), ("unsubscribePattern", "#")]
+    roles.append({"rolename": "admin", "textname": "", "acls": [{"acltype": t, "topic": p, "allow": True} for t, p in acls]})
+clients = doc.setdefault("clients", [])
+cl = next((c for c in clients if c.get("username") == user), None)
+if cl is None:
+    cl = {"username": user, "textName": "", "roles": []}
+    clients.append(cl)
+changed = role is None or "salt" not in cl
+if not any(r.get("rolename") == "admin" for r in cl.setdefault("roles", [])):
+    cl["roles"].append({"rolename": "admin"}); changed = True
+iters = int(cl.get("iterations") or 101)
+def derive(salt): return base64.b64encode(hashlib.pbkdf2_hmac("sha512", pw, salt, iters)).decode()
+if not changed and cl.get("password") == derive(base64.b64decode(cl["salt"])):
+    print("dynsec client %s already matches the password file" % user); sys.exit(0)
+salt = os.urandom(12)
+cl["salt"], cl["iterations"], cl["password"] = base64.b64encode(salt).decode(), iters, derive(salt)
+tmp = path + ".tmp"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f: json.dump(doc, f, indent=2)
+os.chown(tmp, uid, uid); os.chmod(tmp, 0o600); os.replace(tmp, path)
+print("dynsec client %s created/refreshed with the admin role: restart mosquitto to load it" % user)
+PYEOF
 
 echo "== data dirs ($DATA_ROOT)"
 $SUDO install -d -o root -g root -m 755 "$DATA_ROOT"
@@ -200,5 +256,5 @@ shred -u "$STAGE_DIR/server.key" "$STAGE_DIR/dynamic-security.json" "$STAGE_DIR/
   || rm -f "$STAGE_DIR/server.key" "$STAGE_DIR/dynamic-security.json" "$STAGE_DIR/hub-mqtt.password"
 rm -f "$STAGE_DIR/ca.crt" "$STAGE_DIR/server.crt"
 rmdir "$STAGE_DIR" 2>/dev/null || true
-echo "done. Load the images and start the stack: tools\\deploy.ps1 -Target brain -Up (then: tools/tailscale-serve.md)"
+echo "done. Restart the broker if the dynsec file changed. Load the images and start the stack: tools\\deploy.ps1 -Target brain -Up (then: tools/tailscale-serve.md)"
 echo "first admin (once): docker compose -f $EDGE_DIR/deploy/compose.yml run --rm -it gateway --config /etc/edge-agent/config/gateway.json bootstrap-admin --username NAME"

@@ -5,7 +5,7 @@ Broker stack for `pi-brain` (Mosquitto 2.x, TLS on 8883, dynamic-security). Run 
 ## First-time setup (dev PC)
 
 ```powershell
-# 1. private CA + broker certificate (SANs: localhost, 127.0.0.1, your LAN IP, tailnet name)
+# 1. private CA + broker certificate (SANs: localhost, 127.0.0.1, your LAN IP, tailnet name, mosquitto)
 deploy\mosquitto\new-certs.ps1 -LanIp 192.168.1.10 -TailnetName pi-brain.<tailnet>.ts.net -ExtraDns mosquitto   # SAN 'mosquitto' = the name the hub container uses; setup-pi-brain.sh refuses a cert without it
 # 2. dynsec config with the hub admin (random password -> deploy\mosquitto\.env, git-ignored)
 deploy\mosquitto\dynsec-bootstrap.ps1
@@ -27,7 +27,7 @@ tools\deploy.ps1 -Target brain -Images -Tag v1 -Up  # copy non-secret files + ta
 tools\e2e-smoke.ps1                                # local amd64 end-to-end on a throwaway compose project
 ```
 
-The LLM is **not** in compose: `systemd/llama-server.service` runs the native llama-server (one slot, `--temp 0`, context/threads/model from `/etc/edge-agent/llama-server.env`, no model shipped). It binds the edge bridge address (`LLAMA_HOST`, default `172.29.0.1`; containers reach it as `host.docker.internal`, the LAN cannot). First admin, once: `docker compose run --rm -it gateway --config /etc/edge-agent/config/gateway.json bootstrap-admin --username NAME`. Images carry no secret (`python tools/secret_scan.py image ...` scans every layer).
+The LLM is **not** in compose: `systemd/llama-server.service` runs the native llama-server (one slot, `--temp 0`, context/threads/model from `/etc/edge-agent/llama-server.env`, no model shipped). It binds the edge bridge host address `172.29.0.1` (`LLAMA_HOST`; containers reach it as `host.docker.internal`, the LAN cannot). First admin, once: `docker compose run --rm -it gateway --config /etc/edge-agent/config/gateway.json bootstrap-admin --username NAME`. Images carry no secret (`python tools/secret_scan.py image ...` scans every layer).
 
 ## One-time Pi setup (secrets, users, dirs, config, llama unit, chrony)
 
@@ -37,16 +37,15 @@ Routine `tools\deploy.ps1 -Target brain` needs **no root** and carries **no secr
 tools\deploy.ps1 -Target brain                      # puts setup-pi-brain.sh and the chrony config on the Pi
 ssh pi@pi-brain "mkdir -p -m 700 ~/edge-agent-setup"
 scp deploy\mosquitto\certs\ca.crt deploy\mosquitto\certs\server.crt deploy\mosquitto\certs\server.key deploy\mosquitto\data\dynamic-security.json pi@pi-brain:edge-agent-setup/
-# also stage the hub MQTT admin password (HUB_ADMIN_PASSWORD from deploy\mosquitto\.env) as a file named hub-mqtt.password
 ssh -t pi@pi-brain "LAN_IP=192.168.1.10 LAN_CIDR=192.168.1.0/24 bash ~/edge-agent/tools/setup-pi-brain.sh"   # asks for your sudo password
 tools\deploy.ps1 -Target brain -Up                  # starts the broker
 ```
 
-`setup-pi-brain.sh` checks that the key matches the cert and chains to the CA, installs everything under `/etc/edge-agent/mosquitto` owned by uid 1883 (the container user; `server.key` and `dynamic-security.json` mode 600), points compose at it through `deploy/.env` (`MOSQUITTO_STATE_DIR`), creates the per-service secret files (below), installs chrony with the edge-agent config, and shreds the staged secrets. It is safe to re-run (stage new files first) after renewing the server cert or changing dynsec. Needs an interactive sudo password, not passwordless sudo.
+`setup-pi-brain.sh` checks that the key matches the cert and chains to the CA, installs everything under `/etc/edge-agent/mosquitto` owned by uid 1883 (the container user; `server.key` and `dynamic-security.json` mode 600), points compose at it through `deploy/.env` (`MOSQUITTO_STATE_DIR`), creates the per-service secret files and the hub's MQTT password (below), installs chrony with the edge-agent config, and shreds the staged secrets. It is safe to re-run (stage new certs first) after renewing the server cert. The staged `dynamic-security.json` is installed only if the Pi has none (`REPLACE_DYNSEC=1` to replace it), so a re-run never discards node users the broker created since. Needs an interactive sudo password, not passwordless sudo.
 
 ## Service secrets (internal APIs)
 
-Both internal APIs authenticate callers with `X-Service-Secret` (loopback or unix socket only): the gateway's `/internal/*` (`gateway.yaml`) and device-hub's API (`device-hub-internal.yaml`, auth is mandatory; the only exception is the `--insecure-no-auth` dev flag, accepted only with `--mock`). **One secret per calling service**, each scoped to the operations that service needs:
+Both internal APIs authenticate callers with `X-Service-Secret` (loopback or unix socket, or the private internal compose network; never published): the gateway's `/internal/*` (`gateway.yaml`) and device-hub's API (`device-hub-internal.yaml`, auth is mandatory; the only exception is the `--insecure-no-auth` dev flag, accepted only with `--mock`). **One secret per calling service**, each scoped to the operations that service needs:
 
 | Caller | Secret file (mode 600, owned by that service's user) | Called service | Authorizes |
 |---|---|---|---|
@@ -55,17 +54,18 @@ Both internal APIs authenticate callers with `X-Service-Secret` (loopback or uni
 | agent | `/etc/edge-agent/secrets/agent.secret` (owner `edge-agent`) | device-hub | the five runtime tools via `POST /mcp` only (scope `agent`) |
 | gateway | `/etc/edge-agent/secrets/agent-api.secret` (owner `edge-gateway`) | agent local API | everything in `agent-internal.yaml`; the agent holds only `agent-verifiers/agent-api.sha256` (owner `edge-agent`) |
 
-The hub's own MQTT account password is `hub-mqtt.password` (owner `edge-device-hub`). Verifier directories: `verifiers/` (gateway), `hub-verifiers/` (device-hub), `agent-verifiers/` (agent); each service mounts only its own.
+The hub's own MQTT account password is `hub-mqtt.password` (owner `edge-device-hub`, mode 600). `setup-pi-brain.sh` generates it on the Pi if absent (nothing to stage; a staged `hub-mqtt.password` is adopted instead) and creates or refreshes the hub's dynsec client (`hub-admin`, role `admin`) in `/etc/edge-agent/mosquitto/data/dynamic-security.json` so the stored PBKDF2 hash matches the file. The password is never printed or passed as an argument; a re-run keeps it, `ROTATE_SECRETS=1` replaces it. The broker reads the dynsec file only at start: restart mosquitto after the first run or a rotation (`tools\deploy.ps1 -Target brain -Up`). Verifier directories: `verifiers/` (gateway), `hub-verifiers/` (device-hub), `agent-verifiers/` (agent); each service mounts only its own.
 
 The agent has **no** secret for the gateway: it cannot mint or consume confirmation tokens.
 
-`setup-pi-brain.sh` creates the system users, generates each secret (256-bit, `openssl rand`), and writes a SHA-256 **verifier** that only the called service can read: `verifiers/device-hub.sha256` (owned by the gateway user) and `hub-verifiers/gateway.sha256`, `hub-verifiers/agent.sha256` (owned by the device-hub user), all mode 600 under `/etc/edge-agent/secrets/`. The called service checks `X-Service-Secret` against the verifier in constant time, so it can authenticate callers without being able to impersonate them (device-hub reads only verifiers, never a secret), and a compromised service leaks only its own scope. Services read their own secret from its file at start-up (never from env vars or argv) and never log it. Containers for device-hub, the gateway and the agent must run as the matching uid. Rotate with `ROTATE_SECRETS=1` and restart the affected services. The secrets are generated on the Pi and are never copied from or to the PC or git.
+Known limitation: behind `tailscale serve` the gateway sees every client as the container bridge address, so its per-IP login-failure limit (20 per 15 min) is shared by all users; the per-user+IP limit (5) is not. A future gateway `trusted_proxies` setting would restore the real client IP (see `tools/tailscale-serve.md`).
+
+`setup-pi-brain.sh` creates the system users, generates each secret (256-bit, `openssl rand`), and writes a SHA-256 **verifier** that only the called service can read: `verifiers/device-hub.sha256` (owned by the gateway user) and `hub-verifiers/gateway.sha256`, `hub-verifiers/agent.sha256` (owned by the device-hub user), all mode 600 under `/etc/edge-agent/secrets/`. The called service checks `X-Service-Secret` against the verifier in constant time, so it can authenticate callers without being able to impersonate them (device-hub reads only verifiers, never a secret), and a compromised service leaks only its own scope. Services read their own secret from its file at start-up (never from env vars or argv) and never log it. Containers for device-hub, the gateway and the agent must run as the matching uid. Rotate with `ROTATE_SECRETS=1` and restart the affected services (and the broker, for the hub password). The secrets are generated on the Pi and are never copied from or to the PC or git.
 
 ## Certificate lifecycle
 
-- **CA**: 10 years (3650 days). **Server certificate**: 3 years by default (`-ServerDays`), always issued by the same CA. Both certificates are generated with `notBefore` one day in the past so a slightly slow clock on the Pi or a board does not make them "not yet valid" (needs OpenSSL 3.4+; Git for Windows 2.50+ has it).
-- **Before the first Pi deploy, regenerate with the real values** (the dev run used placeholders): `deploy\mosquitto
-ew-certs.ps1 -LanIp <pi-brain static LAN IP> -TailnetName <pi-brain>.<tailnet>.ts.net -Force`. The broker's LAN IP goes into every board's provisioning bundle, so give `pi-brain` a static address or DHCP reservation; a changed IP means a new server cert **and** new bundles.
+- **CA**: 10 years (3650 days). **Server certificate** (SANs: `mosquitto`, the Pi's LAN IP, its Tailscale/LAN names, `localhost`): 3 years by default (`-ServerDays`), always issued by the same CA. Both certificates are generated with `notBefore` one day in the past so a slightly slow clock on the Pi or a board does not make them "not yet valid" (needs OpenSSL 3.4+; Git for Windows 2.50+ has it).
+- **Before the first Pi deploy, regenerate with the real values** (the dev run used placeholders): `deploy\mosquitto\new-certs.ps1 -LanIp <pi-brain static LAN IP> -TailnetName <pi-brain>.<tailnet>.ts.net -Force`. The broker's LAN IP goes into every board's provisioning bundle, so give `pi-brain` a static address or DHCP reservation; a changed IP means a new server cert **and** new bundles.
 - **Back up `certs\ca\ca.key` offline** (encrypted USB or password manager attachment, not cloud sync, not git). It is the root of trust for every board; losing it means you cannot issue a new server cert under the same CA. It never goes to the Pi.
 - **Renewing the server cert** (same CA): rerun `new-certs.ps1 -LanIp ... -TailnetName ... -Force`, stage the new files and rerun `tools/setup-pi-brain.sh` (see above). Boards keep working, they trust the CA.
 - **Rotating or replacing the CA means re-provisioning every board**: the CA certificate is stored in each board's NVS from the BLE bundle, so a new CA is only trusted after each board is provisioned again. Treat the CA key as permanent; rotate only if it is compromised.
