@@ -354,8 +354,37 @@ paths:
         * `confirmation_expired` `{request_id, summary, reason}`: no answer in time or the token expired; nothing was executed.
         * `notification` `{level, text}` is for everything else (e.g. `level: action_blocked`).
         Payloads match `agent-events.md`.
+
+        **Auth: the JWT is NEVER sent in the URL (no `?token=`, no path segment): URLs end up in proxy and access logs.**
+        Obtain a ticket with `POST /ws/ticket` (single use, 30 s TTL, bound to the user) and pass it on connect, in the `Sec-WebSocket-Protocol` header as
+        `edge-ticket.<ticket>` or as the first message `{"type":"auth","ticket":"..."}` (the server closes with 4401 if
+        no valid ticket arrives within 5 s). A header-capable client may also send `Authorization: Bearer <access JWT>`.
+        The connection ends when the access token that created it expires (close 4401); the client refreshes and reconnects.
+      security: []
       responses:
         '101': {description: Switching protocols}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /ws/ticket:
+    post:
+      tags: [system]
+      operationId: createWsTicket
+      description: |
+        Mints a short-lived ticket for the WebSocket handshake (see `/ws`; the JWT must never go in the URL).
+        The ticket is opaque (256-bit random), **single use** (burned on first presentation, valid or not), bound to the
+        caller's user id and expires 30 s after minting; it carries no more rights than the caller's current role and
+        rooms, which are re-read from the DB when the socket connects. Only its hash is stored. It is never logged.
+      responses:
+        '200':
+          description: Ticket
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expires_in_s]
+                properties:
+                  ticket: {type: string, pattern: '^[A-Za-z0-9_-]{43}$'}
+                  expires_in_s: {const: 30}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '429': {$ref: '#/components/responses/TooManyRequests'}
 
