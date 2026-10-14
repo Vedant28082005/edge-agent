@@ -119,7 +119,7 @@ async def test_only_the_requesting_user_can_resolve(env):
 
 
 async def test_guest_cannot_trigger_a_confirmation(env):
-    ctx, ev = await env.chat("unlock the front door", user="guest:visitor")
+    ctx, ev = await env.chat("unlock the front door", user="visitor", role="guest")
     assert "confirmation_request" not in names(ev)
     assert not [c for c in env.fake.calls if c["tool"] == "set_state"]
     assert "guests can't" in one(ev, "final")["text"]

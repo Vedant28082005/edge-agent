@@ -50,6 +50,13 @@ class LlmClient:
         self._waiting = 0
         self._max_queued = max_queued
 
+    async def health(self) -> bool:
+        try:
+            r = await self._http.get(self._base + "/health", timeout=2.0)
+            return r.status_code == 200
+        except httpx.HTTPError:
+            return False
+
     async def aclose(self) -> None:
         if self._own_http:
             await self._http.aclose()

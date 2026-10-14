@@ -31,15 +31,28 @@ def test_per_user_isolation_and_summary():
 def test_guests_have_no_persistent_memory(tmp_path):
     db = tmp_path / "a.sqlite"
     s = Store(str(db))
-    s.add_message("guest:visitor", "s1", "user", "guest said this")
-    s.add_message("guest", "s1", "user", "plain guest")
-    assert s.recent("guest:visitor", "s1") == [("user", "guest said this")]       # in-process only, for the session
-    assert s.roll_summary("guest:visitor", "s1") is False and s.summary("guest:visitor", "s1") == ""
+    s.add_message("visitor", "s1", "user", "guest said this", guest=True)
+    assert s.recent("visitor", "s1", guest=True) == [("user", "guest said this")]      # in-process only, for the session
+    assert s.roll_summary("visitor", "s1", guest=True) is False and s.summary("visitor", "s1", guest=True) == ""
+    assert s.add_memory("visitor", "likes jazz", guest=True) is None and s.list_memories("visitor", guest=True) == []
+    # the role decides, not the id: a member literally named "guest" is persisted
+    s.add_message("guest", "s1", "user", "member named guest")
     s.close()
-    rows = sqlite3.connect(str(db)).execute("SELECT count(*) FROM messages").fetchone()[0]
-    assert rows == 0
-    s2 = Store(str(db))                                                           # "restart": nothing survives
-    assert s2.recent("guest:visitor", "s1") == []
+    con = sqlite3.connect(str(db))
+    assert con.execute("SELECT count(*) FROM messages WHERE text='guest said this'").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM messages WHERE text='member named guest'").fetchone()[0] == 1
+    s2 = Store(str(db))                                                           # "restart": nothing of the guest survives
+    assert s2.recent("visitor", "s1", guest=True) == []
+
+
+def test_memories_are_per_user():
+    s = Store(":memory:")
+    m = s.add_memory("alice", "prefers 21C")
+    s.add_memory("bob", "bob thing")
+    assert [x["text"] for x in s.list_memories("alice")] == ["prefers 21C"]
+    assert s.update_memory("bob", m["memory_id"], "hijack") is None and s.delete_memory("bob", m["memory_id"]) is False
+    assert s.update_memory("alice", m["memory_id"], "prefers 22C")["text"] == "prefers 22C"
+    assert s.delete_memory("alice", m["memory_id"]) and s.list_memories("alice") == []
 
 
 def test_action_log_scoped_query_and_rules_empty():

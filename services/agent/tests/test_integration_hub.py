@@ -22,7 +22,7 @@ from agent.service import Agent
 
 pytestmark = pytest.mark.integration
 
-HUB_DIR = Path(os.environ.get("EDGE_HUB_DIR", Path(__file__).resolve().parents[3].parent / "edge-agent-s1" / "services" / "device-hub"))
+HUB_DIR = Path(os.environ.get("EDGE_HUB_DIR", Path(__file__).resolve().parents[2] / "device-hub"))   # merged S1 hub in this repo
 
 
 def free_port() -> int:
@@ -157,6 +157,41 @@ async def test_real_hub_end_to_end(tmp_path, hub):
                 break
             await asyncio.sleep(0.05)
         assert "Ventilator" in agent.builder.prefix and agent.stream.last_id is not None
+
+        # 7. a scene with a risk:confirm action: scene_id and canonical list/hash come from the hub; approval via the HTTP hand-off
+        from agent.app import create_app
+        from agent.auth import ApiAuth
+        from agent.util import action_hash
+        door, fan = by_name["Front door"].endpoint_id, by_name["Fan"].endpoint_id
+        async with httpx.AsyncClient() as c:
+            sc = (await c.post(f"{url}/scenes", headers={"X-Service-Secret": gsec}, json={
+                "name": "Good night", "owner": "alice", "actions": [
+                    {"target": {"endpoint_id": fan}, "capability": "power", "value": False},
+                    {"target": {"endpoint_id": door}, "capability": "lock", "value": "locked"}]})).json()
+            sid = sc["scene_id"]
+            canon = (await c.get(f"{url}/scenes/{sid}/confirmation", headers={"X-Service-Secret": gsec})).json()
+        ctx = agent.new_request("alice", "s1", "run the good night scene")
+        task = asyncio.create_task(collect(ctx))
+        for _ in range(100):
+            if agent.confirmations.pending_ids():
+                break
+            await asyncio.sleep(0.05)
+        rid = agent.confirmations.pending_ids()[0]
+        action = agent.confirmations.pending_action(rid)
+        assert action == canon["action"] and agent.confirmations.pending_hash(rid, "alice") == canon["action_hash"] == action_hash(action)
+        assert not [n for n in agent.store.action_log() if n["status"] == "done" and n["tool"] == "run_scene"]   # nothing ran yet
+        async with httpx.AsyncClient() as c:
+            tok = (await c.post(f"{url}/mock/mint", headers={"X-Service-Secret": gsec}, json={"user_id": "alice", "action": action})).json()["confirmation_token"]
+        auth = ApiAuth.from_secret("gw-test-secret", str(tmp_path / "v.sha256"))
+        api = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(agent, auth)), base_url="http://agent",
+                                headers={"X-Service-Secret": "gw-test-secret"})
+        body = {"decision": "approved", "user_id": "alice", "role": "member", "action": action,
+                "action_hash": canon["action_hash"], "confirmation_token": tok}
+        assert (await api.post(f"/v1/confirmations/{rid}", json=body)).status_code == 202
+        ev = await task
+        last = [d for n, d in ev if n == "tool_result"][-1]
+        assert last["ok"] is True and last["result"]["executed"] is True, last
+        assert tok not in json.dumps(ev)
 
         # 6. scope: the agent secret cannot do anything but /mcp and allowlisted /events
         async with httpx.AsyncClient() as c:

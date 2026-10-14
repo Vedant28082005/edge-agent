@@ -16,12 +16,14 @@ from .events import (HUB_NODE_STATUS, HUB_REGISTRY_CHANGED, HUB_SETTLE_TIMEOUT, 
 from .executor import Executor, Metrics
 from .hub_client import HubEventStream, McpClient
 from .llm import Llm
-from .notify import LogNotifier, Notifier
+from .evring import EventRing, RingNotifier
+from .notify import Notifier
 from .planner import Planner
 from .policy import Trigger
 from .prompt import PromptBuilder
 from .reqctx import Budget, ReqCtx
 from .schema import build_plan_schema
+from .util import action_hash
 from .settle import SettleTable
 from .store import Store
 from .util import read_secret_file
@@ -34,8 +36,11 @@ class Agent:
                  store: Store | None = None, notifier: Notifier | None = None) -> None:
         self.cfg = cfg
         self.metrics = Metrics()
-        self.notifier = notifier or LogNotifier()
-        self.store = store or Store(cfg.db_path, cfg.guest_prefix)
+        self.ring = EventRing()
+        self.notifier = notifier or RingNotifier(self.ring)
+        self.store = store or Store(cfg.db_path)
+        self._bg: set[asyncio.Task] = set()
+        self.mock = False
         self.registry = DeviceRegistry()
         self.bus = EventBus()
         self.llm = llm
@@ -121,18 +126,95 @@ class Agent:
         await self.settles.on_hub_event(ev.type.removeprefix("hub."), ev.data)
 
     # ------------------------------------------------------------------------------------------ chat entry
-    def new_request(self, user_id: str, session_id: str, text: str) -> ReqCtx:
+    def new_request(self, user_id: str, session_id: str, text: str, role: str = "member", images: int = 0) -> ReqCtx:
+        """`role` comes only from the authenticated gateway call (app.py); it is never derived from the user id."""
         c = self.cfg
-        trig = Trigger("user", user_id=user_id, guest=self.store.is_guest(user_id))
-        ctx = ReqCtx(user_id, session_id, text, trig, Budget(c.max_steps, c.max_calls, c.deadline_s, c.max_retries))
+        trig = Trigger("user", user_id=user_id, guest=(role == "guest"))
+        ctx = ReqCtx(user_id, session_id, text, trig, Budget(c.max_steps, c.max_calls, c.deadline_s, c.max_retries),
+                     role=role, images=images, sink=self._to_ring)
         self.bus.publish(Event(USER_MESSAGE, {"ctx": ctx}, source="chat", user_id=user_id))
         return ctx
+
+    def _to_ring(self, name: str, data: dict, user_id: str | None) -> None:
+        self.ring.publish(name, data, user_id)
+
+    # ------------------------------------------------------------------------------------------ confirmation hand-off
+    async def handle_decision(self, request_id: str, body: dict) -> tuple[int, dict]:
+        """POST /v1/confirmations/{request_id} (body already schema-validated by app.py). The token is used for one call
+        and dropped; it is never logged, stored or put in an event. Returns (http status, json body)."""
+        user_id, decision, role = body["user_id"], body["decision"], body["role"]
+        action, claimed = body["action"], body["action_hash"]
+        token = body.get("confirmation_token")
+        cm = self.confirmations
+        if role == "guest":
+            return 400, {"error": "bad_request", "message": "guests have no confirmations"}
+        try:
+            computed = action_hash(action)
+        except (TypeError, ValueError):
+            return 400, {"error": "bad_request", "message": "action cannot be canonicalised"}
+        if cm.owner_of(request_id) not in (None, user_id):
+            return 404, {"error": "unknown_request"}                 # another user's request: same answer as unknown
+        if decision == "approved":
+            if computed != claimed:
+                log.warning("confirmation %s refused: action_hash mismatch", request_id)
+                return 409, {"error": "action_hash_mismatch", "message": "nothing executed"}
+            pend = cm.pending_hash(request_id, user_id)
+            if cm.knows(request_id, user_id):
+                if pend is not None and pend != claimed:
+                    return 409, {"error": "action_hash_mismatch", "message": "does not match the pending request"}
+                cm.resolve(request_id, user_id, True, token)
+                return 202, {"accepted": True}
+            if cm.is_handled(request_id):
+                return 202, {"accepted": True, "note": "already handled"}
+            # unknown here: a Retry request only the gateway created. The body carries the full action; run exactly that.
+            self._spawn(self._run_standalone(user_id, request_id, action, token))
+            return 202, {"accepted": True}
+        # declined / expired: no token; clear pending state
+        if cm.knows(request_id, user_id):
+            cm.resolve(request_id, user_id, False) if decision == "declined" else cm.expire(request_id, user_id)
+            return 202, {"accepted": True}
+        if cm.is_handled(request_id):
+            return 202, {"accepted": True, "note": "already handled"}
+        return 404, {"error": "unknown_request"}
+
+    def _spawn(self, coro) -> None:
+        t = asyncio.get_running_loop().create_task(coro)
+        self._bg.add(t)
+        t.add_done_callback(self._bg.discard)
+
+    async def _run_standalone(self, user_id: str, request_id: str, action: dict, token: str) -> None:
+        c = self.cfg
+        ctx = ReqCtx(user_id, "confirmation", "confirmed action", Trigger("user", user_id=user_id),
+                     Budget(1, 1, 60.0, c.max_retries), role="member", sink=self._to_ring)
+        ctx.reason = f"user confirmed request {request_id}"
+        ctx.detached = True                                         # no chat stream: late events go to the ring
+        try:
+            out = await self.executor.run_approved(ctx, action, token)
+            token = None
+            from .chat import compose_final
+            text = compose_final("Done.", [out], self.registry)
+            await self.notifier.notify(user_id, "action_result", text)
+        except Exception:
+            log.exception("approved action failed")
+
+    # ------------------------------------------------------------------------------------------ health
+    async def health(self) -> dict:
+        llm = "mock" if getattr(self.llm, "mock", False) else ("up" if await self.llm.health() else "down")
+        if self.mock:
+            hub = "mock"
+        else:
+            try:
+                await self.hub.list_tools()
+                hub = "up"
+            except Exception:
+                hub = "down"
+        return {"ok": llm in ("up", "mock") and hub in ("up", "mock"), "llm": llm, "hub": hub}
 
     async def _run_rule_action(self, action: dict, trigger_ref: str, reason: str, name: str = ""):
         """Rules engine hook: a rule's action runs through the same executor, with a non-user trigger."""
         c = self.cfg
         ctx = ReqCtx("rule", "rule", reason, Trigger("rule", ref=trigger_ref),
-                     Budget(1, 1, 30.0, c.max_retries))
+                     Budget(1, 1, 30.0, c.max_retries), sink=self._to_ring)
         ctx.reason, ctx.label = reason[:200], name
         out = await self.executor.run_call(ctx, action.get("tool"), action.get("args"))
         ctx.close()

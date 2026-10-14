@@ -13,9 +13,10 @@ cd services\agent
 py -3.12 -m venv .venv                         # local venv only (target is Python 3.11 on ARM64, pure-Python deps)
 .\.venv\Scripts\python -m pip install -r requirements-dev.txt
 
-.\.venv\Scripts\python -m agent --mock         # scripted LLM + fake hub on 127.0.0.1, no network
+.\.venv\Scripts\python -m agent --mock --insecure-no-auth   # scripted LLM + fake hub on 127.0.0.1, no network
 curl.exe -N -X POST http://127.0.0.1:8200/v1/chat -H "Content-Type: application/json" `
-  -d '{\"user_id\":\"alice\",\"session_id\":\"s1\",\"text\":\"turn on the bedroom fan\"}'
+  -d '{\"user_id\":\"alice\",\"role\":\"member\",\"session_id\":\"s1\",\"text\":\"turn on the bedroom fan\"}'
+# without --insecure-no-auth the mock writes a gateway secret + verifier to a temp dir (path in the log); send it as X-Service-Secret
 
 .\.venv\Scripts\python -m pytest -m "not llama"        # everything, incl. the real-hub integration test
 .\tools\run-tests.ps1                                    # same
@@ -54,36 +55,50 @@ and `id_slot`/`cache_prompt` fields follow current llama-server and were **not**
 
 ## Tests (what ran)
 
-`pytest -m "not llama"`: 98 tests — prompt budget under adversarial input, prefix stability (history changes → identical
+`pytest -m "not llama"`: 120 tests (Windows) + `test_api_contract.py` covers the gateway API: auth, role, hash check, hand-off, ring, memory; — prompt budget under adversarial input, prefix stability (history changes → identical
 bytes; registry change → different; online/live state → identical), schema generation, executor budgets
 (steps/calls/deadline/retries), confirmation flow (approve/decline/expire/token_expired/wrong user/guest/rule), settle
 matching (incl. early arrival, two streams, detached client), event-bus dispatch, stream reconnect + `Last-Event-ID`,
 untrusted-string handling, no secret/token in logs/events/store/model prompts, store isolation, llama request shape,
-mock end-to-end (HTTP SSE), and `test_integration_hub.py` against the **real S1 device-hub** (`--mock` internals, caller
+mock end-to-end (HTTP SSE), and `test_integration_hub.py` against the **real device-hub** (`services/device-hub`, merged S1, scene flow included) (`--mock` internals, caller
 auth ON, agent secret scope enforced, hub-side token consumption, our action hash equals the hub's).
 `tests/test_llama_real.py` (needs `EDGE_TEST_GGUF`, optional `EDGE_LLAMA_SERVER`) is written, **not run**.
 
-## Decisions for the owner (contract gaps; nothing in `contracts/` or `docs/` was edited)
+## Gateway API (contracts/openapi/agent-internal.yaml 1.2.0)
 
-1. **How the agent receives the confirmation token is not defined.** `agent-events.md` says the gateway "hands it to the
-   agent" but no agent endpoint/auth exists. Built: everything up to `ConfirmationManager.resolve(request_id, user_id,
-   approved, token)` (in-process). Not built: any network path for it, so in real mode every request ends in
-   `confirmation_expired` (fail closed). Same gap for decline and for **Retry** (`/confirmations/{id}/retry` needs a
-   gateway->agent call plus a stream to emit the new request on). `--mock` has a mock-only `POST /mock/confirm`.
-2. **`run_scene` cannot be hashed or discovered by the agent.** No tool lists scenes (the LLM can only guess a name; the
-   optional `scene_names` config pins an enum), and the blocked result has no `scene_id`, so `confirmation_request.action_hash`
-   is `null` for scenes (set_state hashes are computed with RFC 8785 and match the hub's, tested).
-3. **Settle events:** the brief says `async_result`; `agent-events.md` v6 says `action_settled` / `action_settle_timeout`
-   on the originating stream (`async_result.kind` is only `vision`). I followed the contract.
-4. **Notifications** (blocked proactive actions, late timeouts) are specified as gateway-WebSocket messages, but there is no
-   agent->gateway channel; v1 logs them and keeps the last 100 in memory (`notify.py`).
-5. **Guest identity:** the chat request has no role, so guests are recognised by `user_id == "guest"` or `guest:*`.
-   Suggest an explicit field (contract change) or gateway-side rewrite.
-6. **`node_status` has a node id but `list_devices` has none**, so `online` is refreshed by reloading `list_devices`
-   (prefix unaffected: `online` is not in it).
-7. **Model sees capability ids per type** (`fan=power,speed`) in the device-list section; ranges are enforced only by the
-   grammar/executor. This goes slightly beyond "names, rooms, types, tags".
-8. **S1 observation:** `device_hub --mock` ignores `auth.verifier_dir` from `--config` (it builds its own `HubConfig`) while
-   `__main__` still validates the config's directory, so mock + caller auth is unusable from the CLI; the integration test
-   drives `build_mock_hub` + `create_app` directly. Worth a fix in S1.
-9. Extra endpoints not in the contract: `GET /health`, `GET /v1/stats`, `GET|POST /v1/runtime` (loopback eval switches).
+Auth is mandatory on every operation, `/v1/health` included: `X-Service-Secret` is checked in constant time against a
+SHA-256 verifier file (`api_verifier_file`, default `/etc/edge-agent/secrets/verifiers/agent-api.sha256`); the agent cannot
+read the secret itself and refuses to start without the file. `--insecure-no-auth` only with `--mock`. This is a different
+secret from the hub secret (`agent.secret`); neither works on the other API.
+
+* `role` (`admin|member|guest`) is read only from the authenticated gateway's chat/confirmation body. There is no
+  guest-by-user-id rule; a guest gets no persistent history/summary/memories and no `risk: confirm` prompts.
+* `POST /v1/confirmations/{request_id}`: the full `action` is hashed (RFC 8785) and compared with `action_hash`, a mismatch is
+  409 `action_hash_mismatch` with nothing executed; also compared with the pending request's own hash. Approved: the waiting
+  turn continues, or, for a request id the agent never saw (a gateway-side Retry), the exact action runs with the token. Declined /
+  expired clear the pending state. Repeats are 202 no-ops; unknown or another user's request is 404. The token lives in memory
+  for one call; tests grep logs, events, the action log, messages, the ring and the model prompts for it.
+* Scenes: `confirmation_request.action` is `{type:"run_scene", scene_id, actions}` and its hash is the hub's `action_hash`,
+  which the agent verifies against its own computation (a mismatch is not offered to the user).
+* `GET /v1/events`: ring of up to 2000 events (never fewer than 200 / 10 min), `id`/`Last-Event-ID`, `reset` for an id from a
+  previous run or older than the buffer. Contains `notification`s, and `async_result` / `action_settled` /
+  `action_settle_timeout` / `confirmation_request` only when their chat stream is gone (client disconnected, stream closed, or an
+  approval with no stream), each tagged with `user_id` or `"household"`.
+* `/v1/memory` (GET list, PUT, DELETE) per user, other users' ids are 404. Memories (top 5, <=150 tokens) go in the prompt tail.
+* `/v1/chat`: images are validated (type, magic bytes, base64, 5 MiB, max 4) and kept out of the prompt; v1 cannot analyse them
+  (S8) and says so. `429 llm_busy` + `Retry-After` when the turn queue is full.
+
+## Decisions for the owner
+
+1. **Retry vs. unknown request ids.** The contract says an unknown `request_id` is 404, but also that a Retry request is unknown to
+   the agent and is executed from the full action at approval. I run the action for an unknown id on `approved`, and answer 404
+   for unknown ids on `declined`/`expired`. The token (hub-validated, user- and hash-bound) is what authorizes it.
+2. **Events mirrored only when the chat stream is gone**, to avoid the gateway seeing each settle twice. If the gateway wants
+   everything mirrored on `/v1/events`, it is a one-line change in `ReqCtx.emit`.
+3. **Outcome of an approval with no stream** is reported as a `notification` level `action_result` (the contract's event list has no
+   tool_result/final).
+4. Images are accepted and discarded (no vision route until S8).
+5. Extras beyond the contract, authenticated: `GET /v1/stats`, `GET|POST /v1/runtime` (constrained on/off for S10).
+6. Capability ids per type are shown to the model in the device list (slightly beyond names/rooms/types/tags).
+7. `node_status` has a node id but `list_devices` has none, so `online` is refreshed by reloading `list_devices`.
+8. S1 observation: `device_hub --mock` ignores `auth.verifier_dir` from `--config`; the integration test builds the hub in code.

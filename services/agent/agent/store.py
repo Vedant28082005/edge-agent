@@ -1,12 +1,14 @@
 """SQLite persistence: per-user messages and a rolling summary, the action log, and the (empty) rules table.
 
 Per-user isolation: every read/write of conversation data takes `user_id` and filters on it; there is no query that
-returns another user's rows. Guests (user ids `guest` or `guest:*`, see config) have no persistent memory: their
-messages and summary live in a small in-process LRU only. The action log is an audit trail and is kept for everyone.
+returns another user's rows. Guests have no persistent memory: callers pass `guest=True` (the `role` the authenticated
+gateway sent; the store never infers it from a user id) and then messages live in a small in-process LRU only and
+memories do not exist. The action log is an audit trail and is kept for everyone.
 No token, secret or `_meta` ever reaches this module (callers pass validated tool arguments and result summaries)."""
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -27,23 +29,22 @@ CREATE INDEX IF NOT EXISTS action_log_ts ON action_log(ts);
 CREATE TABLE IF NOT EXISTS rules(
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, event_type TEXT NOT NULL, when_json TEXT NOT NULL DEFAULT '{}',
   actions_json TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS memories(
+  memory_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, text TEXT NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS memories_user ON memories(user_id, updated_at);
 """
 
 
 class Store:
-    def __init__(self, path: str = ":memory:", guest_prefix: str = "guest", guest_cache: int = 64) -> None:
+    def __init__(self, path: str = ":memory:", guest_cache: int = 64) -> None:
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         if path != ":memory:":
             self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
-        self._guest_prefix = guest_prefix
         self._guest: OrderedDict[tuple[str, str], list[tuple[str, str]]] = OrderedDict()
         self._guest_cache = guest_cache
-
-    def is_guest(self, user_id: str) -> bool:
-        return user_id == self._guest_prefix or user_id.startswith(self._guest_prefix + ":")
 
     def close(self) -> None:
         self._db.close()
@@ -53,8 +54,8 @@ class Store:
             return self._db.execute(sql, args).fetchall()
 
     # ------------------------------------------------------------------------------------------ conversation
-    def add_message(self, user_id: str, session_id: str, role: str, text: str) -> None:
-        if self.is_guest(user_id):
+    def add_message(self, user_id: str, session_id: str, role: str, text: str, guest: bool = False) -> None:
+        if guest:
             key = (user_id, session_id)
             h = self._guest.setdefault(key, [])
             h.append((role, text))
@@ -66,23 +67,23 @@ class Store:
         self._q("INSERT INTO messages(user_id,session_id,role,text,ts) VALUES(?,?,?,?,?)",
                 (user_id, session_id, role, text, time.time()))
 
-    def recent(self, user_id: str, session_id: str, n: int = 4) -> list[tuple[str, str]]:
-        if self.is_guest(user_id):
+    def recent(self, user_id: str, session_id: str, n: int = 4, guest: bool = False) -> list[tuple[str, str]]:
+        if guest:
             return list(self._guest.get((user_id, session_id), []))[-n:]
         rows = self._q("SELECT role,text FROM messages WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT ?",
                        (user_id, session_id, n))
         return [(r["role"], r["text"]) for r in reversed(rows)]
 
-    def summary(self, user_id: str, session_id: str) -> str:
-        if self.is_guest(user_id):
+    def summary(self, user_id: str, session_id: str, guest: bool = False) -> str:
+        if guest:
             return ""
         rows = self._q("SELECT text FROM summaries WHERE user_id=? AND session_id=?", (user_id, session_id))
         return rows[0]["text"] if rows else ""
 
-    def roll_summary(self, user_id: str, session_id: str, keep: int = 4, max_chars: int = 400) -> bool:
+    def roll_summary(self, user_id: str, session_id: str, keep: int = 4, max_chars: int = 400, guest: bool = False) -> bool:
         """Fold messages older than the last `keep` into the rolling summary (deterministic, no LLM: the LLM-written
         summary is S8's idle job). Returns True if something was folded."""
-        if self.is_guest(user_id):
+        if guest:
             return False
         rows = self._q("SELECT id FROM messages WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT 1 OFFSET ?",
                        (user_id, session_id, keep - 1))
@@ -103,8 +104,34 @@ class Store:
         return True
 
     def forget_user(self, user_id: str) -> None:
-        self._q("DELETE FROM messages WHERE user_id=?", (user_id,))
-        self._q("DELETE FROM summaries WHERE user_id=?", (user_id,))
+        for t in ("messages", "summaries", "memories"):
+            self._q(f"DELETE FROM {t} WHERE user_id=?", (user_id,))
+
+    # ------------------------------------------------------------------------------------------ memories (/v1/memory)
+    def add_memory(self, user_id: str, text: str, guest: bool = False) -> dict | None:
+        if guest:
+            return None
+        mid = "m_" + secrets.token_hex(6)
+        self._q("INSERT INTO memories(memory_id,user_id,text,updated_at) VALUES(?,?,?,?)", (mid, user_id, text[:500], int(time.time())))
+        return {"memory_id": mid, "text": text[:500], "updated_at": int(time.time())}
+
+    def list_memories(self, user_id: str, guest: bool = False) -> list[dict]:
+        if guest:
+            return []
+        return [{"memory_id": r["memory_id"], "text": r["text"], "updated_at": r["updated_at"]} for r in
+                self._q("SELECT * FROM memories WHERE user_id=? ORDER BY updated_at DESC, rowid DESC", (user_id,))]
+
+    def update_memory(self, user_id: str, memory_id: str, text: str) -> dict | None:
+        """None if the memory does not exist FOR THIS USER (another user's memory looks the same: no existence leak)."""
+        now = int(time.time())
+        with self._lock:
+            cur = self._db.execute("UPDATE memories SET text=?, updated_at=? WHERE memory_id=? AND user_id=?",
+                                   (text[:500], now, memory_id, user_id))
+        return {"memory_id": memory_id, "text": text[:500], "updated_at": now} if cur.rowcount else None
+
+    def delete_memory(self, user_id: str, memory_id: str) -> bool:
+        with self._lock:
+            return self._db.execute("DELETE FROM memories WHERE memory_id=? AND user_id=?", (memory_id, user_id)).rowcount > 0
 
     # ------------------------------------------------------------------------------------------ action log
     def log_action(self, *, user_id: str | None, req_id: str | None, trigger_kind: str, trigger_ref: str | None,

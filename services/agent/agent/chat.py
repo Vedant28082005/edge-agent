@@ -83,6 +83,9 @@ class ChatService:
         self._active = 0
         self._max_active = 1 + max_queued_turns
 
+    def busy(self) -> bool:
+        return self._active >= self._max_active
+
     async def on_user_message(self, event: Event) -> None:
         ctx: ReqCtx = event.data["ctx"]
         t0 = time.monotonic()
@@ -99,7 +102,10 @@ class ChatService:
     async def turn(self, ctx: ReqCtx, t0: float) -> None:
         text = clean_user_text(ctx.text, 400)
         if not text:
-            await ctx.emit("error", {"code": "bad_request", "message": "empty message"})
+            if ctx.images:                                   # images only: nothing to analyse them with in v1 (S8)
+                await ctx.emit("final", {"text": "I can't analyse images yet.", "route": "llm", "latency_ms": 0})
+            else:
+                await ctx.emit("error", {"code": "bad_request", "message": "empty message"})
             return
         if self._active >= self._max_active:
             await ctx.emit("error", {"code": "llm_busy", "message": "the assistant is busy, try again shortly"})
@@ -111,9 +117,10 @@ class ChatService:
             self._active -= 1
 
     async def _turn(self, ctx: ReqCtx, text: str, t0: float) -> None:
-        user, sess = ctx.user_id, ctx.session_id
-        history = self.store.recent(user, sess, 4)
-        summary = self.store.summary(user, sess)
+        user, sess, guest = ctx.user_id, ctx.session_id, ctx.role == "guest"
+        history = self.store.recent(user, sess, 4, guest)
+        summary = self.store.summary(user, sess, guest)
+        memories = [m["text"] for m in self.store.list_memories(user, guest)[:5]]
         await ctx.emit("status", {"text": "thinking"})
         outs: list[CallOutcome] = []
         extra_tail: list[dict] = []
@@ -127,7 +134,7 @@ class ChatService:
                 say = "I stopped here because I reached this request's limit."
                 break
             try:
-                prompt = self.builder.build(text, history, summary, [], extra_tail, tool_results)
+                prompt = self.builder.build(text, history, summary, memories, extra_tail, tool_results)
             except PromptBudgetError:
                 log.exception("prompt over budget")
                 await ctx.emit("error", {"code": "bad_request", "message": "request too large"})
@@ -153,12 +160,14 @@ class ChatService:
             extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
             tool_results = "\n".join(render_result(o.tool, o.args, o.result, self.registry) for o in new if o.ok)
         final = compose_final(say, outs, self.registry)
+        if ctx.images:
+            final += " (I can't analyse images yet.)"
         words = final.split(" ")
         for i in range(0, len(words), 3):
             await ctx.emit("token", {"text": " ".join(words[i:i + 3]) + (" " if i + 3 < len(words) else "")})
-        self.store.add_message(user, sess, "user", text)
-        self.store.add_message(user, sess, "assistant", final)
-        self.store.roll_summary(user, sess)
+        self.store.add_message(user, sess, "user", text, guest)
+        self.store.add_message(user, sess, "assistant", final, guest)
+        self.store.roll_summary(user, sess, guest=guest)
         await ctx.emit("final", {"text": final, "route": "llm", "latency_ms": int((time.monotonic() - t0) * 1000)})
         if ctx.pending_settles:
             await ctx.wait_settles(self.settle_wait_s)

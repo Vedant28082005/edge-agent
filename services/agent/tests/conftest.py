@@ -27,8 +27,8 @@ class Env:
         await self.server.stop()
         _SECRETS.discard(SECRET)
 
-    async def chat(self, text, user="alice", session="s1", timeout=10.0, wait_close=True):
-        ctx = self.agent.new_request(user, session, text)
+    async def chat(self, text, user="alice", session="s1", timeout=10.0, wait_close=True, role="member"):
+        ctx = self.agent.new_request(user, session, text, role)
         return ctx, await collect(ctx, timeout, wait_close)
 
 

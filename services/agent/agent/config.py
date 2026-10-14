@@ -18,14 +18,14 @@ class AgentConfig:
     llm_timeout_s: float = 600.0
     constrained: bool = True                  # runtime switch: constrained decoding on/off (S10 ablation)
     db_path: str = "agent.sqlite"
-    guest_prefix: str = "guest"               # user ids "guest" / "guest:*" have no persistent memory
+    api_verifier_file: str = "/etc/edge-agent/secrets/verifiers/agent-api.sha256"   # SHA-256 of the gateway secret
     max_steps: int = 4                        # LLM rounds per request
     max_calls: int = 8                        # tool calls per request
     deadline_s: float = 180.0                 # wall clock per request, confirmation waits excluded
     max_retries: int = 1                      # idempotent set_state retries (ack_timeout / hub unreachable)
     confirmation_ttl_s: float = 60.0
     settle_wait_s: float = 150.0              # how long a stream stays open after `final` for settle events
-    max_text_chars: int = 2000
+    max_text_chars: int = 4000
     max_queued_turns: int = 2
     scene_names: list[str] = field(default_factory=list)   # no tool lists scenes; optional admin-provided names
     include_state_events: bool = False

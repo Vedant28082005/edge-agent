@@ -141,6 +141,34 @@ class Executor:
             return await self._confirm_and_run(ctx, call_id, tool, args, blocked=result, call_emitted=True)
         return await self._finish(ctx, call_id, tool, args, result)
 
+    async def run_approved(self, ctx: ReqCtx, action: dict, token: str) -> CallOutcome:
+        """Approval hand-off without a waiting turn (a Retry request the agent never saw, or its stream is gone): run the
+        exact approved action with the gateway-minted token attached out-of-band. The hub still validates and consumes the
+        token; nothing here can widen the action."""
+        call_id = "c_" + secrets.token_hex(8)
+        if action.get("type") == "set_state":
+            tool, raw = "set_state", {k: action[k] for k in ("endpoint_id", "capability", "value")}
+        else:
+            tool, raw = "run_scene", {"scene": action.get("scene_id")}
+        err, args = validate_call(self.registry, tool, raw)
+        if err:
+            self.metrics.reject(err)
+            res = {"ok": False, "error": err, "rejected_by": "agent"}
+            self._log(ctx, "rejected", tool, raw, False, {"error": err})
+            return CallOutcome(call_id, tool, raw, res, False, "rejected", note=err)
+        if not ctx.budget.take_call():
+            return CallOutcome(call_id, tool, args, {"ok": False, "error": "budget_exceeded"}, False, "budget")
+        self._log(ctx, "confirmation_approved", tool, args, None, None)
+        await ctx.emit("tool_call", {"call_id": call_id, "tool": tool, "args": _safe_args(args)})
+        result = await self._hub_call(ctx, call_id, tool, args, token=token)
+        if _is_blocked(tool, result):
+            await ctx.emit("tool_result", {"call_id": call_id, "tool": tool, "result": clean_result(tool, result), "ok": False})
+            self.settles.cancel(call_id)
+            self._log(ctx, "confirmation_expired", tool, args, False, {"reason": "token_expired"})
+            return CallOutcome(call_id, tool, args, {"ok": False, "error": "confirmation_expired"}, False, "expired",
+                               note="token_expired")
+        return await self._finish(ctx, call_id, tool, args, result)
+
     # ------------------------------------------------------------------------------------------ hub call
     async def _hub_call(self, ctx: ReqCtx, call_id: str, tool: str, args: dict, token: str | None = None) -> dict:
         meta = {"call_id": call_id}
@@ -190,7 +218,17 @@ class Executor:
     async def _confirm_and_run(self, ctx: ReqCtx, call_id: str, tool: str, args: dict, blocked: dict | None,
                                call_emitted: bool) -> CallOutcome:
         action, summary = self._action_for_confirmation(tool, args, blocked)
-        h = action_hash(action) if tool == "set_state" else None    # a scene's hash needs its permanent id (README)
+        if tool == "set_state":
+            h = action_hash(action)
+        else:                                     # the hub's scene_id + canonical list + hash; we verify, never invent
+            h = blocked.get("action_hash") if isinstance(blocked, dict) else None
+            if (not isinstance(action.get("scene_id"), str) or not action["actions"] or not isinstance(h, str)
+                    or action_hash(action) != h):
+                log.error("run_scene needs_confirmation from the hub is malformed or its hash does not match ours")
+                self.settles.cancel(call_id)
+                self._log(ctx, "failed", tool, args, False, {"error": "bad_tool_result"})
+                return CallOutcome(call_id, tool, args, {"ok": False, "error": "bad_tool_result"}, False, "failed",
+                                   note="bad_tool_result")
         self._log(ctx, "confirmation_requested", tool, args, None, {"summary": summary})
         out = await self.confirmations.request(ctx, summary, action, h)
         if out.kind == "declined":
@@ -227,13 +265,10 @@ class Executor:
                 summary = f"Set {name} {args['capability']} to {shown}?"
             return ({"type": "set_state", "endpoint_id": args["endpoint_id"], "capability": args["capability"],
                      "value": v}, summary)
-        need = []
-        for n in (blocked or {}).get("needs_confirmation", []) if isinstance(blocked, dict) else []:
-            if isinstance(n, dict) and isinstance(n.get("endpoint_id"), str) and n.get("capability") in _caps():
-                need.append({"endpoint_id": n["endpoint_id"], "capability": n["capability"], "value": _scalar(n.get("value"))})
+        need = _canonical_actions((blocked or {}).get("needs_confirmation"))
         names = ", ".join(sorted({self.registry.devices[n["endpoint_id"]].name for n in need if n["endpoint_id"] in self.registry.devices})[:4])
         summary = f"Run scene '{clean_label(args['scene'], 48)}'?" + (f" It affects: {names}." if names else "")
-        return ({"type": "run_scene", "scene": args["scene"], "needs_confirmation": need}, summary)
+        return ({"type": "run_scene", "scene_id": (blocked or {}).get("scene_id"), "actions": need}, summary)
 
     async def _blocked_by_trigger(self, ctx: ReqCtx, call_id: str, tool: str, args: dict, announce: bool = True) -> CallOutcome:
         """Proactive/automation trigger on a risk:confirm action: nothing executes, no prompt, only a notification."""
@@ -263,6 +298,16 @@ class Executor:
 
 
 # ----------------------------------------------------------------------------------------------------- helpers
+def _canonical_actions(raw: Any) -> list[dict]:
+    """The hub's canonical risk:confirm list: exactly endpoint_id, capability, value; sorted by endpoint_id then capability."""
+    out = []
+    for n in raw if isinstance(raw, list) else []:
+        if isinstance(n, dict) and isinstance(n.get("endpoint_id"), str) and n.get("capability") in _caps() \
+                and isinstance(n.get("value"), (bool, int, float, str)):
+            out.append({"endpoint_id": n["endpoint_id"], "capability": n["capability"], "value": n["value"]})
+    return sorted(out, key=lambda x: (x["endpoint_id"], x["capability"]))
+
+
 def _caps() -> set[str]:
     from .devices import VOCAB
     return set(VOCAB)
@@ -323,7 +368,7 @@ def clean_result(tool: str, r: dict) -> dict:
     elif tool == "list_devices":
         out["count"] = len(r.get("devices") or []) if isinstance(r.get("devices"), list) else 0
     elif tool == "run_scene":
-        for k in ("status", "scene", "scene_name"):
+        for k in ("status", "scene", "scene_name", "scene_id"):
             if k in r:
                 out[k] = s(r[k], 48)
         out["executed"] = bool(r.get("executed"))

@@ -136,6 +136,30 @@ class FakeHub:
         self.tokens[t] = (user_id, action_hash(action))
         return t
 
+    # -------------------------------------------------------------------------------------------- scenes
+    SCENES = {"sc_9a8b7c6d": ("Good night", [("ep_a1000002", "power", False), ("ep_a1000004", "lock", "locked")])}
+
+    def run_scene(self, scene: str, meta: dict) -> dict:
+        sid = next((i for i, (n, _) in self.SCENES.items() if scene in (i, n)), None)
+        if sid is None:
+            return {"ok": False, "executed": False, "error": "unknown_scene"}
+        name, acts = self.SCENES[sid]
+        risky = sorted(({"endpoint_id": e, "capability": c, "value": v} for e, c, v in acts
+                        if self.devices[e]["risk"] == "confirm"), key=lambda x: (x["endpoint_id"], x["capability"]))
+        if risky:
+            h = action_hash({"actions": risky, "scene_id": sid, "type": "run_scene"})
+            tok = meta.get("confirmation_token")
+            if not (tok in self.tokens and self.tokens[tok] == (meta.get("user_id"), h)):
+                self.tokens.pop(tok, None)
+                return {"ok": False, "executed": False, "status": "needs_confirmation", "scene_id": sid,
+                        "needs_confirmation": risky, "action_hash": h}
+            del self.tokens[tok]
+        res = []
+        for e, c, v in acts:
+            self.state[e][c] = v
+            res.append({"endpoint_id": e, "capability": c, "status": "done"})
+        return {"ok": True, "executed": True, "scene": sid, "scene_name": name, "results": res}
+
     # -------------------------------------------------------------------------------------------- MCP
     def _auth(self, request: Request) -> bool:
         return request.headers.get("x-service-secret") == self.secret
@@ -173,7 +197,7 @@ class FakeHub:
             return {"endpoint_id": a["endpoint_id"], "capability": a["capability"], "value": 24.5, "unit": "C",
                     "ts": int(time.time()), "stale": False}
         if name == "run_scene":
-            return {"ok": False, "executed": False, "error": "unknown_scene"}
+            return self.run_scene(a["scene"], meta)
         if name != "set_state":
             return {"ok": False, "error": "unknown_tool"}
         if self.fail_next:
@@ -275,6 +299,7 @@ class ScriptedLLM:
 
     def __init__(self, constrained: bool = True) -> None:
         self.constrained = constrained
+        self.mock = True
         self.requests: list[list[dict]] = []
         self._prev = ""
         self.delay = 0.0
@@ -316,6 +341,8 @@ class ScriptedLLM:
             return {"calls": [{"tool": "set_state", "args": {"endpoint_id": "ep_dead0000", "capability": "power", "value": True}}],
                     "say": "Turning it on."}
         legend = next((ln for m in messages for ln in m["content"].splitlines() if ln.startswith("Capabilities by type:")), "")
+        if re.search(r"good night|run .*scene", low):
+            return {"calls": [{"tool": "run_scene", "args": {"scene": "Good night"}}], "say": "Running Good night."}
         m = re.search(r"\b(unlock|lock)\b", low)
         if m:
             d = self._find(devs, low, "lock")

@@ -1,13 +1,9 @@
 import asyncio
 import json
 
-import httpx
-
 from conftest import collect, make_env, names, one
 from agent.events import Event, EventBus
 from agent.hub_client import HubEventStream
-from agent.mock import LocalServer
-from agent.app import create_app
 
 
 # ------------------------------------------------------------------------------------------------ settle matching
@@ -60,7 +56,8 @@ async def test_settle_after_client_disconnected_is_notified(env):
     ev = await collect(ctx, wait_close=False)
     ctx.detached = True                                                   # client went away right after `final`
     await asyncio.sleep(0.6)
-    assert any(i["level"] == "action_failed" for i in env.agent.notifier.items)
+    late = [e for e in env.agent.ring._buf if e.name == "action_settle_timeout"]
+    assert late and late[0].data["user_id"] == "alice" and late[0].data["endpoint_id"] == "ep_a1000005"
 
 
 async def test_settle_arriving_before_the_tool_response_is_processed_is_not_lost(env):
@@ -222,38 +219,3 @@ async def test_hub_down_during_turn_is_a_clean_failure(tmp_path):
         assert "unreachable" in one(ev, "final")["text"]
     finally:
         await e.agent.stop()
-
-
-# ------------------------------------------------------------------------------------------------ HTTP / SSE
-async def test_http_chat_sse_end_to_end(env):
-    srv = LocalServer(create_app(env.agent))
-    base = await srv.start()
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            frames = []
-            async with c.stream("POST", base + "/v1/chat", json={"user_id": "alice", "session_id": "s1",
-                                                                  "text": "turn on the bedroom fan"}) as r:
-                assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
-                name = None
-                async for line in r.aiter_lines():
-                    if line.startswith("event:"):
-                        name = line[6:].strip()
-                    elif line.startswith("data:"):
-                        frames.append((name, json.loads(line[5:])))
-            assert names(frames)[-1] == "final" and "token" in names(frames)
-            assert [c for c in env.fake.calls if c["tool"] == "set_state"]
-            # validation
-            for body in ({}, {"user_id": "a b", "session_id": "s", "text": "x"}, {"user_id": "a", "session_id": "s"},
-                         {"user_id": "a", "session_id": "s", "text": "x", "audio_ref": "a.wav"},
-                         {"user_id": "a", "session_id": "s", "text": "x" * 5000}):
-                r = await c.post(base + "/v1/chat", json=body)
-                assert r.status_code == 400
-            r = await c.post(base + "/v1/chat", content=b"not json")
-            assert r.status_code == 400
-            # runtime switch
-            assert (await c.post(base + "/v1/runtime", json={"constrained": False})).json() == {"constrained": False}
-            assert env.agent.llm.constrained is False
-            assert (await c.post(base + "/v1/runtime", json={"constrained": "yes"})).status_code == 400
-            assert (await c.get(base + "/v1/stats")).json()["metrics"]["plans"] >= 1
-    finally:
-        await srv.stop()

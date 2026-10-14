@@ -52,9 +52,12 @@ class Budget:
 
 class ReqCtx:
     def __init__(self, user_id: str, session_id: str, text: str, trigger: Trigger, budget: Budget,
-                 req_id: str | None = None) -> None:
+                 req_id: str | None = None, role: str = "member", images: int = 0, sink=None) -> None:
         self.req_id = req_id or "r_" + secrets.token_hex(6)
         self.user_id, self.session_id, self.text = user_id, session_id, text
+        self.role = role                    # set only by the authenticated gateway; never inferred
+        self.images = images                # count of validated inline images (not analysed in v1)
+        self.sink = sink                    # (name, data, user_id) -> None: where events go when the stream is gone
         self.trigger, self.budget = trigger, budget
         self.out: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
         self._seq = 0
@@ -67,8 +70,13 @@ class ReqCtx:
         self.label = ""                     # human name of a non-user trigger (a rule's name)
 
     async def emit(self, name: str, data: dict[str, Any]) -> bool:
-        """Queue an SSE event. Returns False when the stream is gone (detached/closed)."""
+        """Queue an SSE event. When the stream is gone (detached/closed/never existed) the contract's late-event kinds go to
+        the gateway event ring instead (`sink`); returns True if the event was delivered somewhere."""
         if self.detached or self.closed:
+            if self.sink is not None and name in ("async_result", "action_settled", "action_settle_timeout",
+                                                  "confirmation_request"):
+                self.sink(name, {**data, "req_id": self.req_id}, self.user_id if self.trigger.is_user else None)
+                return True
             return False
         self._seq += 1
         await self.out.put((name, {**data, "seq": self._seq, "req_id": self.req_id}))
