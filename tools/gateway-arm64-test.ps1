@@ -10,12 +10,15 @@
   linux/arm64 alpine uname -m  ->  aarch64).
 #>
 param(
-    [string]$S1 = (Join-Path (Split-Path $PSScriptRoot -Parent) '..\edge-agent-s1'),
+    [string]$S1,
     [string]$Log = (Join-Path $env:TEMP 'gw-arm64.log'),
     [Parameter(ValueFromRemainingArguments = $true)] [string[]]$PytestArgs
 )
 $ErrorActionPreference = 'Stop'
-$s4 = (Resolve-Path (Split-Path $PSScriptRoot -Parent)).Path
+# $PSScriptRoot is not reliable inside param() defaults on Windows PowerShell 5.1, so derive paths here
+$here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$s4 = (Resolve-Path (Split-Path $here -Parent)).Path
+if (-not $S1) { $S1 = Join-Path (Split-Path $s4 -Parent) 'edge-agent-s1' }
 $s1 = (Resolve-Path $S1).Path
 $name = 's4-arm64-' + (-join ((48..57) + (97..102) | Get-Random -Count 4 | ForEach-Object { [char]$_ }))
 Write-Host "container $name  (log: $Log)"
