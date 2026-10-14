@@ -8,5 +8,6 @@
   "yolo": {"url": "http://jetson-yolo:8400", "timeout_s": 3.0},
   "hub_secret_file": "/etc/edge-agent/secrets/gateway.secret",
   "agent_secret_file": "/etc/edge-agent/secrets/agent-api.secret",
-  "verifier_dir": "/etc/edge-agent/secrets/verifiers"
+  "verifier_dir": "/etc/edge-agent/secrets/verifiers",
+  "static_dir": "/srv/dashboard"
 }
