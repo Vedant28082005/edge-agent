@@ -1,4 +1,4 @@
-# MQTT contract (v4)
+# MQTT contract (v5)
 
 Broker: Mosquitto on `pi-brain`, **TLS on 8883** (1883 disabled), dynamic-security plugin, anonymous access off. Prefix for all topics: `home/v1/`. Payloads: JSON, UTF-8, max 16 KiB.
 
@@ -108,6 +108,11 @@ TLS certificate dates are checked against the board's clock, and a board without
 - `deploy/mosquitto/dynsec-bootstrap.ps1` creates only the initial config with the hub admin account.
 
 ## Contract changelog
+
+- **S0e addendum** (`mqtt.md` v5 (changelog only), `agent-internal.yaml` 1.1.0, `mcp-tools.md` v6, `device-hub-internal.yaml` 1.2.0, `agent-events.md` v7, ARCHITECTURE v6):
+  - `agent-internal.yaml`: required `role` (`admin|member|guest`) in `POST /v1/chat` and `POST /v1/confirmations/{request_id}`; set only by the gateway, trusted only from the authenticated gateway call, never inferred from a user id. Tests added.
+  - `run_scene` blocked result (`mcp-tools.md`, hub `POST /scenes/{id}/run` 409): also `scene_id`, the canonical `risk: confirm` action list (the exact hashed objects) and the canonical `action_hash`. The `confirmation_request` run_scene action in `agent-events.md` is now `{type, scene_id, actions}` as hashed.
+  - ARCHITECTURE 4.10: agent chat body fixed (no `audio_ref` / `image_refs`; inline `images`) and pointed at `agent-internal.yaml`.
 
 - **S0e** (announce stays schema 2; `mqtt.md` v4 (changelog only), `agent-events.md` v7, `gateway.yaml` 2.9.0, new `agent-internal.yaml` 1.0.0, ARCHITECTURE v5):
   - `gateway.yaml`: `SceneAction.target` is exactly one of fixed `{endpoint_id}` or selector `{room?, type?, tag?}` (`minProperties: 1`), both `additionalProperties: false`; samples in `samples/scene-action/` (valid: fixed, selector; invalid: mixed, empty, unknown key) validated by `contract_test.py`.

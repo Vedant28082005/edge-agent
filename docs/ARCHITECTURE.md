@@ -1,4 +1,4 @@
-# Edge Agentic IoT Framework: Architecture and Build Plan (v5)
+# Edge Agentic IoT Framework: Architecture and Build Plan (v6)
 
 Minor project: LLM-based multimodal agentic AI framework for intelligent IoT systems (PDEU).
 
@@ -266,7 +266,7 @@ A source is `{source_id, type, location, node, online}`. Types: `upload` (always
 
 ### 4.10 Agent API (internal)
 
-`POST /v1/chat` `{user_id, session_id, text?, audio_ref?, image_refs?}` → SSE stream: `status` ("checking the camera"), `tool_call`, `tool_result`, `token`, `final`, `async_result` (late vision answer). The agent never blocks on vision.
+Spec: `contracts/openapi/agent-internal.yaml` (listens on 127.0.0.1:8200, gateway-only, mandatory auth). `POST /v1/chat` `{user_id, role, session_id, text?, images?: [{ref, media_type, data_b64}]}` (voice is already a transcript in `text`; images are inline, max 4 at 5 MiB each; `role` is set by the gateway only) → SSE stream: `status` ("checking the camera"), `tool_call`, `tool_result`, `token`, `final`, `async_result` (late vision answer). The agent never blocks on vision.
 
 ### 4.11 Gateway API (user-facing)
 
