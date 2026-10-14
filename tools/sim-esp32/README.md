@@ -48,6 +48,7 @@ nodes:
     fw: 0.1.0-sim                     # optional
     failsafe_after_s: 60              # optional, 0 = keep last values when the hub is lost
     heartbeat_s: 60                   # optional: state republished at least this often
+    dedup_size: 16                    # optional: cmd_ids remembered for ack replay (contract: 16)
     seed: 1                           # optional: deterministic generators and fault dice
     faults: {}                        # see below
     endpoints:
@@ -107,14 +108,14 @@ nodes:
 
 ## Behaviour
 
-- **Boot:** `boot_value` is applied before any network. Then status `online` (retained), `announce` (retained, once per boot, not per reconnect), subscribe `cmd`, full `state` (retained). LWT: `status=offline`, QoS 1, retained. Sensors are sampled once at boot so the first state is complete.
+- **Boot:** `boot_value` is applied before any network. **On every successful connect** (boot and reconnect) the node does, in this order: status `online` (retained), the retained `announce` (byte-identical to the previous one), subscribe `cmd`, full `state` (retained). LWT: `status=offline`, QoS 1, retained. Sensors are sampled once at boot so the first state is complete.
 - **State:** on every applied command, on each sensor interval, every `heartbeat_s`, after a reconnect, and during curtain travel (`progress_s`).
 - **cmd:** atomic (all caps valid or nothing applied). Error codes from `ack.schema.json`: `unknown_endpoint`, `unknown_capability`, `unsupported` (setting a sensor, unknown `cmd`), `out_of_range`, `bad_type` (bool vs int is strict: `1` is not a bool, `true` is not an int, `2.5` is not an int), `bad_request`. Order is apply → publish state → ack. A cmd without a valid `cmd_id` cannot be acked and is dropped.
-- **Dedup:** the last 64 `cmd_id`s keep their ack. A repeated `cmd_id` **replays the ack and does not re-apply or republish state**, so a hub retry after a lost ack is safe.
+- **Dedup:** the last **16** `cmd_id`s (count-based ring, `dedup_size` in YAML or `--dedup-size`) keep their ack. A repeated `cmd_id` **replays the ack and does not re-apply or republish state**, so a hub retry after a lost ack is safe.
 - **identify:** ack immediately, "LED" on for `duration_s` (log lines). **unprovision:** ack, publish `offline`, disconnect and stay down (the sim does not re-enter BLE mode).
 - **failsafe:** after the MQTT link has been down for `failsafe_after_s` (counted from boot if the broker is never reached), every actuator that declares `failsafe_value` is set to it, once per outage; later commands are honoured. `0` keeps the last values.
 - **max_on_s:** on bool capabilities. Forces `false` after that much *continuous* on-time (a repeated "on" does not restart it), works offline, state published afterwards.
-- **Curtain** (an endpoint with `position`): moves at `100 / travel_time_s` per second. Two relays, `up`/`down`, are never both energised, and a relay is only energised after the opposite one has been off for `interlock_s`. Reversing mid-travel therefore stops, waits, then goes the other way. The **ack is sent when the target is accepted** (values = target); `state.position` is the actual position and follows the travel. `boot_value` for position is the assumed position at boot (no movement).
+- **Curtain** (an endpoint with `position`): moves at `100 / travel_time_s` per second. Two relays, `up`/`down`, are never both energised, and a relay is only energised after the opposite one has been off for `interlock_s`. Reversing mid-travel therefore stops, waits, then goes the other way. The announce carries `settle_s` for `position`, derived as `ceil(travel_time_s + interlock_s) + 1` (override with `settle_s:` on the capability; max 120). The **ack is sent when the target is accepted** (values = target); `state.position` is the actual position and follows the travel. `boot_value` for position is the assumed position at boot (no movement).
 
 ## Fault injection
 
@@ -134,7 +135,7 @@ In YAML under `faults:` or on the CLI as `--fault [NODE_ID:]KEY=VALUE` (repeatab
 
 ## Tests
 
-`run-tests.ps1`: 112 unit tests using an in-memory transport and a manual clock (no sleeping): contract agreement (vocabulary table vs `announce.schema.json`, every capability announces validly, hub-rule rejections), protocol (boot sequence, retained flags, ordering, dedup, all error codes, atomicity, garbage input, identify, unprovision, heartbeat), safety (boot, failsafe, max_on, curtain travel/interlock incl. "never both relays"), faults, CLI/credential handling.
+`run-tests.ps1`: 126 unit tests using an in-memory transport and a manual clock (no sleeping): contract agreement (vocabulary table vs `announce.schema.json`, every capability announces validly, hub-rule rejections), protocol (boot sequence, retained flags, ordering, dedup, all error codes, atomicity, garbage input, identify, unprovision, heartbeat), safety (boot, failsafe, max_on, curtain travel/interlock incl. "never both relays"), faults, CLI/credential handling.
 
 ### Integration against the dev broker
 
@@ -145,11 +146,11 @@ cd deploy; docker compose -f compose.yml -f compose.dev.yml up -d; cd ..
 tools\sim-esp32\run-integration.ps1
 ```
 
-It creates three throwaway node users with `dynsec-node-user.ps1` (dev-PC helper, password on a `docker exec` command line), runs `tests\test_integration.py` and removes the users. Covered: full protocol over real TLS (announce/state validated off the wire, cmd → state → ack, dedup replay, error ack, sensor interval), LWT on an unclean drop (flapping), unprovision, wrong/no credentials refused, and the ACL proof with an MQTT v5 probe: a node may publish on `home/v1/nodes/<own id>/…` and subscribe to its own `cmd`, but publishes to another node's `state` and `cmd` and to `perception/…` get reason code `0x87` (Not authorized), a subscription to another node's subtree is denied, and the hub-side observer never sees the denied payloads. Exit code 3 = Docker/broker not available (skipped).
+It creates three throwaway node users with `dynsec-node-user.ps1` (dev-PC helper, password on a `docker exec` command line), runs `tests\test_integration.py` and removes the users. Covered: full protocol over real TLS (announce/state validated off the wire, cmd → state → ack, dedup replay, error ack, sensor interval), LWT on an unclean drop (flapping) followed by an identical re-announce, unprovision, wrong/no credentials refused, and the ACL proof with an MQTT v5 probe: a node may publish on `home/v1/nodes/<own id>/…` and subscribe to its own `cmd`, but publishes to another node's `state` and `cmd` and to `perception/…` get reason code `0x87` (Not authorized), a subscription to another node's subtree is denied, and the hub-side observer never sees the denied payloads. Exit code 3 = Docker/broker not available (skipped).
 
 ## Limits / assumptions
 
 - No BLE, Wi-Fi or NTP phases; `ts` is the PC clock. The "no valid time, no TLS" rule of `mqtt.md` is not modelled.
-- MQTT 3.1.1 with a clean session (a cmd must never be queued for an offline node). A denied publish is only visible to the client under MQTT v5, so the ACL probe in the tests uses v5.
+- MQTT 3.1.1, clean session, `client_id == username == node_id` (a credentials file with another username is rejected). Nothing is queued while disconnected: publishes are dropped and fresh state goes out on reconnect. A denied publish is only visible to the client under MQTT v5, so the ACL probe in the tests uses v5.
 - Hub liveness is judged by the MQTT link only, not by whether device-hub is actually running.
 - `max_on_s` is supported on bool capabilities only; config rejects it elsewhere.

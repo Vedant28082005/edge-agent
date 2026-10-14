@@ -195,7 +195,13 @@ def test_lwt_fires_when_the_connection_drops_uncleanly(hub):
                 break
             time.sleep(0.1)
         assert b"offline" in seq and seq.count(b"online") >= 2, f"status sequence was {seq}"   # LWT, then back online
-        assert len(hub.topic(f"home/v1/nodes/{b}/announce")) == 1                              # not re-announced
+        end = time.time() + 5
+        while time.time() < end and len({p for p, _ in hub.topic(f"home/v1/nodes/{b}/announce")}) == 0:
+            time.sleep(0.1)
+        anns = [p for p, _ in hub.topic(f"home/v1/nodes/{b}/announce")]     # contract: announce on every connect
+        assert len(anns) >= 2 and len(set(anns)) == 1, "reconnect must re-announce an identical announce"
+        v = Validator()
+        v.validate("announce", json.loads(anns[0]))
         assert n_off >= 1
     finally:
         r.close()

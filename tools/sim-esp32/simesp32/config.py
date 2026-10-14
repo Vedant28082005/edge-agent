@@ -1,5 +1,6 @@
 """YAML -> NodeConfig. Builds the contract announce and applies the hub-enforced cross-field rules
 (capabilities.md) so a bad YAML fails at load time, not on the broker."""
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +84,7 @@ class CapConfig:
     boot_value: object = None
     failsafe_value: object = None
     max_on_s: int | None = None
+    settle_s: float | None = None
     generator: dict | None = None
     has_failsafe: bool = False
 
@@ -92,7 +94,7 @@ class CapConfig:
 
     def announce(self) -> dict:
         d = {"id": self.id, "kind": self.kind, "type": self.type}
-        for k in ("min", "max", "values", "unit", "interval_s", "max_on_s"):
+        for k in ("min", "max", "values", "unit", "interval_s", "max_on_s", "settle_s"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v
@@ -123,6 +125,7 @@ class NodeConfig:
     fw: str = "0.1.0-sim"
     failsafe_after_s: int = 60
     heartbeat_s: float = 60.0
+    dedup_size: int = 16             # contracts/mqtt.md: last 16 cmd_ids
     seed: int = 1
     endpoints: list = field(default_factory=list)
     faults: Faults = field(default_factory=Faults)
@@ -141,7 +144,7 @@ def _cap(raw: dict, where: str) -> CapConfig:
         raise ConfigError(f"{where}: capability '{cid}' is not in the vocabulary (capabilities.md)")
     kind, typ, _, _, fixed = VOCAB[cid]
     allowed = {"id", "min", "max", "values", "unit", "interval_s", "boot_value", "failsafe_value",
-               "max_on_s", "generator"}
+               "max_on_s", "settle_s", "generator"}
     extra = set(raw) - allowed
     if extra:
         raise ConfigError(f"{where}/{cid}: unknown keys {sorted(extra)}")
@@ -163,6 +166,9 @@ def _cap(raw: dict, where: str) -> CapConfig:
         c.has_failsafe = "failsafe_value" in raw
         c.failsafe_value = raw.get("failsafe_value")
         c.max_on_s = raw.get("max_on_s")
+        c.settle_s = raw.get("settle_s")
+        if c.settle_s is not None and not (isinstance(c.settle_s, (int, float)) and 1 <= c.settle_s <= 120):
+            raise ConfigError(f"{where}/{cid}: settle_s must be 1..120")
         if c.max_on_s and typ != "bool":
             raise ConfigError(f"{where}/{cid}: max_on_s is only supported on bool capabilities in the sim")
         if cid == "speed" and (c.min is None or c.max is None):
@@ -174,7 +180,7 @@ def _cap(raw: dict, where: str) -> CapConfig:
         if c.has_failsafe:
             _check_value(c, c.failsafe_value, lo, hi, f"{where}/{cid}.failsafe_value")
     else:
-        for k in ("boot_value", "failsafe_value", "max_on_s"):
+        for k in ("boot_value", "failsafe_value", "max_on_s", "settle_s"):
             if k in raw:
                 raise ConfigError(f"{where}/{cid}: {k} not allowed on a sensor")
         if "interval_s" not in raw:
@@ -219,6 +225,12 @@ def _endpoint(raw: dict, where: str) -> EndpointConfig:
     ids = [c.id for c in ep.caps]
     if len(set(ids)) != len(ids):
         raise ConfigError(f"{where}/{lid}: duplicate capability id")
+    for c in ep.caps:
+        if c.id == "position" and c.settle_s is None:
+            # worst case for a command: a full travel plus the relay dead time of a reversal, plus 1 s margin
+            c.settle_s = math.ceil(ep.travel_time_s + ep.interlock_s) + 1
+            if c.settle_s > 120:
+                raise ConfigError(f"{where}/{lid}: travel_time_s {ep.travel_time_s} gives settle_s {c.settle_s} > 120 (contract max)")
     return ep
 
 
@@ -227,12 +239,13 @@ def _node(raw: dict, i: int) -> NodeConfig:
     nid = raw.get("node_id")
     if not isinstance(nid, str) or not NODE_ID_RE.match(nid):
         raise ConfigError(f"{where}: node_id must match esp32-<12 hex>, got {nid!r}")
-    extra = set(raw) - {"node_id", "hw", "fw", "failsafe_after_s", "heartbeat_s", "seed", "endpoints", "faults"}
+    extra = set(raw) - {"node_id", "hw", "fw", "failsafe_after_s", "heartbeat_s", "dedup_size", "seed", "endpoints", "faults"}
     if extra:
         raise ConfigError(f"{where}: unknown keys {sorted(extra)}")
     n = NodeConfig(node_id=nid, hw=raw.get("hw", "esp32-devkit"), fw=raw.get("fw", "0.1.0-sim"),
                    failsafe_after_s=int(raw.get("failsafe_after_s", 60)),
-                   heartbeat_s=float(raw.get("heartbeat_s", 60)), seed=int(raw.get("seed", 1)),
+                   heartbeat_s=float(raw.get("heartbeat_s", 60)),
+                   dedup_size=int(raw.get("dedup_size", 16)), seed=int(raw.get("seed", 1)),
                    faults=Faults.from_dict(raw.get("faults")))
     n.endpoints = [_endpoint(e, nid) for e in raw.get("endpoints") or []]
     if not n.endpoints:
@@ -240,6 +253,8 @@ def _node(raw: dict, i: int) -> NodeConfig:
     ids = [e.local_id for e in n.endpoints]
     if len(set(ids)) != len(ids):
         raise ConfigError(f"{where}: duplicate local_id")
+    if n.dedup_size < 1:
+        raise ConfigError(f"{where}: dedup_size must be >= 1")
     return n
 
 

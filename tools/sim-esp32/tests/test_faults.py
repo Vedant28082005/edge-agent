@@ -85,7 +85,8 @@ def test_flapping_drops_unclean_then_reconnects_repeatedly(make_rig):
     assert r.tr.connected is True and r.bus.raw("status")[-1] == b"online"
     r.run(14)
     assert r.bus.raw("status").count(b"offline") >= 2
-    assert len(r.bus.on_topic("announce")) == 1                                 # not a reboot
+    anns = r.bus.raw("announce")
+    assert len(anns) >= 2 and len(set(anns)) == 1                               # re-announced identically on every connect
     assert r.node.stats["violations"] == 0
 
 

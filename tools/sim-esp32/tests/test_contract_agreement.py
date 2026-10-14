@@ -79,3 +79,38 @@ def test_config_rejects_what_the_hub_would(bad):
     from simesp32.config import _node
     with pytest.raises(ConfigError):
         _node(bad, 0)
+
+
+def _cover(extra_sim=None, cap_extra=None):
+    from simesp32.config import _node
+    cap = {"id": "position", "boot_value": 0}
+    cap.update(cap_extra or {})
+    return _node({"node_id": "esp32-000000000002", "endpoints": [
+        {"local_id": "c1", "type": "cover", "sim": extra_sim or {}, "capabilities": [cap]}]}, 0)
+
+
+@pytest.mark.parametrize("travel,interlock,expected", [(12, 0.5, 14), (45, 0.5, 47), (1, 0, 2), (10.2, 0.5, 12)])
+def test_settle_s_derived_from_travel_time(validator, travel, interlock, expected):
+    n = _cover({"travel_time_s": travel, "interlock_s": interlock})
+    pos = n.announce()["endpoints"][0]["capabilities"][0]
+    assert pos["settle_s"] == expected
+    validator.validate("announce", n.announce())
+
+
+def test_settle_s_explicit_override_and_limits():
+    assert _cover({"travel_time_s": 10}, {"settle_s": 30}).announce()["endpoints"][0]["capabilities"][0]["settle_s"] == 30
+    with pytest.raises(ConfigError):
+        _cover({"travel_time_s": 200})                       # derived value would exceed the contract maximum of 120
+    with pytest.raises(ConfigError):
+        _cover({}, {"settle_s": 0})
+
+
+def test_settle_s_not_allowed_on_sensors():
+    from simesp32.config import _node
+    with pytest.raises(ConfigError):
+        _node({"node_id": "esp32-000000000003", "endpoints": [{"local_id": "t", "type": "sensor", "capabilities": [
+            {"id": "temperature", "interval_s": 5, "settle_s": 3}]}]}, 0)
+
+
+def test_dedup_size_default_is_16():
+    assert _cover().dedup_size == 16

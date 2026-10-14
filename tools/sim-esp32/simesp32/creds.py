@@ -21,15 +21,22 @@ def read_cred_file(path: Path) -> tuple:
 
 
 def credentials_for(node_id: str, creds_dir, single_node: bool, env=None) -> tuple:
+    """Returns (username, password). contracts/mqtt.md: client_id == username == node_id, so the username is
+    always node_id; a credentials file naming another user is rejected rather than silently used."""
     env = os.environ if env is None else env
+    pw = None
     if creds_dir:
         f = Path(creds_dir) / f"{node_id}.cred"
         if f.exists():
-            return read_cred_file(f)
+            user, pw = read_cred_file(f)
+            if user != node_id:
+                raise CredError(f"{f.name}: username must equal the node_id (contract: client_id == username == node_id)")
     key = "SIM_MQTT_PASSWORD_" + node_id.replace("-", "_").upper()
-    if key in env:
-        return env.get("SIM_MQTT_USERNAME_" + node_id.replace("-", "_").upper(), node_id), env[key]
-    if single_node and "SIM_MQTT_PASSWORD" in env:
-        return env.get("SIM_MQTT_USERNAME", node_id), env["SIM_MQTT_PASSWORD"]
-    raise CredError(f"no credentials for {node_id}: provide <creds-dir>/{node_id}.cred, or env {key}"
-                    + (" / SIM_MQTT_PASSWORD" if single_node else ""))
+    if pw is None and key in env:
+        pw = env[key]
+    if pw is None and single_node and "SIM_MQTT_PASSWORD" in env:
+        pw = env["SIM_MQTT_PASSWORD"]
+    if pw is None:
+        raise CredError(f"no credentials for {node_id}: provide <creds-dir>/{node_id}.cred, or env {key}"
+                        + (" / SIM_MQTT_PASSWORD" if single_node else ""))
+    return node_id, pw

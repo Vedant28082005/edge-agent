@@ -68,9 +68,20 @@ def test_dedup_remembers_failures_too(rig):
 
 def test_dedup_cache_is_bounded(rig):
     first = rig.cmd("l1", {"brightness": 1})
-    for i in range(70):
-        rig.cmd("l1", {"brightness": i % 100})
-    assert first not in rig.node.dedup and len(rig.node.dedup) == 64
+    for i in range(15):
+        rig.cmd("l1", {"brightness": i + 2})
+    assert first in rig.node.dedup and len(rig.node.dedup) == 16        # contract: last 16 cmd_ids
+    rig.cmd("l1", {"brightness": 99})
+    assert first not in rig.node.dedup and len(rig.node.dedup) == 16
+    n = rig.node.stats["cmds_applied"]
+    rig.raw_cmd({"cmd_id": first, "endpoint": "l1", "set": {"brightness": 1}, "by": "agent"})   # evicted: applied again
+    assert rig.node.stats["cmds_applied"] == n + 1
+
+
+def test_dedup_size_is_configurable(make_rig):
+    r = make_rig(dedup_size=3)
+    ids = [r.cmd("l1", {"brightness": i}) for i in range(4)]
+    assert list(r.node.dedup) == ids[1:]
 
 
 @pytest.mark.parametrize("endpoint,sets,err", [
@@ -187,14 +198,61 @@ endpoints:
     assert len(r.bus.on_topic("state")) == n + 1
 
 
-def test_reconnect_republishes_online_and_state_but_not_announce(rig):
+def test_every_connect_runs_the_lifecycle_in_order_with_identical_announce(rig):
+    def kinds(msgs):
+        return [t.rsplit("/", 1)[1] for _n, t, *_ in msgs]
+    first = list(rig.bus.published)
+    assert kinds(first) == ["status", "announce", "state"] and rig.tr.subscriptions == [BASE + "cmd"]
     rig.tr.drop(2)
-    assert rig.bus.raw("status")[-1] == b"offline"        # LWT fired by the broker
-    n_state = len(rig.bus.on_topic("state"))
+    assert rig.bus.raw("status")[-1] == b"offline"                      # LWT fired by the broker
+    n = len(rig.bus.published)
     rig.run(2.5)
-    assert rig.bus.raw("status")[-1] == b"online"
-    assert len(rig.bus.on_topic("state")) > n_state
-    assert len(rig.bus.on_topic("announce")) == 1
+    again = rig.bus.published[n:]
+    assert kinds(again)[:3] == ["status", "announce", "state"]            # status, announce, (subscribe), state
+    assert again[0][2] == b"online"
+    assert rig.tr.subscriptions == [BASE + "cmd", BASE + "cmd"]           # re-subscribed (clean session)
+    anns = rig.bus.raw("announce")
+    assert len(anns) == 2 and anns[0] == anns[1]                          # byte-identical re-announce
+    assert all(m[3] == 1 and m[4] is True for m in rig.bus.published if m[1].endswith("/announce"))
+
+
+def test_subscribe_happens_between_announce_and_state(rig):
+    order = []
+    orig_sub, orig_pub = rig.tr.subscribe, rig.tr.publish
+    rig.tr.subscribe = lambda t, q=1: (order.append("subscribe"), orig_sub(t, q))[1]
+    rig.tr.publish = lambda t, p, q=1, r=False: (order.append(t.rsplit("/", 1)[1]), orig_pub(t, p, q, r))[1]
+    rig.tr.drop(1)
+    order.clear()
+    rig.run(1.5)
+    assert order[:4] == ["status", "announce", "subscribe", "state"]
+
+
+def test_no_publish_is_queued_while_disconnected(rig):
+    rig.tr.drop(10)
+    n = len(rig.bus.published)
+    rig.node.values["ch1"]["speed"] = 3
+    rig.node.stats["acks_sent"] = 0
+    rig.raw_cmd({"cmd_id": str(uuid.uuid4()), "endpoint": "l1", "set": {"brightness": 5}, "by": "agent"})   # not delivered
+    rig.run(8)                                                            # sensor intervals fire while offline
+    assert len(rig.bus.published) == n                                    # nothing sent, nothing buffered
+    rig.run(3)
+    after = rig.bus.published[n:]
+    assert [m[1].rsplit("/", 1)[1] for m in after[:3]] == ["status", "announce", "state"]
+    assert not any(m[1].endswith("/ack") for m in after)
+
+
+def test_paho_transport_uses_clean_session_and_node_id_as_client_id():
+    import inspect
+    from simesp32.transport import PahoTransport
+    src = inspect.getsource(PahoTransport.__init__)
+    assert "client_id=node_id" in src and "clean_session=True" in src
+
+
+def test_cover_announces_settle_s_derived_from_travel_time(rig, validator):
+    ann = rig.bus.on_topic("announce")[0]
+    pos = [c for e in ann["endpoints"] if e["local_id"] == "c1" for c in e["capabilities"]][0]
+    assert pos["settle_s"] == 12                                          # ceil(10 s travel + 0.5 s interlock) + 1
+    validator.validate("announce", ann)
 
 
 def test_every_published_message_was_schema_validated(rig):

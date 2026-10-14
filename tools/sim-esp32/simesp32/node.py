@@ -17,7 +17,6 @@ from .schemas import SchemaViolation, Validator
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 EP_RE = re.compile(r"^[a-z0-9_]{1,16}$")
-DEDUP_SIZE = 64
 PREFIX = "home/v1/nodes/"
 
 
@@ -50,7 +49,6 @@ class Node:
         self.lost_since = None
         self.failsafe_done = False
         self.connected_at = None
-        self.announced = False
         self.provisioned = True
         self.stopped = False
         self.identify_until = None
@@ -103,10 +101,9 @@ class Node:
             self.lost_since = None
             self.failsafe_done = False
             self.connected_at = now
+            # contracts/mqtt.md "Connect lifecycle": on EVERY successful connect, in this order
             self._publish_status("online")
-            if not self.announced:                       # announce is per boot, not per reconnect
-                self._publish_announce()
-                self.announced = True
+            self._publish_announce()
             self.t.subscribe(self.base + "cmd", 1)
             self._publish_state()
 
@@ -202,7 +199,7 @@ class Node:
             return
         ack = self._execute(cid, obj)
         self.dedup[cid] = ack
-        while len(self.dedup) > DEDUP_SIZE:
+        while len(self.dedup) > self.cfg.dedup_size:
             self.dedup.popitem(last=False)
         self._send_ack(ack)
         if ack["ok"] and obj.get("cmd") == "unprovision":

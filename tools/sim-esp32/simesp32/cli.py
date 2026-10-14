@@ -25,6 +25,7 @@ def build_parser():
     p.add_argument("--creds-dir", default=os.environ.get("SIM_MQTT_CREDS_DIR"),
                    help="folder with <node_id>.cred files (username=/password= lines), as written by "
                         "deploy/mosquitto/dynsec-node-user.ps1. Env alternatives: SIM_MQTT_PASSWORD[_<NODE_ID>]")
+    p.add_argument("--dedup-size", type=int, default=None, help="cmd_id dedup ring size for every node (default: YAML value or 16)")
     p.add_argument("--contracts", default=None, help="contracts/ folder (default: <repo>/contracts)")
     p.add_argument("--only", action="append", default=[], help="start only these node_ids (repeatable)")
     p.add_argument("--fault", action="append", default=[], metavar="[NODE:]KEY=VALUE",
@@ -62,6 +63,11 @@ def main(argv=None):
             if not nodes:
                 raise ConfigError("--only matched no node")
         apply_cli_faults(nodes, args.fault)
+        if args.dedup_size is not None:
+            if args.dedup_size < 1:
+                raise ConfigError("--dedup-size must be >= 1")
+            for n in nodes:
+                n.dedup_size = args.dedup_size
         validator = Validator(Path(args.contracts) if args.contracts else None)
         for n in nodes:                                   # the announce must satisfy the schema unless faulted on purpose
             if n.faults.malformed_announce is None:

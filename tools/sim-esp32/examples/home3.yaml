@@ -7,6 +7,7 @@ nodes:
     fw: 0.1.0-sim
     failsafe_after_s: 60          # 0 = keep last values when the hub is lost
     heartbeat_s: 60
+    dedup_size: 16                # cmd_ids remembered for ack replay (contract: 16)
     endpoints:
       - local_id: ch1
         type: fan
@@ -28,7 +29,7 @@ nodes:
         type: cover
         sim: {travel_time_s: 12, interlock_s: 0.5}     # full 0..100 travel and relay dead time on reversal
         capabilities:
-          - {id: position, min: 0, max: 100, boot_value: 0, failsafe_value: 0}
+          - {id: position, min: 0, max: 100, boot_value: 0, failsafe_value: 0}   # settle_s is announced automatically: ceil(12 + 0.5) + 1 = 14
       - local_id: t1
         type: sensor
         capabilities:
