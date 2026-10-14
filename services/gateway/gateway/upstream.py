@@ -15,7 +15,7 @@ log = logging.getLogger("gateway.upstream")
 class UpstreamError(Exception):
     """Network failure, timeout or an unusable reply. `status` is the HTTP status the gateway answers with."""
 
-    def __init__(self, service: str, status: int = 502, code: str = "upstream_unavailable") -> None:
+    def __init__(self, service: str, status: int = 502, code: str = "upstream_error") -> None:
         super().__init__(f"{service}: {code}")
         self.service, self.status, self.code = service, status, code
 
@@ -95,11 +95,13 @@ class HubClient(JsonClient):
 
 
 class AgentClient(JsonClient):
-    def __init__(self, base_url: str, timeout_s: float = 30.0, transport=None) -> None:
-        super().__init__("agent", base_url, timeout_s, None, transport)
+    """agent-internal.yaml. Every call (including /v1/health and /v1/events) carries the agent-api secret."""
+
+    def __init__(self, base_url: str, secret: str | None, timeout_s: float = 30.0, transport=None) -> None:
+        super().__init__("agent", base_url, timeout_s, {"X-Service-Secret": secret} if secret else {}, transport)
 
     async def deliver_confirmation(self, request_id: str, body: dict) -> bool:
-        """PROVISIONAL (contract gap, see README 'decisions'): hand an approved/declined decision to the agent
-        executor server-side. The token travels only in this loopback request body."""
+        """POST /v1/confirmations/{request_id}: 202 = accepted. Anything else (404, 409 action_hash_mismatch, 401, 5xx,
+        network) is a failed hand-off. The token travels only in this loopback request body."""
         status, _ = await self.call("POST", f"/v1/confirmations/{request_id}", json=body)
-        return status in (200, 202, 204)
+        return status == 202

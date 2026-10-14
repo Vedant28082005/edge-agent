@@ -64,6 +64,11 @@ class MediaStore:
         self._items[ref] = Item(user_id, kind, data, content_type, text, self.clock() + self.ttl)
         return ref
 
+    def has(self, ref: str, user_id: str, kind: str) -> bool:
+        self._sweep()
+        it = self._items.get(ref)
+        return it is not None and it.user_id == user_id and it.kind == kind
+
     def take(self, ref: str, user_id: str, kind: str) -> Item | None:
         """Return and delete (single use). A ref of another user is indistinguishable from an unknown one."""
         self._sweep()

@@ -61,6 +61,12 @@ def build(gw, op: str, role: str | None) -> dict:
         "updateMyMemory": ("PUT", "/memory/m1", {"json": {"text": "likes coffee"}}, 200),
         "deleteMyMemory": ("DELETE", "/memory/m1", {}, 204),
         "systemHealth": ("GET", "/system/health", {}, 200),
+        "createWsTicket": ("POST", "/ws/ticket", {}, 200),
+        "adminGetSceneAssignments": ("GET", "/admin/scenes/sc_00000001/assignments", {}, 200),
+        "adminSetSceneAssignments": ("PUT", "/admin/scenes/sc_00000001/assignments", {"json": {"user_ids": [gw.uid("guest")]}}, 200),
+        "adminListWifiProfiles": ("GET", "/admin/wifi-profiles", {}, 200),
+        "adminCreateWifiProfile": ("POST", "/admin/wifi-profiles", {"json": {"name": "office", "ssid": "Office", "password": "office-pass-123"}}, 201),
+        "adminDeleteWifiProfile": ("DELETE", None, {}, 204),
         "adminCreateProvisionSession": ("POST", "/admin/provision-sessions", {"json": {
             "node_id": NODE, "wifi": {"ssid": "home", "password": "wifi-pass-12345"}}}, 201),
         "adminListNodes": ("GET", "/admin/nodes", {}, 200),
@@ -84,6 +90,9 @@ def build(gw, op: str, role: str | None) -> dict:
         url = f"/confirmations/{pending_request(gw, uid)}/decline"
     elif op == "retryConfirmation":
         url = f"/confirmations/{pending_request(gw, uid, 'declined')}/retry"
+    elif op == "adminDeleteWifiProfile":
+        gw.ctx.profiles.put("tmp-profile", "Tmp", "tmp-wifi-pass-1")
+        url = "/admin/wifi-profiles/tmp-profile"
     elif op in ("adminPatchUser", "adminDeleteUser"):
         url = f"/admin/users/{new_user(gw)}"
     return {"method": method, "url": url, "kw": kw, "status": status}

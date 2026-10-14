@@ -13,7 +13,7 @@ OPEN = {"login", "refresh"}                 # no auth at all
 ALLOWED = {
     "listDevices": ALL, "setDeviceState": NO_GUEST, "listScenes": ALL, "createScene": NO_GUEST, "updateScene": NO_GUEST,
     "deleteScene": NO_GUEST, "runScene": ALL, "mintConfirmation": NO_GUEST, "declineConfirmation": ALL,
-    "retryConfirmation": NO_GUEST, "chat": ALL, "uploadVoice": ALL, "uploadImage": ALL, "listMyMemories": ALL,
+    "retryConfirmation": NO_GUEST, "createWsTicket": ALL, "chat": ALL, "uploadVoice": ALL, "uploadImage": ALL, "listMyMemories": ALL,
     "updateMyMemory": NO_GUEST, "deleteMyMemory": NO_GUEST, "systemHealth": ALL,
     **{op["operationId"]: ADMIN for _, _, op in PUBLIC if op.get("x-required-role") == "admin"},
 }
@@ -82,6 +82,27 @@ def test_member_edits_and_deletes_own_scenes_only(gw):
     assert gw.pub.put(f"/scenes/{other}", json=SCENE_BODY, headers=gw.h("admin")).status_code == 200
     assert gw.pub.delete(f"/scenes/{other}", headers=gw.h("admin")).status_code == 204
     assert gw.pub.put("/scenes/sc_ffffffff", json=SCENE_BODY, headers=gw.h("admin")).status_code == 404
+
+
+def test_scene_assignment_admin_routes(gw):
+    a, guest = gw.h("admin"), gw.uid("guest")
+    assert gw.pub.get("/admin/scenes/sc_00000001/assignments", headers=a).json() == {"user_ids": []}
+    assert gw.pub.get("/admin/scenes/sc_ffffffff/assignments", headers=a).status_code == 404
+    assert gw.pub.put("/admin/scenes/sc_ffffffff/assignments", json={"user_ids": []}, headers=a).status_code == 404
+    for bad in ([gw.uid("member")], [gw.uid("admin")], ["u_nope"], [guest, guest]):
+        assert gw.pub.put("/admin/scenes/sc_00000001/assignments", json={"user_ids": bad}, headers=a).status_code == 400, bad
+    assert gw.pub.put("/admin/scenes/sc_00000001/assignments", json={"user_ids": [guest]}, headers=a).json() == {"user_ids": [guest]}
+    assert gw.pub.post("/scenes/sc_00000001/run", headers=gw.h("guest")).status_code == 200
+    assert gw.pub.put("/admin/scenes/sc_00000001/assignments", json={"user_ids": []}, headers=a).json() == {"user_ids": []}
+    assert gw.pub.post("/scenes/sc_00000001/run", headers=gw.h("guest")).status_code == 403          # whole set replaced
+    gw.pub.put("/admin/scenes/sc_00000001/assignments", json={"user_ids": [guest]}, headers=a)
+    gw.pub.delete(f"/admin/users/{guest}", headers=a)                                              # a deleted user drops out
+    assert gw.ctx.db.one("SELECT COUNT(*) c FROM scene_assignments")["c"] == 0
+    gw.pub.put("/admin/scenes/sc_00000003/assignments", json={"user_ids": []}, headers=a)
+    s = gw.pub.post("/scenes", json=SCENE_BODY, headers=a).json()["scene_id"]
+    gw.ctx.db.run("INSERT INTO scene_assignments(user_id,scene_id) VALUES(?,?)", (gw.uid("admin"), s))
+    gw.pub.delete(f"/scenes/{s}", headers=a)
+    assert gw.ctx.db.one("SELECT COUNT(*) c FROM scene_assignments WHERE scene_id=?", (s,))["c"] == 0
 
 
 def test_guest_runs_assigned_scenes_only_and_sees_only_those(gw):

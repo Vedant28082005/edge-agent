@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, FastAPI, File, Request, Response, Upload
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import policy
@@ -25,7 +25,8 @@ from .auth import AuthError, User
 from .confirmations import ConfirmError
 from .context import Ctx
 from .media import AUDIO_TYPES, sniff_audio, sniff_image
-from .security import SECRETS, hash_password, new_id
+from .events import Event
+from .security import SECRETS, hash_password, new_id, sha256_hex
 from .upstream import UpstreamError
 
 log = logging.getLogger("gateway.api")
@@ -77,10 +78,42 @@ class SetIn(BaseModel):
     confirmation_token: str | None = Field(default=None, max_length=256)
 
 
+EndpointType = Literal["light", "fan", "outlet", "lock", "cover", "thermostat", "sensor", "generic"]
+
+
+class SceneTargetFixed(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    endpoint_id: str = Field(pattern=EP_RE.pattern)
+
+
+class SceneTargetSelector(BaseModel):
+    """Selector resolved at run time; fields combine with AND. At least one field, no unknown keys."""
+    model_config = ConfigDict(extra="forbid")
+    room: str | None = Field(default=None, max_length=48)
+    type: EndpointType | None = None
+    tag: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,24}$")
+
+    @model_validator(mode="after")
+    def _non_empty(self):
+        if self.room is None and self.type is None and self.tag is None:
+            raise ValueError("empty selector")
+        return self
+
+
+class SceneActionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: Union[SceneTargetFixed, SceneTargetSelector]
+    capability: str = Field(max_length=64)
+    value: Scalar
+
+
 class SceneIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=48)
-    actions: list[dict] = Field(min_length=1, max_length=50)
+    actions: list[SceneActionIn] = Field(min_length=1, max_length=50)
+
+    def action_dicts(self) -> list[dict]:
+        return [a.model_dump(exclude_none=True) for a in self.actions]
 
 
 class RunIn(BaseModel):
@@ -114,6 +147,18 @@ class ChatIn(BaseModel):
     text: str | None = Field(default=None, max_length=4000)
     audio_ref: str | None = Field(default=None, max_length=64)
     image_refs: list[str] | None = Field(default=None, max_length=4)
+
+
+class AssignIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_ids: list[Annotated[str, Field(max_length=64)]] = Field(max_length=64)
+
+
+class WifiProfileIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=64)
+    ssid: str = Field(min_length=1, max_length=32)
+    password: str = Field(max_length=64)
 
 
 class MemoryIn(BaseModel):
@@ -223,7 +268,8 @@ def create_public_app(ctx: Ctx) -> FastAPI:
 
     @app.exception_handler(UpstreamError)
     async def _up_err(_: Request, e: UpstreamError):
-        return jerr(e.status, e.code, f"{e.service} unavailable")
+        code = "vision_unavailable" if e.service == "vision-node" and e.status != 504 else             ("upstream_timeout" if e.status == 504 else "upstream_error")
+        return jerr(504 if e.status == 504 else 502, code, f"{e.service} unavailable")
 
     @app.exception_handler(RequestValidationError)
     async def _val_err(_: Request, e: RequestValidationError):
@@ -242,10 +288,10 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         cap = upload_caps.get(request.url.path)
         if cap is not None and request.method == "POST":       # refuse oversized bodies before parsing (and chunked ones)
             cl = request.headers.get("content-length", "")
-            if not cl.isdigit():
-                return jerr(411, "length_required")
-            if int(cl) > cap + 65536:
+            if not cl.isdigit() or int(cl) > cap + 65536:        # chunked uploads are refused too: the size must be known up front
                 return jerr(413, "too_large", f"max {cap} bytes")
+        elif request.method in ("POST", "PUT", "PATCH") and request.headers.get("content-length", "0").isdigit()                 and int(request.headers.get("content-length", "0")) > 262144:
+            return jerr(413, "too_large", "request body too large")
         resp = await call_next(request)
         if request.url.path.startswith(("/auth", "/admin", "/confirmations")):
             resp.headers.setdefault("Cache-Control", "no-store")
@@ -270,8 +316,16 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         status, body = await ctx.hub.hub(method, path, actor=u.user_id if u else None, **kw)
         if status in (401, 403):                       # our own service credential is wrong: not the user's problem
             log.error("device-hub rejected the gateway service secret (HTTP %s)", status)
-            raise ApiError(502, "hub_auth_failed", "device-hub rejected the gateway credential")
+            raise ApiError(502, "upstream_error", "device-hub rejected the gateway credential")
+        if status >= 500:
+            raise ApiError(504 if status == 504 else 502, "upstream_timeout" if status == 504 else "upstream_error",
+                           "device-hub error")
         return status, body
+
+    def limit(name: str, u: User) -> None:
+        ra = ctx.limiter.hit(name, u.user_id)
+        if ra:
+            raise ApiError(429, "rate_limited", "too many requests", {"Retry-After": str(ra)})
 
     def fwd(status: int, body) -> Response:
         if body is None:
@@ -328,7 +382,8 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         ctx.db.audit(u.user_id, "device.set", endpoint_id, {"capability": body.capability, "ok": bool(res.get("ok")),
                                                             "error": res.get("error")})
         if not res.get("ok") and res.get("error") in ("confirmation_required", "offline"):
-            return fwd(409, res)
+            code = "endpoint_offline" if res["error"] == "offline" else "confirmation_required"
+            return jerr(409, code, "nothing was executed")
         return res
 
     # ================================================================== scenes
@@ -337,16 +392,6 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         return {e["endpoint_id"]: e.get("room", "") for e in body} if status == 200 and isinstance(body, list) else {}
 
     async def check_scene_input(u: User, actions: list[dict]) -> None:
-        for a in actions:
-            t = a.get("target")
-            ok_shape = isinstance(a, dict) and isinstance(t, dict) and isinstance(a.get("capability"), str) \
-                and isinstance(a.get("value"), (bool, int, float, str)) and set(a) <= {"target", "capability", "value"}
-            if ok_shape and "endpoint_id" in t:
-                ok_shape = set(t) == {"endpoint_id"} and isinstance(t["endpoint_id"], str) and bool(EP_RE.match(t["endpoint_id"]))
-            elif ok_shape:
-                ok_shape = bool(t) and set(t) <= {"room", "type", "tag"} and all(isinstance(v, str) for v in t.values())
-            if not ok_shape:
-                raise ApiError(400, "bad_request", "invalid scene action")
         if u.is_admin:
             return
         rooms = policy.action_rooms(actions, await room_map())
@@ -365,8 +410,9 @@ def create_public_app(ctx: Ctx) -> FastAPI:
     async def create_scene(body: SceneIn, u: User = Depends(authed)):
         if u.role == "guest":
             raise ApiError(403, "forbidden")
-        await check_scene_input(u, body.actions)
-        status, res = await hub("POST", "/scenes", u, json={"name": body.name, "actions": body.actions, "owner": u.user_id})
+        acts = body.action_dicts()
+        await check_scene_input(u, acts)
+        status, res = await hub("POST", "/scenes", u, json={"name": body.name, "actions": acts, "owner": u.user_id})
         if status == 201:
             ctx.db.audit(u.user_id, "scene.create", res.get("scene_id", "") if isinstance(res, dict) else "")
         return fwd(status, res)
@@ -386,8 +432,9 @@ def create_public_app(ctx: Ctx) -> FastAPI:
     @r.put("/scenes/{scene_id}")
     async def update_scene(scene_id: str, body: SceneIn, u: User = Depends(authed)):
         await own_or_admin(u, scene_id)
-        await check_scene_input(u, body.actions)
-        status, res = await hub("PUT", f"/scenes/{scene_id}", u, json={"name": body.name, "actions": body.actions})
+        acts = body.action_dicts()
+        await check_scene_input(u, acts)
+        status, res = await hub("PUT", f"/scenes/{scene_id}", u, json={"name": body.name, "actions": acts})
         if status == 200:
             ctx.db.audit(u.user_id, "scene.update", scene_id)
         return fwd(status, res)
@@ -421,6 +468,7 @@ def create_public_app(ctx: Ctx) -> FastAPI:
     # ================================================================== confirmations
     @r.post("/confirmations")
     async def mint(body: MintIn, u: User = Depends(authed)):
+        limit("confirm", u)
         if (body.request_id is None) == (body.action is None):
             raise ApiError(400, "bad_request", "send exactly one of request_id or action")
         return await ctx.confirm.approve(u, body.request_id, dump(body.action) if body.action else None)
@@ -432,30 +480,38 @@ def create_public_app(ctx: Ctx) -> FastAPI:
 
     @r.post("/confirmations/{request_id}/retry", status_code=202)
     async def retry(request_id: str, u: User = Depends(authed)):
+        limit("confirm", u)
         return {"request_id": await ctx.confirm.retry(u, request_id)}
 
     # ================================================================== chat / voice / images / memory
+    async def agent_json(method: str, path: str, **kw):
+        status, body = await ctx.agent.call(method, path, **kw)
+        if status in (401, 403) or status >= 500:
+            raise ApiError(504 if status == 504 else 502, "upstream_timeout" if status == 504 else "upstream_error", "agent error")
+        return status, body
+
     @r.post("/chat")
     async def chat(body: ChatIn, u: User = Depends(authed)):
+        limit("chat", u)
         if not (body.text or body.audio_ref or body.image_refs):
             raise ApiError(400, "bad_request", "text, audio_ref or image_refs required")
+        refs = [(body.audio_ref, "voice")] if body.audio_ref else []
+        refs += [(x, "image") for x in body.image_refs or []]
+        if not all(ctx.media.has(ref, u.user_id, kind) for ref, kind in refs) or len({x for x, _ in refs}) != len(refs):
+            raise ApiError(400, "bad_media_ref", "unknown, expired, used or foreign media reference")
         text = body.text
-        if body.audio_ref:
+        if body.audio_ref:                                   # voice is a transcript by the time it reaches the agent
             a = ctx.media.take(body.audio_ref, u.user_id, "voice")
-            if a is None:
-                raise ApiError(400, "unknown_audio_ref")
-            text = (text + "\n" if text else "") + (a.text or "")
+            text = ((text + "\n") if text else "") + (a.text or "")
             text = text[:4000]
         images = []
         for ref in body.image_refs or []:
-            it = ctx.media.take(ref, u.user_id, "image")           # single use: gone from memory after this call
-            if it is None:
-                raise ApiError(400, "unknown_image_ref")
-            images.append({"ref": ref, "content_type": it.content_type, "data_b64": base64.b64encode(it.data).decode()})
+            it = ctx.media.take(ref, u.user_id, "image")     # single use: gone from memory after this call
+            images.append({"ref": ref, "media_type": it.content_type, "data_b64": base64.b64encode(it.data).decode()})
         client_sid = body.session_id or new_id("s_")
-        payload = {"user_id": u.user_id, "session_id": f"{u.user_id}:{client_sid}",       # sessions are per user
-                   **({"text": text} if text else {}), **({"audio_ref": body.audio_ref} if body.audio_ref else {}),
-                   **({"image_refs": [i["ref"] for i in images], "images": images} if images else {})}
+        # agent-internal.yaml ChatRequest: exactly these fields; session ids are per user and at most 64 chars
+        payload = {"user_id": u.user_id, "role": u.role, "session_id": "s_" + sha256_hex(f"{u.user_id}\0{client_sid}")[:48],
+                   **({"text": text} if text else {}), **({"images": images} if images else {})}
         cm = ctx.agent.stream("POST", "/v1/chat", json=payload, headers={"Accept": "text/event-stream"})
         try:
             resp = await cm.__aenter__()
@@ -467,9 +523,15 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             data = await resp.aread()
             await cm.__aexit__(None, None, None)
             try:
-                return fwd(resp.status_code if resp.status_code < 500 else 502, json.loads(data))
+                err = json.loads(data)
             except ValueError:
-                raise ApiError(502, "agent_error")
+                err = {}
+            if resp.status_code == 429:                       # agent busy / budget exceeded
+                raise ApiError(429, "rate_limited", "the agent is busy", {"Retry-After": resp.headers.get("retry-after", "5")})
+            if resp.status_code == 400:
+                return fwd(400, {"error": "bad_request", "message": str((err or {}).get("message", ""))[:200]})
+            raise ApiError(504 if resp.status_code == 504 else 502, "upstream_timeout" if resp.status_code == 504 else "upstream_error",
+                           "agent error")
 
         async def gen():
             frame: list[str] = []
@@ -490,53 +552,45 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             "Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Session-Id": client_sid})
 
     def inspect(frame: list[str], u: User, sid: str) -> None:
-        """Look at forwarded SSE frames: remember confirmation requests, mirror late results to the user's sockets."""
+        """Look at forwarded SSE frames: remember confirmation requests (and show them on the user's other sockets)."""
         ev, data = None, []
         for ln in frame:
             if ln.startswith("event:"):
                 ev = ln[6:].strip()
             elif ln.startswith("data:"):
                 data.append(ln[5:].lstrip(" "))
-        if ev not in ("confirmation_request", "async_result") or not data:
+        if ev != "confirmation_request" or not data:
             return
         try:
             d = json.loads("\n".join(data))
         except ValueError:
             return
-        if not isinstance(d, dict):
-            return
-        from .events import Event
-        if ev == "confirmation_request":
-            ctx.confirm.register_request(u.user_id, sid, d)
+        if isinstance(d, dict) and ctx.confirm.register_request(u.user_id, sid, d):
             ctx.bc.publish(Event("confirmation_request", {k: d.get(k) for k in
                                  ("request_id", "summary", "action", "action_hash", "expires_in_s")}, user_id=u.user_id))
-        else:
-            ctx.bc.publish(Event("async_result", {k: d.get(k) for k in ("ref", "kind", "text", "latency_ms")}, user_id=u.user_id))
 
-    async def read_upload(f: UploadFile, limit: int) -> bytes:
-        data = await f.read(limit + 1)
-        if len(data) > limit:
-            raise ApiError(413, "too_large", f"max {limit} bytes")
+    async def read_upload(f: UploadFile, limit_: int) -> bytes:
+        data = await f.read(limit_ + 1)
+        if len(data) > limit_:
+            raise ApiError(413, "too_large", f"max {limit_} bytes")
         if not data:
             raise ApiError(400, "bad_request", "empty upload")
         return data
 
     @r.post("/voice")
     async def voice(audio: UploadFile = File(...), u: User = Depends(authed)):
-        ct = (audio.content_type or "").split(";")[0].strip().lower()
-        if ct not in AUDIO_TYPES and ct != "application/octet-stream":
-            raise ApiError(415, "unsupported_media_type", "wav, webm, m4a or aac only")
+        limit("voice", u)
         data = await read_upload(audio, cfg.max_audio_bytes)
-        if not sniff_audio(data):
-            raise ApiError(415, "unsupported_media_type", "not a recognised audio container")
-        status, res = await ctx.vision.call("POST", "/transcribe", files={"audio": (audio.filename or "audio", data, ct)})
+        if not sniff_audio(data):                            # the container is sniffed; the Content-Type is not trusted
+            raise ApiError(415, "unsupported_media_type", "wav, webm, m4a or aac only")
+        status, res = await ctx.vision.call("POST", "/transcribe", files={"audio": (audio.filename or "audio", data, "application/octet-stream")})
         del data
         if status != 200 or not isinstance(res, dict):
-            raise ApiError(503 if status in (429, 503) else 502, "vision_unavailable")
+            raise ApiError(502, "vision_unavailable", "vision-node could not transcribe")
         text = str(res.get("text") or "")[:4000]
-        ref = ctx.media.put(u.user_id, "voice", None, ct, text)          # transcript only; the audio is already dropped
+        ref = ctx.media.put(u.user_id, "voice", None, "text/plain", text)  # transcript only; the audio is already dropped
         if ref is None:
-            raise ApiError(429, "too_many_uploads")
+            raise ApiError(429, "too_many_uploads", "too many held uploads", {"Retry-After": str(cfg.media_ttl_s)})
         return {"audio_ref": ref, "text": text}
 
     @r.post("/images")
@@ -547,28 +601,29 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             raise ApiError(415, "unsupported_media_type", "jpeg, png or webp only")
         ref = ctx.media.put(u.user_id, "image", data, ct)                 # memory only, short TTL, removed after use
         if ref is None:
-            raise ApiError(429, "too_many_uploads")
+            raise ApiError(429, "too_many_uploads", "too many held uploads", {"Retry-After": str(cfg.media_ttl_s)})
         return {"image_ref": ref}
 
     @r.get("/memory")
     async def list_memory(u: User = Depends(authed)):
         if u.role == "guest":
             return []
-        status, body = await ctx.agent.call("GET", "/v1/memory", params={"user_id": u.user_id})
+        status, body = await agent_json("GET", "/v1/memory", params={"user_id": u.user_id})
         return fwd(status, body) if status != 200 else body
 
     @r.put("/memory/{memory_id}")
     async def put_memory(memory_id: str, body: MemoryIn, u: User = Depends(authed)):
+        # NOTE: agent-internal.yaml has no PUT /v1/memory/{id} (only GET and DELETE); this call is not covered by the contract.
         if u.role == "guest":
             raise ApiError(403, "forbidden")
-        status, res = await ctx.agent.call("PUT", f"/v1/memory/{memory_id}", json={"user_id": u.user_id, "text": body.text})
+        status, res = await agent_json("PUT", f"/v1/memory/{memory_id}", json={"user_id": u.user_id, "text": body.text})
         return fwd(status, res) if res is not None else Response(status_code=status)
 
     @r.delete("/memory/{memory_id}")
     async def del_memory(memory_id: str, u: User = Depends(authed)):
         if u.role == "guest":
             raise ApiError(403, "forbidden")
-        status, res = await ctx.agent.call("DELETE", f"/v1/memory/{memory_id}", params={"user_id": u.user_id})
+        status, res = await agent_json("DELETE", f"/v1/memory/{memory_id}", params={"user_id": u.user_id})
         return Response(status_code=status) if status == 204 else fwd(status, res)
 
     # ================================================================== system
@@ -587,31 +642,52 @@ def create_public_app(ctx: Ctx) -> FastAPI:
                 if name == "device-hub" and isinstance(b.get("pending_acks"), int):
                     row["queue_depth"] = b["pending_acks"]
             return row
-        rows = await asyncio.gather(probe("device-hub", ctx.hub), probe("agent", ctx.agent),
+        rows = await asyncio.gather(probe("device-hub", ctx.hub), probe("agent", ctx.agent, "/v1/health"),
                                     probe("vision-node", ctx.vision), probe("yolo-node", ctx.yolo))
         return {"nodes": [{"name": "gateway", "up": True}, *rows]}
 
+    @r.post("/ws/ticket")
+    async def ws_ticket(request: Request, u: User = Depends(authed)):
+        limit("ticket", u)
+        claims = ctx.auth.jwt.decode(request.headers["authorization"][7:].strip())
+        t = ctx.tickets.mint(u.user_id, claims["exp"])
+        if t is None:
+            raise ApiError(429, "rate_limited", "too many unused tickets", {"Retry-After": str(cfg.ticket_ttl_s)})
+        return {"ticket": t, "expires_in_s": cfg.ticket_ttl_s}
+
+    TICKET_PROTO = "edge-ticket."
+
     @r.websocket("/ws")
     async def ws(sock: WebSocket):
-        await sock.accept()
-        token = None
+        """Auth: a single-use ticket from POST /ws/ticket in `Sec-WebSocket-Protocol: edge-ticket.<ticket>` or in a first
+        `{"type":"auth","ticket":...}` message (5 s), or an `Authorization: Bearer` header. NEVER a token in the URL."""
+        proto = next((p.strip() for p in sock.headers.get("sec-websocket-protocol", "").split(",")
+                      if p.strip().startswith(TICKET_PROTO)), None)
+        ident = None                                              # (user_id, access token exp)
         h = sock.headers.get("authorization", "")
         if h[:7].lower() == "bearer ":
-            token = h[7:].strip()
-        else:
+            u0 = ctx.auth.authenticate_access(h[7:].strip())
+            c0 = ctx.auth.jwt.decode(h[7:].strip()) if u0 else None
+            ident = (u0.user_id, c0["exp"]) if c0 else None
+        elif proto:
+            ident = ctx.tickets.take(proto[len(TICKET_PROTO):])
+        await sock.accept(subprotocol=proto if (proto and ident) else None)
+        if ident is None and not proto and not h:
             try:
-                first = json.loads(await asyncio.wait_for(sock.receive_text(), 5))
-                if isinstance(first, dict) and first.get("type") == "auth" and isinstance(first.get("token"), str):
-                    token = first["token"]
+                first = json.loads(await asyncio.wait_for(sock.receive_text(), cfg.ws_auth_timeout_s))
+                if isinstance(first, dict) and first.get("type") == "auth" and isinstance(first.get("ticket"), str):
+                    ident = ctx.tickets.take(first["ticket"])
             except (asyncio.TimeoutError, ValueError, WebSocketDisconnect, RuntimeError):
                 pass
-        user = ctx.auth.authenticate_access(token) if token else None
-        claims = ctx.auth.jwt.decode(token) if user else None
-        if user is None or claims is None:
+        user = ctx.auth.get(ident[0]) if ident else None          # role and rooms are re-read from the DB now
+        if user is None or user.disabled:
             await sock.close(code=4401)
             return
+        if ctx.limiter.hit("ws", user.user_id):
+            await sock.close(code=4429)
+            return
         client = ctx.bc.add(user)
-        await sock.send_json({"type": "notification", "kind": "ws_ready", "role": user.role})
+        await sock.send_json({"type": "notification", "level": "info", "text": "connected", "role": user.role})
 
         async def pump():
             while not client.closed.is_set():
@@ -628,7 +704,7 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             while True:
                 await sock.receive_text()                       # client messages are ignored; this notices disconnects
 
-        expiry = max(1.0, claims["exp"] - ctx.clock())          # the socket ends with its access token
+        expiry = max(1.0, ident[1] - ctx.clock())               # the socket ends with the access token that created it
         tasks = [asyncio.ensure_future(pump()), asyncio.ensure_future(reader())]
         try:
             await asyncio.wait(tasks, timeout=expiry, return_when=asyncio.FIRST_COMPLETED)
@@ -637,7 +713,7 @@ def create_public_app(ctx: Ctx) -> FastAPI:
                 t.cancel()
             ctx.bc.remove(client)
             try:
-                await sock.close(code=4401 if client.closed.is_set() else 1000)
+                await sock.close(code=4401)
             except (RuntimeError, WebSocketDisconnect):
                 pass                                            # the peer is already gone
 
@@ -763,6 +839,59 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             raise ApiError(404, "not_found")
         ctx.bc.update_user(user_id, None)
         log_admin(u, "user_delete", user_id)
+        return Response(status_code=204)
+
+    # ---- scene assignments (guests run assigned scenes only)
+    async def scene_exists(scene_id: str) -> None:
+        status, _ = await hub("GET", f"/scenes/{scene_id}")
+        if status == 404:
+            raise ApiError(404, "not_found")
+        if status != 200:
+            raise ApiError(502, "upstream_error")
+
+    def assignments(scene_id: str) -> dict:
+        return {"user_ids": [x["user_id"] for x in ctx.db.all(
+            "SELECT user_id FROM scene_assignments WHERE scene_id=? ORDER BY user_id", (scene_id,))]}
+
+    @r.get("/admin/scenes/{scene_id}/assignments")
+    async def get_assignments(scene_id: str, u: User = Depends(admin)):
+        await scene_exists(scene_id)
+        return assignments(scene_id)
+
+    @r.put("/admin/scenes/{scene_id}/assignments")
+    async def set_assignments(scene_id: str, body: AssignIn, u: User = Depends(admin)):
+        await scene_exists(scene_id)
+        ids = list(dict.fromkeys(body.user_ids))
+        if len(ids) != len(body.user_ids):
+            raise ApiError(400, "bad_request", "duplicate user ids")
+        for uid in ids:
+            who = ctx.auth.get(uid)
+            if who is None or who.role != "guest":
+                raise ApiError(400, "bad_request", "unknown user or user is not a guest")
+        with ctx.db.tx():
+            ctx.db.run("DELETE FROM scene_assignments WHERE scene_id=?", (scene_id,))
+            for uid in ids:
+                ctx.db.run("INSERT INTO scene_assignments(user_id,scene_id) VALUES(?,?)", (uid, scene_id))
+        log_admin(u, "scene_assign", scene_id, {"users": len(ids)})
+        return assignments(scene_id)
+
+    # ---- Wi-Fi profiles: the password is write-only (stored encrypted; never returned, logged or audited)
+    @r.get("/admin/wifi-profiles")
+    async def list_wifi(u: User = Depends(admin)):
+        return ctx.profiles.list()
+
+    @r.post("/admin/wifi-profiles", status_code=201)
+    async def put_wifi(body: WifiProfileIn, u: User = Depends(admin)):
+        SECRETS.add(body.password)
+        ctx.profiles.put(body.name, body.ssid, body.password)
+        log_admin(u, "wifi_profile_put", body.name)
+        return JSONResponse({"name": body.name, "ssid": body.ssid}, status_code=201)
+
+    @r.delete("/admin/wifi-profiles/{name}")
+    async def del_wifi(name: str, u: User = Depends(admin)):
+        if not ctx.profiles.delete(name):
+            raise ApiError(404, "not_found")
+        log_admin(u, "wifi_profile_delete", name)
         return Response(status_code=204)
 
     app.include_router(r)

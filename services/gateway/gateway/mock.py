@@ -38,8 +38,9 @@ def action_hash(action: dict) -> str:
 
 def sse(frames: list[tuple[str, dict]]) -> StreamingResponse:
     async def g():
-        for n, (ev, d) in enumerate(frames, 1):
-            yield f"id: {n}\nevent: {ev}\ndata: {json.dumps(d)}\n\n".encode()
+        for ev, d in frames:
+            fid = f"id: {d['seq']}\n" if "seq" in d else ""
+            yield f"{fid}event: {ev}\ndata: {json.dumps(d)}\n\n".encode()
     return StreamingResponse(g(), media_type="text/event-stream")
 
 
@@ -222,8 +223,8 @@ class FakeHub:
             risky = self.risky(s)
             if risky:
                 if not await self.consume(b.get("confirmation_token"), b.get("user_id", ""), action_hash(self.scene_action(s))):
-                    return JSONResponse({"ok": False, "executed": False, "status": "needs_confirmation",
-                                         "needs_confirmation": risky}, status_code=409)
+                    return JSONResponse({"ok": False, "executed": False, "status": "needs_confirmation", "scene_id": sid,
+                                         "needs_confirmation": risky, "action_hash": action_hash(self.scene_action(s))}, status_code=409)
             results = []
             for ep, _a, cap, val in self.resolve(s):
                 ep["state"][cap] = val
@@ -284,26 +285,48 @@ class FakeHub:
         return app
 
 
+CHAT_KEYS = {"user_id", "role", "session_id", "text", "images"}
+DECISION_KEYS = {"decision", "user_id", "role", "action", "action_hash", "confirmation_token"}
+
+
 class FakeAgent:
-    def __init__(self) -> None:
+    """Fake agent (agent-internal.yaml): X-Service-Secret on every route, strict ChatRequest/ConfirmationDecision bodies."""
+
+    def __init__(self, secret: str = "mock-agent-api-secret-0000") -> None:
+        self.secret = secret
         self.requests: list[dict] = []
         self.deliveries: list[dict] = []
-        self.push: list[tuple[str, dict]] = []
+        self.push: list[tuple[str, dict]] = []          # (event name, data incl. user_id); ids are 1..n
         self.memories: dict[str, dict[str, str]] = {}
         self.fail_delivery = False
+        self.delivery_status = 202
+        self.calls: list[dict] = []
         self._n = itertools.count(1)
         self.app = self._build()
+
+    def emit(self, name: str, data: dict) -> None:
+        self.push.append((name, data))
 
     def _build(self) -> FastAPI:
         app = FastAPI(docs_url=None, openapi_url=None)
 
-        @app.get("/health")
+        @app.middleware("http")
+        async def auth(request: Request, call_next):
+            self.calls.append({"method": request.method, "path": request.url.path, "secret_ok": request.headers.get("x-service-secret") == self.secret})
+            if request.headers.get("x-service-secret") != self.secret:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await call_next(request)
+
+        @app.get("/v1/health")
         async def health():
-            return {"ok": True}
+            return {"ok": True, "llm": "mock", "hub": "mock"}
 
         @app.post("/v1/chat")
         async def chat(request: Request):
             b = await request.json()
+            if not isinstance(b, dict) or set(b) - CHAT_KEYS or not {"user_id", "role", "session_id"} <= set(b) \
+                    or len(b["session_id"]) > 64 or b["role"] not in ("admin", "member", "guest"):
+                return JSONResponse({"error": "bad_request", "message": "invalid ChatRequest"}, status_code=400)
             self.requests.append(b)
             text, rid, n = b.get("text") or "", f"req-{next(self._n)}", 0
 
@@ -317,15 +340,13 @@ class FakeAgent:
                 frames.append(f("confirmation_request", {"request_id": rid, "summary": "Unlock front door?", "action": a,
                                                          "action_hash": action_hash(a), "expires_in_s": 60}))
             elif "open up" in text:
-                a = {"type": "run_scene", "scene": "sc_00000002", "needs_confirmation": [
+                a = {"type": "run_scene", "scene_id": "sc_00000002", "actions": [
                     {"endpoint_id": "ep_00000003", "capability": "lock", "value": "unlocked"}]}
-                ah = action_hash({"type": "run_scene", "scene_id": "sc_00000002", "actions": a["needs_confirmation"]})
                 frames.append(f("confirmation_request", {"request_id": rid, "summary": "Open up?", "action": a,
-                                                         "action_hash": ah, "expires_in_s": 60}))
+                                                         "action_hash": action_hash(a), "expires_in_s": 60}))
             else:
                 frames.append(f("token", {"text": "ok"}))
             frames.append(f("final", {"text": "done", "route": "fast", "latency_ms": 5}))
-            frames.append(f("async_result", {"ref": "c1", "kind": "vision", "text": "a cat", "latency_ms": 5000}))
 
             async def g():
                 for x in frames:
@@ -334,14 +355,27 @@ class FakeAgent:
 
         @app.post("/v1/confirmations/{rid}")
         async def deliver(rid: str, request: Request):
+            b = await request.json()
+            if not isinstance(b, dict) or set(b) - DECISION_KEYS or not {"decision", "user_id", "role", "action", "action_hash"} <= set(b) \
+                    or b["decision"] not in ("approved", "declined", "expired") \
+                    or (b["decision"] == "approved") != ("confirmation_token" in b):
+                return JSONResponse({"error": "bad_request"}, status_code=400)
+            if b["action_hash"] != action_hash(b["action"]):
+                return JSONResponse({"error": "action_hash_mismatch"}, status_code=409)
             if self.fail_delivery:
-                return JSONResponse({"error": "down"}, status_code=503)
-            self.deliveries.append({"request_id": rid, **await request.json()})
-            return Response(status_code=204)
+                return JSONResponse({"error": "unknown_request"}, status_code=404)
+            self.deliveries.append({"request_id": rid, **b})
+            return JSONResponse({}, status_code=self.delivery_status)
 
         @app.get("/v1/events")
-        async def events():
-            return sse(list(self.push))
+        async def events(request: Request):
+            last = int(request.headers.get("last-event-id") or 0)
+            frames = [(n, name, d) for n, (name, d) in enumerate(self.push, 1) if n > last]
+
+            async def g():
+                for n, name, d in frames:
+                    yield f"id: {n}\nevent: {name}\ndata: {json.dumps(d)}\n\n".encode()
+            return StreamingResponse(g(), media_type="text/event-stream")
 
         @app.get("/v1/memory")
         async def mem(user_id: str):
@@ -418,9 +452,10 @@ def build_mock(cfg: Config | None = None, *, data_dir: str | None = None, clock=
     (ver / "device-hub.sha256").write_text(sha256_hex(dh_secret), encoding="utf-8")
     cfg.verifier_dir = str(ver)
     SECRETS.add(dh_secret)
-    hub, agent, vision, yolo = FakeHub(secrets.token_urlsafe(24)), FakeAgent(), FakeVision(), FakeYolo()
+    hub, agent, vision, yolo = FakeHub(secrets.token_urlsafe(24)), FakeAgent(secrets.token_urlsafe(24)), FakeVision(), FakeYolo()
+    SECRETS.add(agent.secret)
     ctx = build_ctx(cfg, transports={"hub": asgi(hub.app), "agent": asgi(agent.app), "vision": asgi(vision.app), "yolo": asgi(yolo.app)},
-                    hub_secret=hub.secret, clock=clock or time.time, db_path=":memory:", agent_push=False)
+                    hub_secret=hub.secret, agent_secret=agent.secret, clock=clock or time.time, db_path=":memory:", agent_push=False)
     internal = create_internal_app(ctx)
     hub.consume_client = httpx.AsyncClient(base_url="http://gateway-internal", transport=asgi(internal),
                                            headers={"X-Service-Secret": dh_secret})

@@ -92,8 +92,14 @@ class Broadcaster:
                 c.closed.set()
 
 
+NODE_RE = __import__("re").compile(r"^esp32-[0-9a-f]{12}$")
+
+
 def from_hub(env: dict) -> Event | None:
-    """Translate a hub EventEnvelope into a WebSocket event (None = not forwarded)."""
+    """Translate a hub EventEnvelope into a WebSocket event (None = not forwarded).
+    Settle events that carry a `call_id` came from an agent call: they reach the user through the agent's GET /v1/events
+    stream (routed to that user), so they are skipped here to avoid duplicates; the others (gateway-initiated
+    commands) go to everyone who can see the endpoint's room."""
     t, d = env.get("type"), env.get("data") or {}
     if t == "registry_changed":
         return Event("registry_changed", {"version": d.get("version"), "reason": d.get("reason"),
@@ -103,32 +109,38 @@ def from_hub(env: dict) -> Event | None:
         return Event("state", {"endpoint_id": d.get("endpoint_id"), "values": d.get("values"), "ts": d.get("ts")},
                      endpoint_id=d.get("endpoint_id"))
     if t in ("action_settled", "action_settle_timeout"):
-        return Event("notification", {"kind": t, **{k: v for k, v in d.items() if k != "call_id"}},
-                     endpoint_id=d.get("endpoint_id"))
-    if t == "node_status":                                   # infrastructure detail: admins only
-        return Event("notification", {"kind": "node_status", **d}, admin_only=True)
-    if t == "pending_node":
-        return Event("notification", {"kind": "pending_node", **d}, admin_only=True)
-    if t == "scenes_changed":
-        return Event("notification", {"kind": "scenes_changed", **d}, no_guest=True)
-    return None
+        if d.get("call_id"):
+            return None
+        keys = ("endpoint_id", "capability", "value", "observed", "elapsed_ms" if t == "action_settled" else "settle_s")
+        return Event(t, {k: d.get(k) for k in keys}, endpoint_id=d.get("endpoint_id"))
+    node = d.get("node_id") if isinstance(d.get("node_id"), str) and NODE_RE.match(d.get("node_id")) else None
+    if t == "node_status" and node:                          # infrastructure detail: admins only
+        return Event("notification", {"level": "info", "text": f"{node} is {'online' if d.get('online') else 'offline'}"}, admin_only=True)
+    if t == "pending_node" and node:
+        return Event("notification", {"level": "info", "text": f"{node} is waiting for approval"}, admin_only=True)
+    return None                                              # scenes_changed etc.: not part of the WebSocket contract
+
+
+AGENT_FIELDS = {
+    "async_result": ("ref", "kind", "text", "latency_ms"),
+    "action_settled": ("call_id", "endpoint_id", "capability", "value", "observed", "elapsed_ms"),
+    "action_settle_timeout": ("call_id", "endpoint_id", "capability", "value", "observed", "settle_s"),
+    "notification": ("level", "text"),
+}
 
 
 def from_agent(name: str, d: dict) -> Event | None:
-    """Agent events (PROVISIONAL push path, see README): async_result, notification, perception. Optional routing hints
-    `user_id`, `room`, `endpoint_id`, `admin_only` are honoured; a perception/notification without a hint goes to
-    admin and members only."""
-    if not isinstance(d, dict):
+    """An event of the agent's GET /v1/events (`data.user_id` = owner, or "household" = no single owner: the gateway decides).
+    Only the contract's fields are forwarded (agent-events.md). Owner events go to that user only. Household events:
+    settle events to everyone who can see the endpoint's room, the rest to admin and members, never guests.
+    `confirmation_request` is handled by the subscriber."""
+    fields = AGENT_FIELDS.get(name)
+    if fields is None or not isinstance(d, dict):
         return None
-    allowed = {"async_result", "notification", "perception"}
-    if name not in allowed:
-        return None
-    data = {k: v for k, v in d.items() if k not in ("user_id", "admin_only")}
-    uid = d.get("user_id") if isinstance(d.get("user_id"), str) else None
-    room = d.get("room") if isinstance(d.get("room"), str) else None
-    ep = d.get("endpoint_id") if isinstance(d.get("endpoint_id"), str) else None
-    return Event(name, data, user_id=uid, admin_only=bool(d.get("admin_only")), no_guest=uid is None and room is None and ep is None,
-                 room=room, endpoint_id=ep)
+    owner = d.get("user_id") if isinstance(d.get("user_id"), str) and d.get("user_id") != "household" else None
+    ep = d.get("endpoint_id") if name.startswith("action_") and isinstance(d.get("endpoint_id"), str) else None
+    return Event(name, {k: d[k] for k in fields if k in d}, user_id=owner, endpoint_id=ep,
+                 no_guest=owner is None and ep is None)
 
 
 async def refresh_rooms(hub, bc: Broadcaster) -> None:
@@ -178,28 +190,45 @@ async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Eve
             pass
 
 
-async def run_agent_subscriber(agent: JsonClient, bc: Broadcaster, stop: asyncio.Event, retry_s: float = 2.0) -> None:
-    """Optional: consumes the agent's push stream GET /v1/events (PROVISIONAL, not in the contract)."""
+async def run_agent_subscriber(agent: JsonClient, bc: Broadcaster, confirm, stop: asyncio.Event, retry_s: float = 2.0) -> None:
+    """Consumes the agent's GET /v1/events (agent-internal.yaml): reconnects with Last-Event-ID; `reset` = older than the
+    agent's buffer, missed events are lost."""
+    last_id: str | None = None
     delay = retry_s
     while not stop.is_set():
         try:
-            async for _fid, ev, data in agent.sse("/v1/events"):
+            hdr = {"Last-Event-ID": last_id} if last_id else None
+            async for fid, ev, data in agent.sse("/v1/events", headers=hdr):
                 delay = retry_s
+                if fid:
+                    last_id = fid
+                if ev == "reset":
+                    log.warning("agent event buffer was reset; missed events are lost")
+                    continue
                 try:
                     d = json.loads(data)
                 except ValueError:
                     continue
+                if not isinstance(d, dict):
+                    continue
+                uid = d.get("user_id")
+                if ev == "confirmation_request":
+                    if isinstance(uid, str) and uid != "household" and confirm.register_request(uid, None, d):
+                        bc.publish(Event("confirmation_request", {k: d.get(k) for k in
+                                         ("request_id", "summary", "action", "action_hash", "expires_in_s")}, user_id=uid))
+                    continue
                 out = from_agent(ev, d)
                 if out:
                     bc.publish(out)
+            wait = retry_s
         except UpstreamError:
-            pass
+            wait, delay = delay, min(delay * 2, 60.0)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("agent subscriber error")
+            wait, delay = delay, min(delay * 2, 60.0)
         try:
-            await asyncio.wait_for(stop.wait(), delay)
+            await asyncio.wait_for(stop.wait(), wait)
         except asyncio.TimeoutError:
             pass
-        delay = min(delay * 2, 60.0)

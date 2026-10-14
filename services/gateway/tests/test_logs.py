@@ -24,7 +24,7 @@ def test_no_secrets_in_logs_stdout_or_db_at_debug(gw, capsys):
         logging.getLogger(n).setLevel(logging.DEBUG)
     secrets_ = set()
     try:
-        secrets_ |= set(gw.m.passwords.values()) | {gw.m.hub_secret, gw.m.device_hub_secret}
+        secrets_ |= set(gw.m.passwords.values()) | {gw.m.hub_secret, gw.m.device_hub_secret, gw.m.agent.secret}
         # auth
         login = gw.pub.post("/auth/login", json={"username": "admin", "password": gw.m.passwords["admin"]}).json()
         gw.pub.post("/auth/login", json={"username": "admin", "password": "wrong-password-LEAK1"})
@@ -34,7 +34,16 @@ def test_no_secrets_in_logs_stdout_or_db_at_debug(gw, capsys):
         secrets_ |= {t2["access_token"], t2["refresh_token"]}
         admin = {"Authorization": "Bearer " + t2["access_token"]}
         # provisioning with a saved profile and an inline one
-        gw.ctx.profiles.put("home", "HomeNet", "profile-pass-LEAK2")
+        assert gw.pub.post("/admin/wifi-profiles", json={"name": "home", "ssid": "HomeNet", "password": "profile-pass-LEAK2"},
+                           headers=admin).status_code == 201
+        gw.pub.get("/admin/wifi-profiles", headers=admin)
+        gw.pub.post("/admin/wifi-profiles", json={"name": "bad", "ssid": "x", "password": "p" * 70 + "-LEAK7"}, headers=admin)   # 400
+        secrets_.add("p" * 70 + "-LEAK7")
+        # websocket ticket: minted, used once in the subprotocol header, and once more in a first message (rejected)
+        tk = gw.pub.post("/ws/ticket", headers=admin).json()["ticket"]
+        secrets_.add(tk)
+        with gw.pub.websocket_connect("/ws", subprotocols=[f"edge-ticket.{tk}"]) as s:
+            s.receive_json()
         for body in ({"wifi_profile": "home"}, {"wifi": {"ssid": "x", "password": "inline-pass-LEAK3"}}):
             r = gw.pub.post("/admin/provision-sessions", json={"node_id": "esp32-aabbccddeeff", **body}, headers=admin)
             assert r.status_code == 201
@@ -65,6 +74,10 @@ def test_no_secrets_in_logs_stdout_or_db_at_debug(gw, capsys):
         # failure paths
         gw.m.hub.secret = "rotated"
         gw.pub.get("/devices", headers=admin)
+        gw.m.agent.secret = "rotated-LEAK8"
+        gw.pub.post("/chat", json={"text": "hi"}, headers=admin)                      # agent says 401 to the old secret
+        secrets_.add("rotated-LEAK8")
+        gw.m.agent.secret = gw.m.agent.secret
         gw.m.agent.fail_delivery = True
         gw.pub.post("/confirmations", json={"action": LOCK}, headers=admin)
     finally:

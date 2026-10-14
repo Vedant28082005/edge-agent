@@ -10,11 +10,6 @@ from conftest import CONTRACTS
 from calls import call
 
 SPEC = yaml.safe_load((CONTRACTS / "openapi" / "gateway.yaml").read_text(encoding="utf-8"))
-# CONTRACT DEFECT (reported, contracts/ not edited): SceneAction.target is a oneOf whose "selector" branch has no
-# additionalProperties:false, so every fixed {endpoint_id} target matches BOTH branches and strict validation fails.
-# Validate that single spot as anyOf so the rest of the schema is still enforced.
-_t = SPEC["components"]["schemas"]["SceneAction"]["properties"]["target"]
-_t["anyOf"] = _t.pop("oneOf")
 METHODS = ("get", "post", "put", "patch", "delete")
 OPS = [(p, m, op) for p, item in SPEC["paths"].items() for m, op in item.items() if m in METHODS]
 PUBLIC = [(p, m, op) for p, m, op in OPS if not p.startswith("/internal/")]
@@ -39,7 +34,7 @@ def effective_security(op: dict) -> list:
 
 
 def test_spec_version_known():
-    assert SPEC["info"]["version"] == "2.8.1", "gateway.yaml changed: re-check the implementation, then update this pin"
+    assert SPEC["info"]["version"] == "2.9.0", "gateway.yaml changed: re-check the implementation, then update this pin"
 
 
 def test_every_public_route_exists_and_no_extra(gw):
@@ -78,13 +73,40 @@ def test_auth_requirement(gw, path, method, op):
             assert gw.pub.request(method.upper(), url, json={}, headers=gw.h("guest")).status_code == 403
 
 
-def test_websocket_requires_auth(gw):
+def test_websocket_requires_a_valid_ticket(gw):
     from starlette.websockets import WebSocketDisconnect
+    gw.ctx.cfg.ws_auth_timeout_s = 0.3
     with pytest.raises(WebSocketDisconnect) as e:
         with gw.pub.websocket_connect("/ws") as ws:
-            ws.send_json({"type": "auth", "token": "garbage"})
+            ws.send_json({"type": "auth", "ticket": "A" * 43})
             ws.receive_json()
     assert e.value.code == 4401
+
+
+def test_scene_target_is_validated_strictly(gw):
+    """The contract now makes the two target shapes mutually exclusive (additionalProperties:false): no anyOf workaround."""
+    schema = SPEC["components"]["schemas"]["SceneAction"]["properties"]["target"]
+    assert "oneOf" in schema and "anyOf" not in schema
+    ok = [{"endpoint_id": "ep_00000001"}, {"room": "Bedroom"}, {"type": "light", "tag": "night"}]
+    bad = [{}, {"endpoint_id": "ep_00000001", "room": "Bedroom"}, {"endpoint_id": "ep_00000001", "x": 1}, {"bogus": 1},
+           {"room": "A", "bogus": 1}, {"endpoint_id": "nope"}, {"type": "toaster"}, {"tag": "UPPER"}]
+    sc = {"$ref": "#/components/schemas/SceneAction"}
+    for t in ok:
+        validate(sc, {"target": t, "capability": "power", "value": True})
+        r = gw.pub.post("/scenes", json={"name": "t", "actions": [{"target": t, "capability": "power", "value": True}]},
+                        headers=gw.h("admin"))
+        assert r.status_code == 201, t
+    for t in bad:
+        with pytest.raises(Exception):
+            validate(sc, {"target": t, "capability": "power", "value": True})
+        r = gw.pub.post("/scenes", json={"name": "t", "actions": [{"target": t, "capability": "power", "value": True}]},
+                        headers=gw.h("admin"))
+        assert r.status_code == 400, (t, r.status_code)
+
+
+def test_ws_security_is_none_and_uses_tickets():
+    op = SPEC["paths"]["/ws"]["get"]
+    assert op["security"] == [] and "/ws/ticket" in SPEC["paths"]
 
 
 def test_every_operation_response_validates(gw):
@@ -140,3 +162,14 @@ def test_internal_operation_is_internal_only(gw, path, method, op):
     r = gw.int.post(path, json=body, headers=gw.secret_hdr())
     assert r.status_code == 403
     validate(response_schema(op, 403), r.json())
+
+
+@pytest.mark.parametrize("kind,expect", [("valid", 201), ("invalid", 400)])
+def test_scene_action_contract_samples(gw, kind, expect):
+    import json
+    files = sorted((CONTRACTS / "samples" / "scene-action" / kind).glob("*.json"))
+    assert files
+    for f in files:
+        action = json.loads(f.read_text(encoding="utf-8"))
+        r = gw.pub.post("/scenes", json={"name": "sample", "actions": [action]}, headers=gw.h("admin"))
+        assert r.status_code == expect, f"{kind}/{f.name}: {r.status_code}"

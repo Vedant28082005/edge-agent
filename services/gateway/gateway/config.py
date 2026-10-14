@@ -30,6 +30,7 @@ class Config:
     vision: Upstream = field(default_factory=lambda: Upstream("http://pi-vision:8300", 30.0))
     yolo: Upstream = field(default_factory=lambda: Upstream("http://jetson:8400", 3.0))
     hub_secret_file: str = "/etc/edge-agent/secrets/gateway.secret"
+    agent_secret_file: str = "/etc/edge-agent/secrets/agent-api.secret"     # gateway -> agent (agent-internal.yaml)
     verifier_dir: str = "/etc/edge-agent/secrets/verifiers"   # <service>.sha256 (device-hub.sha256)
     access_ttl_s: int = 900
     refresh_ttl_s: int = 14 * 86400
@@ -43,6 +44,11 @@ class Config:
     media_max_total_bytes: int = 32 * 1024 * 1024
     media_max_per_user: int = 8
     ws_queue: int = 256
+    ticket_ttl_s: int = 30
+    ws_auth_timeout_s: float = 5.0                # first-message auth deadline
+    # per-user request limits {name: [max requests, window seconds]}; exceeding -> 429 + Retry-After
+    rate_limits: dict = field(default_factory=lambda: {"chat": [30, 60], "voice": [20, 60], "confirm": [30, 60],
+                                                       "ticket": [10, 60], "ws": [20, 60]})
     mock: bool = False
 
     def __post_init__(self) -> None:

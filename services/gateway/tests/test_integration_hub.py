@@ -44,8 +44,8 @@ def stack(tmp_path_factory):
     st = Stack()
     st.tmp = tmp
     st.gw_secret, st.dh_secret = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-    for s in (st.gw_secret, st.dh_secret):
-        SECRETS.add(s)
+    for s_ in (st.gw_secret, st.dh_secret):
+        SECRETS.add(s_)
     (tmp / "gateway.secret").write_text(st.gw_secret)
     (tmp / "device-hub.secret").write_text(st.dh_secret)
     (tmp / "gw-verifiers").mkdir()
@@ -57,7 +57,7 @@ def stack(tmp_path_factory):
     cfg = Config(data_dir=str(tmp / "data"), hub_secret_file=str(tmp / "gateway.secret"), verifier_dir=str(tmp / "gw-verifiers"))
     cfg.hub.url = f"http://127.0.0.1:{hub_port}"
     st.agent = FakeAgent()
-    st.ctx = build_ctx(cfg, transports={"agent": asgi(st.agent.app)})
+    st.ctx = build_ctx(cfg, transports={"agent": asgi(st.agent.app)}, agent_secret=st.agent.secret)
     st.ctx.autostart = True
     st.pw = {}
     for name, role, rooms in (("admin", "admin", []), ("member", "member", ["Bedroom"]), ("guest", "guest", ["Bedroom"])):
@@ -259,8 +259,46 @@ def test_agent_flow_against_the_real_hub(api, stack):
                       json={"capability": "lock", "value": "unlocked", "user_id": uid, "confirmation_token": tok}).json()["ok"] is False
 
 
+def test_agent_flow_for_a_risky_scene_uses_the_hubs_action_hash(api, stack):
+    a = api.hdr["admin"]
+    uid = stack.ctx.db.one("SELECT user_id FROM users WHERE username='admin'")["user_id"]
+    door = by_name(api, "admin", "Front door")["endpoint_id"]
+    light = by_name(api, "admin", "Ceiling light")["endpoint_id"]
+    api.post(f"/devices/{door}/set", json={"capability": "lock", "value": "locked"}, headers=a)
+    sid = api.post("/scenes", json={"name": "Agent scene", "actions": [
+        {"target": {"endpoint_id": door}, "capability": "lock", "value": "unlocked"},
+        {"target": {"endpoint_id": light}, "capability": "power", "value": True}]}, headers=a).json()["scene_id"]
+    # what the agent sees: the hub's needs_confirmation result (scene_id, canonical actions, action_hash)
+    blocked = httpx.post(f"{stack.hub_url}/scenes/{sid}/run", json={"user_id": uid}, headers={"X-Service-Secret": stack.gw_secret})
+    assert blocked.status_code == 409
+    nb = blocked.json()
+    assert nb["scene_id"] == sid and nb["needs_confirmation"][0]["endpoint_id"] == door and len(nb["action_hash"]) == 64
+    action = {"type": "run_scene", "scene_id": sid, "actions": nb["needs_confirmation"]}
+    assert stack.ctx.confirm.register_request(uid, "s1", {"request_id": "req-scene-1", "summary": "Open up?", "action": action,
+                                                          "action_hash": nb["action_hash"], "expires_in_s": 60})
+    r = api.post("/confirmations", json={"request_id": "req-scene-1"}, headers=a)
+    assert r.status_code == 200 and r.json()["action_hash"] == nb["action_hash"]              # the hub's hash, end to end
+    d = stack.agent.deliveries[-1]
+    assert d["action"] == action and d["action_hash"] == nb["action_hash"] and d["role"] == "admin"
+    ok = httpx.post(f"{stack.hub_url}/scenes/{sid}/run", headers={"X-Service-Secret": stack.gw_secret},
+                    json={"user_id": uid, "confirmation_token": d["confirmation_token"]})
+    assert ok.status_code == 200 and ok.json()["executed"] is True
+    # a stale request: the scene's risky targets changed after the agent asked
+    sid2 = api.post("/scenes", json={"name": "Agent scene 2", "actions": [
+        {"target": {"endpoint_id": door}, "capability": "lock", "value": "unlocked"}]}, headers=a).json()["scene_id"]
+    nb2 = httpx.post(f"{stack.hub_url}/scenes/{sid2}/run", json={"user_id": uid}, headers={"X-Service-Secret": stack.gw_secret}).json()
+    stack.ctx.confirm.register_request(uid, "s1", {"request_id": "req-scene-2", "summary": "x", "expires_in_s": 60,
+                                                   "action": {"type": "run_scene", "scene_id": sid2, "actions": nb2["needs_confirmation"]},
+                                                   "action_hash": nb2["action_hash"]})
+    api.put(f"/scenes/{sid2}", json={"name": "Agent scene 2", "actions": [
+        {"target": {"endpoint_id": door}, "capability": "lock", "value": "locked"}]}, headers=a)
+    r = api.post("/confirmations", json={"request_id": "req-scene-2"}, headers=a)
+    assert r.status_code == 409 and r.json()["error"] == "action_changed"
+
+
 def test_provision_session_admin_route_and_profile_resolution(api, stack):
-    stack.ctx.profiles.put("home", "HomeNet", "profile-pass-IT1")
+    assert api.post("/admin/wifi-profiles", json={"name": "home", "ssid": "HomeNet", "password": "profile-pass-IT1"},
+                    headers=api.hdr["admin"]).status_code == 201
     r = api.post("/admin/provision-sessions", json={"node_id": "esp32-aabbccddee77", "wifi_profile": "home"}, headers=api.hdr["admin"])
     assert r.status_code == 201, r.text
     b = r.json()["bundle"]
@@ -292,7 +330,8 @@ def test_secrets_never_reach_any_log(stack, api):
     hub_log = (stack.tmp / "hub.stderr.log").read_text(errors="replace")
     gw_log = stack.gw_log_buf.getvalue()
     toks = [d["confirmation_token"] for d in stack.agent.deliveries]
-    leaks = [stack.gw_secret, stack.dh_secret, getattr(stack, "mqtt_pw", "x" * 20), "profile-pass-IT1", *toks, *stack.pw.values()]
+    leaks = [stack.gw_secret, stack.dh_secret, stack.agent.secret, getattr(stack, "mqtt_pw", "x" * 20), "profile-pass-IT1", *toks,
+             *stack.pw.values(), *getattr(stack, "ws_tickets", [])]
     assert len(hub_log) > 200 and len(gw_log) > 200
     for s in leaks:
         assert s not in hub_log, "secret in the hub log"
@@ -308,11 +347,26 @@ def test_websocket_receives_real_hub_state_filtered_by_role(stack, api):
     lamp = by_name(api, "admin", "Ceiling light")["endpoint_id"]
     door = by_name(api, "admin", "Front door")["endpoint_id"]
     socks = {}
+    from websockets.typing import Subprotocol
     for who in ("admin", "member"):
-        s = websockets.connect(url)
-        s.send(json.dumps({"type": "auth", "token": api.hdr[who]["Authorization"].split()[1]}))
-        assert json.loads(s.recv(5))["kind"] == "ws_ready"
+        t = api.post("/ws/ticket", headers=api.hdr[who]).json()["ticket"]
+        stack.ws_tickets = getattr(stack, "ws_tickets", []) + [t]
+        s = websockets.connect(url, subprotocols=[Subprotocol(f"edge-ticket.{t}")])
+        assert json.loads(s.recv(5))["role"] == who
         socks[who] = s
+    # a JWT in the URL gets nowhere, and a used ticket cannot be replayed
+    from websockets.exceptions import ConnectionClosed
+    jwt_ = api.hdr["admin"]["Authorization"].split()[1]
+    stack.ctx.cfg.ws_auth_timeout_s = 0.5
+    for u in (f"{url}?token={jwt_}", f"{url}?access_token={jwt_}"):
+        with pytest.raises(ConnectionClosed) as e:
+            c = websockets.connect(u)
+            c.recv(5)
+        assert e.value.rcvd.code == 4401
+    with pytest.raises(ConnectionClosed) as e:
+        c = websockets.connect(url, subprotocols=[Subprotocol(f"edge-ticket.{stack.ws_tickets[0]}")])
+        c.recv(5)
+    assert e.value.rcvd.code == 4401
     time.sleep(1.5)                                                           # let the hub subscriber (re)connect
     cur = by_name(api, "admin", "Ceiling light")["state"].get("power")
     api.post(f"/devices/{lamp}/set", json={"capability": "power", "value": not cur}, headers=api.hdr["admin"])    # a real change

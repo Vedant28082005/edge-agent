@@ -79,7 +79,7 @@ def test_chat_sse_is_streamed_not_buffered():
 
     m = build_mock()
     with Srv(slow, free_port()) as agent:
-        m.ctx.agent = m.ctx.confirm.agent = AgentClient(agent.url)
+        m.ctx.agent = m.ctx.confirm.agent = AgentClient(agent.url, None)
         app = create_public_app(m.ctx)
         tok = httpx.Client()
         with Srv(app, free_port()) as gw:
@@ -94,3 +94,41 @@ def test_chat_sse_is_streamed_not_buffered():
             assert json.loads(first[5:])["text"] == "first" and t_first < 1.0, f"first event only after {t_first:.2f}s (buffered?)"
             assert json.loads(rest[0][5:])["text"] == "done" and time.time() - t0 >= 1.4
         tok.close()
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="unix sockets need Linux/macOS")
+def test_consume_over_a_unix_socket(tmp_path):
+    """The preferred internal transport: gateway-internal.sock (cfg.internal.uds), mode-restricted, no TCP port at all."""
+    import os
+    m = build_mock()
+    path = str(tmp_path / "gateway-internal.sock")
+    h = action_hash({"a": 1})
+    tok = m.ctx.confirm._mint("alice", h, None)[0]
+    srv = uvicorn.Server(uvicorn.Config(m.internal_app, uds=path, log_level="warning", access_log=False))
+    t = threading.Thread(target=srv.run, daemon=True)
+    t.start()
+    try:
+        for _ in range(100):
+            if srv.started:
+                break
+            time.sleep(0.05)
+        assert srv.started and os.path.exists(path)
+        with httpx.Client(transport=httpx.HTTPTransport(uds=path), base_url="http://gateway-internal") as c:
+            body = {"token": tok, "user_id": "alice", "action_hash": h}
+            assert c.post("/internal/confirmations/consume", json=body).status_code == 401
+            r = c.post("/internal/confirmations/consume", json=body, headers={"X-Service-Secret": m.device_hub_secret})
+            assert r.status_code == 200 and r.json() == {"consumed": True, "action_hash": h, "user_id": "alice"}
+            assert c.post("/internal/confirmations/consume", json=body,
+                          headers={"X-Service-Secret": m.device_hub_secret}).json()["reason"] == "used"
+            assert c.get("/devices").status_code == 404
+    finally:
+        srv.should_exit = True
+        t.join(5)
+
+
+def test_cli_serve_binds_the_internal_listener_to_a_unix_socket_when_configured(tmp_path):
+    from gateway.config import load_config
+    p = tmp_path / "c.json"
+    p.write_text('{"internal": {"uds": "/run/edge-agent/gateway-internal.sock"}}', encoding="utf-8")
+    cfg = load_config(str(p))
+    assert cfg.internal.uds == "/run/edge-agent/gateway-internal.sock" and cfg.public.host == "127.0.0.1" and cfg.public.port == 8000

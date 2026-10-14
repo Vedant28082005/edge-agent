@@ -25,6 +25,9 @@ class WifiProfiles:
         SECRETS.add(pw)
         return {"ssid": row["ssid"], "password": pw}
 
+    def list(self) -> list[dict]:
+        return [{"name": r["name"], "ssid": r["ssid"]} for r in self.db.all("SELECT name, ssid FROM wifi_profiles ORDER BY name")]
+
     def names(self) -> list[str]:
         return [r["name"] for r in self.db.all("SELECT name FROM wifi_profiles ORDER BY name")]
 

@@ -49,6 +49,8 @@ def test_agent_flow_full_lifecycle(gw):
     assert "confirmation_token" not in r.json() and r.json()["action_hash"] == ev["action_hash"]
     (d,) = gw.m.agent.deliveries
     assert d["decision"] == "approved" and d["user_id"] == gw.uid("admin") and d["action"] == LOCK
+    assert d["role"] == "admin" and d["action_hash"] == ev["action_hash"] and set(d) == {
+        "request_id", "decision", "user_id", "role", "action", "action_hash", "confirmation_token"}
     token = d["confirmation_token"]
     assert gw.ctx.db.one("SELECT token_hash FROM confirm_tokens")["token_hash"] == sha256_hex(token)   # only the hash is stored
     assert token not in json.dumps([dict(x) for x in gw.ctx.db.all("SELECT * FROM confirm_tokens")])
@@ -84,9 +86,13 @@ def test_decline_then_retry_creates_a_brand_new_request(gw):
     rid = ev["request_id"]
     assert gw.pub.post(f"/confirmations/{rid}/decline", headers=gw.h("member")).status_code == 403
     assert gw.pub.post(f"/confirmations/{rid}/decline", headers=gw.h("admin")).status_code == 204
-    assert gw.m.agent.deliveries[-1] == {"request_id": rid, "decision": "declined", "user_id": gw.uid("admin")}
-    assert gw.pub.post(f"/confirmations/{rid}/decline", headers=gw.h("admin")).status_code == 409
-    assert gw.pub.post("/confirmations", json={"request_id": rid}, headers=gw.h("admin")).status_code == 409   # declined stays dead
+    # declined is handed to the agent too: full action + hash + role, and NO token
+    assert gw.m.agent.deliveries[-1] == {"request_id": rid, "decision": "declined", "user_id": gw.uid("admin"), "role": "admin",
+                                         "action": LOCK, "action_hash": action_hash(LOCK)}
+    r = gw.pub.post(f"/confirmations/{rid}/decline", headers=gw.h("admin"))
+    assert r.status_code == 409 and r.json()["error"] == "request_already_handled"
+    r = gw.pub.post("/confirmations", json={"request_id": rid}, headers=gw.h("admin"))                            # declined stays dead
+    assert r.status_code == 409 and r.json()["error"] == "request_already_handled"
     assert gw.pub.post(f"/confirmations/{rid}/decline_x", headers=gw.h("admin")).status_code == 404
     # retry: owner only, no admin override
     owner_member = chat_request(gw, "member", "unlock the front door")["request_id"]
@@ -101,8 +107,10 @@ def test_decline_then_retry_creates_a_brand_new_request(gw):
     assert row["status"] == "pending" and row["retry_of"] == rid and row["action_hash"] == action_hash(LOCK)
     assert gw.ctx.db.one("SELECT COUNT(*) c FROM confirm_tokens")["c"] == 0                 # retry never mints or executes
     assert gw.m.hub.devices["ep_00000003"]["state"]["lock"] == "locked"
-    assert gw.pub.post(f"/confirmations/{rid}/retry", headers=gw.h("admin")).status_code == 409   # old id is dead
-    assert gw.pub.post(f"/confirmations/{new}/retry", headers=gw.h("admin")).status_code == 409   # still pending
+    r = gw.pub.post(f"/confirmations/{rid}/retry", headers=gw.h("admin"))                          # old id is dead
+    assert r.status_code == 409 and r.json()["error"] == "request_already_handled"
+    r = gw.pub.post(f"/confirmations/{new}/retry", headers=gw.h("admin"))                          # still pending
+    assert r.status_code == 409 and r.json()["error"] == "request_not_retryable"
     # the new request can be approved
     assert gw.pub.post("/confirmations", json={"request_id": new}, headers=gw.h("admin")).status_code == 200
 
@@ -293,3 +301,78 @@ def test_hash_matches_contract_vectors(gw):
         if a.get("type") == "run_scene":                       # the hub sorts the risky actions before hashing
             a["actions"] = sorted(a["actions"], key=lambda x: (x["endpoint_id"], x["capability"]))
         assert canon(a) == v["canonical"] and action_hash(a) == v["sha256"], v["name"]
+
+
+def test_handoff_is_authenticated_with_the_agent_api_secret(gw):
+    chat_request(gw)
+    gw.pub.post("/confirmations", json={"request_id": gw.ctx.db.one("SELECT request_id FROM confirm_requests")["request_id"]},
+                headers=gw.h("admin"))
+    assert gw.m.agent.calls and all(c["secret_ok"] for c in gw.m.agent.calls)                # chat + hand-off
+    assert any(c["path"].startswith("/v1/confirmations/") for c in gw.m.agent.calls)
+    # a wrong/rotated secret: the agent says 401, the hand-off fails, the token is burned and nothing is left usable
+    gw.m.agent.secret = "rotated"
+    gw.ctx.confirm.register_request(gw.uid("admin"), "s", {"request_id": "r-x", "summary": "x", "action": LOCK,
+                                                           "action_hash": action_hash(LOCK), "expires_in_s": 60})
+    r = gw.pub.post("/confirmations", json={"request_id": "r-x"}, headers=gw.h("admin"))
+    assert r.status_code == 502 and r.json()["error"] == "upstream_error"
+    assert gw.ctx.db.one("SELECT used FROM confirm_tokens WHERE request_id='r-x'")["used"] == 1
+
+
+def test_handoff_fails_closed_on_any_non_202(gw):
+    for status in (200, 204, 409, 500):                      # only 202 means the agent took it
+        gw.m.agent.delivery_status = status
+        rid = f"r-{status}"
+        gw.ctx.confirm.register_request(gw.uid("admin"), "s", {"request_id": rid, "summary": "x", "action": LOCK,
+                                                               "action_hash": action_hash(LOCK), "expires_in_s": 60})
+        r = gw.pub.post("/confirmations", json={"request_id": rid}, headers=gw.h("admin"))
+        assert r.status_code == 502, status
+        assert gw.ctx.db.one("SELECT status FROM confirm_requests WHERE request_id=?", (rid,))["status"] == "pending"
+    assert gw.ctx.db.one("SELECT COUNT(*) c FROM confirm_tokens WHERE used=0")["c"] == 0
+
+
+def test_expired_is_delivered_to_the_agent_and_the_user(gw):
+    rid = chat_request(gw, "member", "open up the house")["request_id"]            # run_scene (member lacks Hall, so only to expire)
+    gw.clock.advance(61)
+    asyncio_run(gw.ctx.confirm.sweep())
+    d = gw.m.agent.deliveries[-1]
+    assert d["request_id"] == rid and d["decision"] == "expired" and "confirmation_token" not in d and d["role"] == "member"
+    assert d["action"]["type"] == "run_scene" and d["action"]["scene_id"] == "sc_00000002" and d["action_hash"] == action_hash(d["action"])
+    assert gw.ctx.db.one("SELECT status FROM confirm_requests WHERE request_id=?", (rid,))["status"] == "expired"
+    n = len(gw.m.agent.deliveries)
+    asyncio_run(gw.ctx.confirm.sweep())
+    assert len(gw.m.agent.deliveries) == n                                         # delivered once
+
+
+def test_token_expiry_before_consumption_is_expired_too(gw):
+    rid = chat_request(gw)["request_id"]
+    assert gw.pub.post("/confirmations", json={"request_id": rid}, headers=gw.h("admin")).status_code == 200
+    gw.clock.advance(61)                                                           # hub never consumed the token
+    asyncio_run(gw.ctx.confirm.sweep())
+    assert gw.m.agent.deliveries[-1]["decision"] == "expired"
+    row = gw.ctx.db.one("SELECT status FROM confirm_requests WHERE request_id=?", (rid,))
+    assert row["status"] == "expired"
+    assert gw.pub.post(f"/confirmations/{rid}/retry", headers=gw.h("admin")).status_code == 202   # expired can be retried
+    # a consumed token is NOT reported as expired
+    rid2 = chat_request(gw)["request_id"]
+    gw.pub.post("/confirmations", json={"request_id": rid2}, headers=gw.h("admin"))
+    hub_set(gw, gw.m.agent.deliveries[-1]["confirmation_token"], gw.uid("admin"))
+    gw.clock.advance(61)
+    asyncio_run(gw.ctx.confirm.sweep())
+    assert [d["decision"] for d in gw.m.agent.deliveries if d["request_id"] == rid2] == ["approved"]       # no "expired" for it
+    assert gw.ctx.db.one("SELECT status FROM confirm_requests WHERE request_id=?", (rid2,))["status"] == "approved"
+
+
+def test_agent_requests_must_match_the_contract_action_shapes(gw):
+    reg = gw.ctx.confirm.register_request
+    ok = {"request_id": "a1", "summary": "s", "action_hash": "0" * 64, "expires_in_s": 60}
+    scene = {"type": "run_scene", "scene_id": "sc_00000002", "actions": [{"endpoint_id": "ep_00000003", "capability": "lock", "value": "unlocked"}]}
+    assert reg("u", "s", {**ok, "action": scene}) is True
+    assert reg("u", "s", {**ok, "action": scene}) is False                              # duplicate id
+    for bad in ({"type": "run_scene", "scene": "sc_00000002", "needs_confirmation": []},   # the old shape
+                {**scene, "extra": 1}, {**LOCK, "extra": 1}, {"type": "unlock"}, {**scene, "actions": [{"endpoint_id": "x"}]}, "str", None):
+        assert reg("u", "s", {**ok, "request_id": "b" + str(id(bad)), "action": bad}) is False, bad
+
+
+def asyncio_run(coro):
+    import asyncio
+    return asyncio.run(coro)
