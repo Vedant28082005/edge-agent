@@ -1,0 +1,13 @@
+{
+  "ok": false,
+  "executed": false,
+  "status": "needs_confirmation",
+  "scene_id": "sc_9a8b7c6d",
+  "needs_confirmation": [
+    {
+      "endpoint_id": "ep_0a1b2c3d",
+      "capability": "lock",
+      "value": "unlocked"
+    }
+  ]
+}

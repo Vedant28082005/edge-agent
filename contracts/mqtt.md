@@ -1,4 +1,4 @@
-# MQTT contract (v3)
+# MQTT contract (v6)
 
 Broker: Mosquitto on `pi-brain`, **TLS on 8883** (1883 disabled), dynamic-security plugin, anonymous access off. Prefix for all topics: `home/v1/`. Payloads: JSON, UTF-8, max 16 KiB.
 
@@ -109,6 +109,21 @@ TLS certificate dates are checked against the board's clock, and a board without
 
 ## Contract changelog
 
+- **S0e addendum** (`mqtt.md` v5 (changelog only), `agent-internal.yaml` 1.1.0, `mcp-tools.md` v6, `device-hub-internal.yaml` 1.2.0, `agent-events.md` v7, ARCHITECTURE v6):
+  - `agent-internal.yaml`: required `role` (`admin|member|guest`) in `POST /v1/chat` and `POST /v1/confirmations/{request_id}`; set only by the gateway, trusted only from the authenticated gateway call, never inferred from a user id. Tests added.
+  - `run_scene` blocked result (`mcp-tools.md`, hub `POST /scenes/{id}/run` 409): also `scene_id`, the canonical `risk: confirm` action list (the exact hashed objects) and the canonical `action_hash`. The `confirmation_request` run_scene action in `agent-events.md` is now `{type, scene_id, actions}` as hashed.
+  - ARCHITECTURE 4.10: agent chat body fixed (no `audio_ref` / `image_refs`; inline `images`) and pointed at `agent-internal.yaml`.
+
+- **S0e** (announce stays schema 2; `mqtt.md` v4 (changelog only), `agent-events.md` v7, `gateway.yaml` 2.9.0, new `agent-internal.yaml` 1.0.0, ARCHITECTURE v5):
+  - `gateway.yaml`: `SceneAction.target` is exactly one of fixed `{endpoint_id}` or selector `{room?, type?, tag?}` (`minProperties: 1`), both `additionalProperties: false`; samples in `samples/scene-action/` (valid: fixed, selector; invalid: mixed, empty, unknown key) validated by `contract_test.py`.
+  - New `openapi/agent-internal.yaml`: the agent's local API on 127.0.0.1:8200 (`POST /v1/chat`, `POST /v1/confirmations/{request_id}`, `GET /v1/events`, `GET /v1/memory`, `DELETE /v1/memory/{id}`, `GET /v1/health`). Auth mandatory on every operation: gateway secret `agent-api.secret` (agent holds a verifier), distinct from the agent's hub secret; no-auth only with `--mock --insecure-no-auth`. The agent recomputes the canonical action hash on approval and refuses on mismatch; it never logs or persists the token. `contract_test.py` checks valid OpenAPI, auth on every operation and the decision body rules.
+  - `agent-events.md`: confirmation hand-off sequence; retry is created by the gateway and reaches the agent only at approval with the full action; declined and expired are delivered to the agent; chat request carries inline `images` instead of refs.
+  - `gateway.yaml` media: voice becomes a transcript before chat; images are inline `images:[{ref, media_type, data_b64}]` to the agent; limits aligned with the gateway (text 4000, 4 images/turn, image 5 MiB jpeg/png/webp, audio 10 MiB wav/webm/m4a/aac, 120 s single-use TTL, 8 held per user, 32 MiB total); `/transcribe` multipart field is `audio`.
+  - `gateway.yaml` admin: `GET/PUT /admin/scenes/{scene_id}/assignments`, `GET/POST /admin/wifi-profiles`, `DELETE /admin/wifi-profiles/{name}` (password write-only, never returned).
+  - `gateway.yaml` statuses 429 (+`Retry-After`), 409 (`request_*`, `action_changed`), 413, 415, 502, 504; WebSocket types `confirmation_request`, `confirmation_declined`, `confirmation_expired`, `action_settled`, `action_settle_timeout` (settle events are not notifications).
+  - WebSocket auth: JWT never in the URL; `POST /ws/ticket` (single use, 30 s, bound to the user) presented on connect.
+  - ARCHITECTURE 4.7/4.11: guests read state in assigned rooms and run assigned scenes, cannot call `POST /devices/{id}/set`; member scene selectors must name an accessible room, re-checked at run time.
+
 - **S0d** (announce stays schema 2; `mqtt.md` v3, `mcp-tools.md` v5, `agent-events.md` v6, `device-hub-internal.yaml` 1.1.0, ARCHITECTURE v4):
   - `device-hub-internal.yaml`: agent scope = exactly `POST /mcp` + read-only `GET /events` with a SERVER-SIDE allowlist (`registry_changed`, `node_status`, `state`, `action_settled`, `action_settle_timeout`), applied to live delivery and replay; a requested type outside it is 403 `forbidden_event_type`; `scenes_changed`, `pending_node`, provisioning/admin and any credential-bearing event are gateway-only. Payloads of every event type documented (including `call_id?` on the two settle events), plus the wire envelope `{seq, type, ts, data}`. Aligned with the S1 hub (names `node_status`/`state`, see the S0d report for discrepancies).
   - `mcp-tools.md`: optional `_meta.call_id` (max 64 chars), set by the agent executor, echoed by the hub on `action_settled` / `action_settle_timeout`, never trusted for any decision.
@@ -132,3 +147,8 @@ TLS certificate dates are checked against the board's clock, and a board without
   - Ack means "accepted, motion started"; `set_state` returns `done`/`moving`; `action_settled` and `action_settle_timeout` events; `run_scene` per-action statuses `done|moving|...`.
   - BLE bundle / credentials: username and client_id are both `node_id`; clean session.
   - Idempotent dynsec node-user creation (also in `CLAUDE.md`).
+
+- **S0f** (announce stays schema 2; `mqtt.md` v6, `agent-internal.yaml` 1.2.0, `gateway.yaml` 2.10.0, `device-hub-internal.yaml` 1.3.0):
+  - `agent-internal.yaml`: `PUT /v1/memory/{memory_id}` (body `{user_id, text<=500}`; per-user, auth mandatory; another user's memory is 404). The path parameter of `DELETE` is renamed `{id}` -> `{memory_id}` (wire-compatible).
+  - `gateway.yaml`: WebSocket type `scenes_changed` `{scene_id, change: created|updated|deleted}`, delivered only to users who can see the scene (rooms and assignments); close code 4429 (rate limited, client backs off); 413 also for an upload with no known Content-Length.
+  - `device-hub-internal.yaml`: `SceneRunNotExecuted` schema for the scene-run 409 (requires `executed:false` and `status`; `needs_confirmation` also requires `scene_id`, `needs_confirmation[]`, `action_hash`). New `samples/scene-run-409/` and a `tools\contract_test.py` check; the memory path name in that script was updated.

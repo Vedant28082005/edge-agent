@@ -1,0 +1,8 @@
+{
+  "target": {
+    "room": "bedroom",
+    "type": "light"
+  },
+  "capability": "on",
+  "value": false
+}

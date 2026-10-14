@@ -71,6 +71,7 @@ print("ok   openapi admin gating checked")
 OPENAPI_SUITES = {
     "consume-request": "ConsumeRequest",
     "consume-response": "ConsumeResponse",
+    "scene-action": "SceneAction",
 }
 spec_for_refs = dict(spec)
 # ConsumeResponse = granted or denied
@@ -186,6 +187,21 @@ for path, op in agent_ops:
                 if t not in allow:
                     failures += 1
                     print(f"FAIL hub-internal allowlist must contain {t}")
+# --- device-hub scene-run 409 body must validate samples ---------------------------
+_v409 = Draft202012Validator({"$ref": "#/components/schemas/SceneRunNotExecuted", "components": hub["components"]})
+for kind in ("valid", "invalid"):
+    files = sorted((contracts / "samples" / "scene-run-409" / kind).glob("*.json"))
+    if not files:
+        failures += 1
+        print(f"FAIL: no samples for scene-run-409 in {kind}/")
+    for f in files:
+        counts[kind] += 1
+        errors = list(_v409.iter_errors(json.loads(f.read_text(encoding="utf-8"))))
+        if bool(errors) == (kind == "invalid"):
+            print(f"ok   scene-run-409/{kind}/{f.name}")
+        else:
+            failures += 1
+            print(f"FAIL scene-run-409/{kind}/{f.name}")
 for path, item in hub["paths"].items():
     for method, op in item.items():
         if method in ("get", "post", "put", "patch", "delete") and "agent" in (op.get("x-scopes") or []) and (path, method) not in (("/events", "get"), ("/mcp", "post")):
@@ -199,6 +215,64 @@ if "agentSecret" not in hub["components"]["securitySchemes"] or "gatewaySecret" 
     print("FAIL hub-internal: gatewaySecret and agentSecret schemes are required")
 if failures == _f0:
     print("ok   hub-internal auth mandatory; agent scope = POST /mcp + allowlisted GET /events only")
+
+# --- agent internal API: valid OpenAPI, auth mandatory on EVERY operation, own secret ------------------
+agent_api = yaml.safe_load((contracts / "openapi" / "agent-internal.yaml").read_text(encoding="utf-8"))
+try:
+    validate_openapi(agent_api)
+    print("ok   openapi/agent-internal.yaml is a valid OpenAPI document")
+except Exception as e:  # noqa: BLE001
+    failures += 1
+    print(f"FAIL openapi/agent-internal.yaml: {str(e)[:120]}")
+_f1 = failures
+if list(agent_api["components"]["securitySchemes"]) != ["agentApiSecret"]:
+    failures += 1
+    print("FAIL agent-internal: exactly one security scheme (agentApiSecret) is expected, distinct from hub secrets")
+for path, item in agent_api["paths"].items():
+    for method, op in item.items():
+        if method not in ("get", "post", "put", "patch", "delete"):
+            continue
+        sec = op.get("security", agent_api.get("security", []))
+        if sec != [{"agentApiSecret": []}]:
+            failures += 1
+            print(f"FAIL agent-internal {method.upper()} {path}: every operation must require agentApiSecret")
+        if "401" not in op["responses"]:
+            failures += 1
+            print(f"FAIL agent-internal {method.upper()} {path}: missing 401 response")
+for need in ("/v1/chat", "/v1/confirmations/{request_id}", "/v1/events", "/v1/memory", "/v1/memory/{memory_id}", "/v1/health"):
+    if need not in agent_api["paths"]:
+        failures += 1
+        print(f"FAIL agent-internal: missing path {need}")
+if failures == _f1:
+    print("ok   agent-internal auth mandatory on every operation")
+cd_validator = Draft202012Validator({"$ref": "#/components/schemas/ConfirmationDecision", "components": agent_api["components"]})
+_h = "a" * 64
+_act = {"type": "run_scene", "scene_id": "sc_9a8b7c6d", "actions": [{"endpoint_id": "ep_1b2c3d4e", "capability": "lock", "value": "unlocked"}]}
+for name, body, want_ok in [
+    ("approved with token", {"decision": "approved", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h, "confirmation_token": "A" * 43}, True),
+    ("declined without token", {"decision": "declined", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h}, True),
+    ("expired without token", {"decision": "expired", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h}, True),
+    ("approved without token", {"decision": "approved", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h}, False),
+    ("declined with token", {"decision": "declined", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h, "confirmation_token": "A" * 43}, False),
+    ("approved without action", {"decision": "approved", "user_id": "u1", "role": "member", "action_hash": _h, "confirmation_token": "A" * 43}, False),
+]:
+    ok = (not list(cd_validator.iter_errors(body))) == want_ok
+    if not ok:
+        failures += 1
+    print(("ok   " if ok else "FAIL ") + f"agent-internal confirmation decision: {name}")
+_nr = {"decision": "declined", "user_id": "u1", "action": _act, "action_hash": _h}
+_bad_role = {**_nr, "role": "root"}
+for name, body in [("missing role", _nr), ("unknown role", _bad_role)]:
+    ok = bool(list(cd_validator.iter_errors(body)))
+    if not ok:
+        failures += 1
+    print(("ok   " if ok else "FAIL ") + f"agent-internal confirmation decision rejected: {name}")
+chat_validator = Draft202012Validator({"$ref": "#/components/schemas/ChatRequest", "components": agent_api["components"]})
+for name, body, want_ok in [("chat with role", {"user_id": "u1", "role": "guest", "session_id": "s"}, True), ("chat without role", {"user_id": "u1", "session_id": "s"}, False)]:
+    ok = (not list(chat_validator.iter_errors(body))) == want_ok
+    if not ok:
+        failures += 1
+    print(("ok   " if ok else "FAIL ") + f"agent-internal {name}")
 
 # --- canonical action hash vectors -------------------------------------------------
 import copy

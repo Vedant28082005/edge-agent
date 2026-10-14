@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.8.1
+  version: 2.10.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -41,6 +41,7 @@ paths:
       responses:
         '200': {description: Tokens, content: {application/json: {schema: {$ref: '#/components/schemas/TokenPair'}}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
   /auth/refresh:
     post:
       tags: [auth]
@@ -90,7 +91,9 @@ paths:
         '200': {description: Result, content: {application/json: {schema: {$ref: '#/components/schemas/SetResult'}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
-        '409': {description: Confirmation required or endpoint offline, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "Nothing executed: `confirmation_required` (risk:confirm without a valid token) or `endpoint_offline`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /scenes:
     get:
       tags: [scenes]
@@ -144,6 +147,8 @@ paths:
         '200': {description: Per-action results, content: {application/json: {schema: {$ref: '#/components/schemas/SceneRunResult'}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {description: Nothing executed; risk:confirm actions need a confirmation token, content: {application/json: {schema: {$ref: '#/components/schemas/SceneRunResult'}}}}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /confirmations:
     post:
       tags: [devices]
@@ -186,6 +191,10 @@ paths:
                   expires_at: {type: integer}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfirmationConflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /confirmations/{request_id}/decline:
     post:
       tags: [devices]
@@ -197,6 +206,9 @@ paths:
         '204': {description: Declined}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfirmationConflict'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /confirmations/{request_id}/retry:
     post:
       tags: [devices]
@@ -217,11 +229,22 @@ paths:
           content: {application/json: {schema: {type: object, required: [request_id], properties: {request_id: {type: string}}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfirmationConflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
   /chat:
     post:
       tags: [chat]
       operationId: chat
-      description: Proxies the agent /v1/chat. Response is an SSE stream; events are defined in agent-events.md.
+      description: |
+        Proxies the agent `/v1/chat` (`agent-internal.yaml`). Response is an SSE stream; events are defined in agent-events.md.
+        Media rules:
+        * **Voice becomes a transcript before chat.** `audio_ref` (from `POST /voice`) is resolved by the gateway to the
+          stored transcript, which is used as `text`; the agent never receives audio and never sees `audio_ref`.
+          If both `text` and `audio_ref` are sent, the transcript is appended to `text` (total still at most 4000 chars).
+        * **Images go to the agent inline.** Each `image_refs` entry (from `POST /images`) is resolved by the gateway and
+          sent as `images: [{ref, media_type, data_b64}]` in the agent chat body. Refs are single use, owned by the caller,
+          and expire (see `/images`). An unknown, expired, used or foreign ref is a 400 `bad_media_ref`.
+        Limits: `text` 4000 chars, at most 4 images per turn, 5 MiB per image (see `/images`).
       requestBody:
         required: true
         content:
@@ -229,17 +252,25 @@ paths:
             schema:
               type: object
               properties:
-                session_id: {type: string}
+                session_id: {type: string, maxLength: 64}
                 text: {type: string, maxLength: 4000}
-                audio_ref: {type: string}
-                image_refs: {type: array, maxItems: 4, items: {type: string}}
+                audio_ref: {type: string, maxLength: 64}
+                image_refs: {type: array, maxItems: 4, items: {type: string, maxLength: 64}}
       responses:
         '200': {description: SSE stream, content: {text/event-stream: {schema: {type: string}}}}
+        '400': {description: "Malformed body or `bad_media_ref`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /voice:
     post:
       tags: [chat]
       operationId: uploadVoice
-      description: Audio proxied to vision-node /transcribe. Returns an audio_ref for /chat and the transcript.
+      description: |
+        Audio is proxied to vision-node `/transcribe` (multipart field `audio`). The audio is dropped after transcription;
+        only the transcript is kept, under the returned `audio_ref`, for use in `/chat` (single use, 120 s TTL).
+        Limits: 10 MiB, container `wav`, `webm`, `m4a` or `aac` (sniffed, not trusted from the Content-Type); other types are 415.
       requestBody:
         required: true
         content:
@@ -250,11 +281,20 @@ paths:
               properties:
                 audio: {type: string, format: binary}
       responses:
-        '200': {description: Transcript, content: {application/json: {schema: {type: object, properties: {audio_ref: {type: string}, text: {type: string}}}}}}
+        '200': {description: Transcript, content: {application/json: {schema: {type: object, required: [audio_ref, text], properties: {audio_ref: {type: string}, text: {type: string}}}}}}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /images:
     post:
       tags: [chat]
       operationId: uploadImage
+      description: |
+        Image upload for the next chat turn(s). Held in memory only (never written to disk), single use, TTL 120 s.
+        Limits: 5 MiB per image, `jpeg`, `png` or `webp` (sniffed); other types are 415. At most 8 held images per user and
+        32 MiB held in total; beyond that 429 `too_many_uploads`.
       requestBody:
         required: true
         content:
@@ -266,6 +306,9 @@ paths:
                 image: {type: string, format: binary}
       responses:
         '200': {description: Reference, content: {application/json: {schema: {type: object, required: [image_ref], properties: {image_ref: {type: string}}}}}}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
   /memory:
     get:
       tags: [chat]
@@ -300,10 +343,58 @@ paths:
       tags: [system]
       operationId: websocket
       description: |
-        WebSocket upgrade. Server pushes JSON messages
-        {type: state|perception|notification|async_result|registry_changed, ...}.
+        WebSocket upgrade. The server pushes JSON messages `{type, ...}` filtered by the caller's role and rooms.
+        Types: `state`, `perception`, `scenes_changed`, `registry_changed`, `notification`, `async_result` (late VLM answer) and the
+        confirmation and settle messages below. Settle events are **their own types and are NOT generic notifications**.
+
+        * `confirmation_request` `{request_id, summary, action, action_hash, expires_in_s}`: a `risk: confirm` action awaits this user.
+        * `confirmation_declined` `{request_id, summary}`: the user declined; nothing was executed.
+        * `action_settled` `{call_id, endpoint_id, capability, value, observed, elapsed_ms}`: a motion reached its target.
+        * `action_settle_timeout` `{call_id, endpoint_id, capability, value, observed, settle_s}`: it did not converge (`observed` may be null).
+        * `confirmation_expired` `{request_id, summary, reason}`: no answer in time or the token expired; nothing was executed.
+        * `scenes_changed` `{scene_id, change}` (`change`: `created|updated|deleted`): a scene was changed. Delivered ONLY to users who
+          can see the affected scene (admins; members and guests only when the scene's room selectors and assignments make it
+          visible to them, evaluated at delivery time; for `deleted`, by visibility just before deletion); everyone else gets nothing.
+          The message carries no scene content: the client refetches `GET /scenes`.
+        * `notification` `{level, text}` is for everything else (e.g. `level: action_blocked`).
+        Payloads match `agent-events.md`.
+
+        **Auth: the JWT is NEVER sent in the URL (no `?token=`, no path segment): URLs end up in proxy and access logs.**
+        Obtain a ticket with `POST /ws/ticket` (single use, 30 s TTL, bound to the user) and pass it on connect, in the `Sec-WebSocket-Protocol` header as
+        `edge-ticket.<ticket>` or as the first message `{"type":"auth","ticket":"..."}` (the server closes with 4401 if
+        no valid ticket arrives within 5 s). A header-capable client may also send `Authorization: Bearer <access JWT>`.
+        The connection ends when the access token that created it expires (close 4401); the client refreshes and reconnects.
+
+        **Close code 4429 (rate limited):** the server closes with 4429 when the client exceeds the connection or message rate
+        limit (too many connects, tickets or inbound messages). The client must wait before reconnecting (back off, at
+        least 5 s, doubling up to 60 s) and must not retry in a tight loop.
+      security: []
       responses:
         '101': {description: Switching protocols}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /ws/ticket:
+    post:
+      tags: [system]
+      operationId: createWsTicket
+      description: |
+        Mints a short-lived ticket for the WebSocket handshake (see `/ws`; the JWT must never go in the URL).
+        The ticket is opaque (256-bit random), **single use** (burned on first presentation, valid or not), bound to the
+        caller's user id and expires 30 s after minting; it carries no more rights than the caller's current role and
+        rooms, which are re-read from the DB when the socket connects. Only its hash is stored. It is never logged.
+      responses:
+        '200':
+          description: Ticket
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expires_in_s]
+                properties:
+                  ticket: {type: string, pattern: '^[A-Za-z0-9_-]{43}$'}
+                  expires_in_s: {const: 30}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
 
   # ------------------------------------------------------------ INTERNAL (service-to-service only)
   # Everything below is on a separate internal listener, NOT on the public gateway port 8000:
@@ -580,6 +671,63 @@ paths:
       responses:
         '204': {description: Deleted}
         '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/scenes/{scene_id}/assignments:
+    parameters:
+      - {name: scene_id, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [admin]
+      operationId: adminGetSceneAssignments
+      x-required-role: admin
+      description: Guest users this scene is assigned to. A guest may run a scene only if it is assigned (ARCHITECTURE 4.7).
+      responses:
+        '200': {description: Assignments, content: {application/json: {schema: {$ref: '#/components/schemas/SceneAssignments'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [admin]
+      operationId: adminSetSceneAssignments
+      x-required-role: admin
+      description: Replaces the whole set of guest users the scene is assigned to. Only users with role `guest` are accepted (400 otherwise); an empty list unassigns everyone. Deleting a scene or a user drops its assignments.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SceneAssignments'}}}
+      responses:
+        '200': {description: Stored assignments, content: {application/json: {schema: {$ref: '#/components/schemas/SceneAssignments'}}}}
+        '400': {description: Unknown user or user is not a guest, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /admin/wifi-profiles:
+    get:
+      tags: [admin]
+      operationId: adminListWifiProfiles
+      x-required-role: admin
+      description: Saved Wi-Fi profiles for provisioning (`wifi_profile` in POST /admin/provision-sessions). The password is write-only and is NEVER returned by any route.
+      responses:
+        '200': {description: Profiles without passwords, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/WifiProfile'}}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [admin]
+      operationId: adminCreateWifiProfile
+      x-required-role: admin
+      description: Creates or replaces (by name) a profile. The password is stored encrypted, never logged, and never returned.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/WifiProfileInput'}}}
+      responses:
+        '201': {description: Stored (no password in the reply), content: {application/json: {schema: {$ref: '#/components/schemas/WifiProfile'}}}}
+        '400': {description: Invalid profile, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/wifi-profiles/{name}:
+    delete:
+      tags: [admin]
+      operationId: adminDeleteWifiProfile
+      x-required-role: admin
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string, maxLength: 64}}
+      responses:
+        '204': {description: Deleted}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
 
 components:
   securitySchemes:
@@ -602,6 +750,24 @@ components:
     Unauthorized: {description: Missing or invalid token, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     Forbidden: {description: Role not allowed, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     NotFound: {description: Not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    ConfirmationConflict:
+      description: |
+        Conflict on a confirmation request; nothing was executed. `error` is one of
+        `request_expired` (TTL passed), `request_already_handled` (approved, declined or retried before),
+        `request_not_retryable` (retry of a request that is not declined/expired, or created by a non-user trigger), and
+        `action_changed` (the action now resolves differently than when the request was issued, e.g. a scene's risky
+        targets changed, the endpoint was re-risked or disabled; the stored action hash no longer matches. The user must
+        start a new request).
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    TooLarge: {description: "Body or upload over the limit (`too_large`). Also returned when an upload has no known Content-Length (no `Content-Length` header, e.g. chunked transfer): the server does not buffer unbounded bodies and rejects with 413 instead of 411", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    UnsupportedMedia: {description: "Media type not accepted (`unsupported_media_type`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    TooManyRequests:
+      description: Rate or quota limit (`rate_limited`, `too_many_uploads`). Always sets Retry-After (seconds).
+      headers:
+        Retry-After: {schema: {type: integer, minimum: 1}, description: Seconds to wait before retrying}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    BadGateway: {description: "An upstream (device-hub, agent, vision-node) answered with an error or an unusable reply (`upstream_error`, `vision_unavailable`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    GatewayTimeout: {description: "An upstream did not answer in time (`upstream_timeout`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   schemas:
     Error:
       type: object
@@ -665,23 +831,29 @@ components:
         verified: {type: boolean, description: Read-back matched the target; always false while status is moving (see mcp-tools.md)}
         error: {type: string}
         values: {type: object, additionalProperties: true}
+    SceneTargetFixed:
+      type: object
+      additionalProperties: false
+      required: [endpoint_id]
+      properties:
+        endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+    SceneTargetSelector:
+      type: object
+      description: Selector resolved at run time; fields combine with AND.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        room: {type: string, maxLength: 48}
+        type: {$ref: '#/components/schemas/EndpointType'}
+        tag: {$ref: '#/components/schemas/Tag'}
     SceneAction:
       type: object
       required: [target, capability, value]
       properties:
         target:
           oneOf:
-            - type: object
-              required: [endpoint_id]
-              properties:
-                endpoint_id: {$ref: '#/components/schemas/EndpointId'}
-            - type: object
-              description: Selector resolved at run time
-              minProperties: 1
-              properties:
-                room: {type: string}
-                type: {$ref: '#/components/schemas/EndpointType'}
-                tag: {$ref: '#/components/schemas/Tag'}
+            - $ref: '#/components/schemas/SceneTargetFixed'
+            - $ref: '#/components/schemas/SceneTargetSelector'
         capability: {type: string}
         value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
     SceneInput:
@@ -768,6 +940,27 @@ components:
               capability: {type: string}
               status: {type: string, enum: [done, moving, skipped_offline, skipped_no_capability, failed]}
               detail: {type: string}
+    SceneAssignments:
+      type: object
+      additionalProperties: false
+      required: [user_ids]
+      properties:
+        user_ids: {type: array, maxItems: 64, uniqueItems: true, items: {type: string, maxLength: 64}, description: Guest user ids}
+    WifiProfile:
+      type: object
+      additionalProperties: false
+      required: [name, ssid]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 64}
+        ssid: {type: string, maxLength: 32}
+    WifiProfileInput:
+      type: object
+      additionalProperties: false
+      required: [name, ssid, password]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 64}
+        ssid: {type: string, maxLength: 32}
+        password: {type: string, maxLength: 64, writeOnly: true}
     Memory:
       type: object
       properties:
