@@ -1,0 +1,473 @@
+{
+ "additionalProperties": false,
+ "properties": {
+  "calls": {
+   "items": {
+    "anyOf": [
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "capability": {
+          "const": "brightness"
+         },
+         "endpoint_id": {
+          "enum": [
+           "ep_b0000001",
+           "ep_b0000004"
+          ]
+         },
+         "value": {
+          "maximum": 100,
+          "minimum": 0,
+          "type": "integer"
+         }
+        },
+        "required": [
+         "endpoint_id",
+         "capability",
+         "value"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "set_state"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "capability": {
+          "const": "lock"
+         },
+         "endpoint_id": {
+          "enum": [
+           "ep_b0000006"
+          ]
+         },
+         "value": {
+          "enum": [
+           "locked",
+           "unlocked"
+          ]
+         }
+        },
+        "required": [
+         "endpoint_id",
+         "capability",
+         "value"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "set_state"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "capability": {
+          "const": "position"
+         },
+         "endpoint_id": {
+          "enum": [
+           "ep_b0000005"
+          ]
+         },
+         "value": {
+          "maximum": 100,
+          "minimum": 0,
+          "type": "integer"
+         }
+        },
+        "required": [
+         "endpoint_id",
+         "capability",
+         "value"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "set_state"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "capability": {
+          "const": "power"
+         },
+         "endpoint_id": {
+          "enum": [
+           "ep_b0000001",
+           "ep_b0000002",
+           "ep_b0000004",
+           "ep_b0000007",
+           "ep_b0000008"
+          ]
+         },
+         "value": {
+          "type": "boolean"
+         }
+        },
+        "required": [
+         "endpoint_id",
+         "capability",
+         "value"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "set_state"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "capability": {
+          "const": "speed"
+         },
+         "endpoint_id": {
+          "enum": [
+           "ep_b0000007"
+          ]
+         },
+         "value": {
+          "maximum": 3,
+          "minimum": 1,
+          "type": "integer"
+         }
+        },
+        "required": [
+         "endpoint_id",
+         "capability",
+         "value"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "set_state"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "capability": {
+          "const": "speed"
+         },
+         "endpoint_id": {
+          "enum": [
+           "ep_b0000002"
+          ]
+         },
+         "value": {
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+         }
+        },
+        "required": [
+         "endpoint_id",
+         "capability",
+         "value"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "set_state"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "capability": {
+          "const": "humidity"
+         },
+         "endpoint_id": {
+          "enum": [
+           "ep_b0000009"
+          ]
+         }
+        },
+        "required": [
+         "endpoint_id",
+         "capability"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "read_sensor"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "capability": {
+          "const": "motion"
+         },
+         "endpoint_id": {
+          "enum": [
+           "ep_b000000a"
+          ]
+         }
+        },
+        "required": [
+         "endpoint_id",
+         "capability"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "read_sensor"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "capability": {
+          "const": "temperature"
+         },
+         "endpoint_id": {
+          "enum": [
+           "ep_b0000003"
+          ]
+         }
+        },
+        "required": [
+         "endpoint_id",
+         "capability"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "read_sensor"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "endpoint_id": {
+          "enum": [
+           "ep_b0000001",
+           "ep_b0000002",
+           "ep_b0000003",
+           "ep_b0000004",
+           "ep_b0000005",
+           "ep_b0000006",
+           "ep_b0000007",
+           "ep_b0000008",
+           "ep_b0000009",
+           "ep_b000000a"
+          ]
+         }
+        },
+        "required": [
+         "endpoint_id"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "get_state"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "room": {
+          "enum": [
+           "Bedroom",
+           "Hall",
+           "Kitchen",
+           "Living room"
+          ]
+         }
+        },
+        "required": [
+         "room"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "get_state"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "room": {
+          "enum": [
+           "Bedroom",
+           "Hall",
+           "Kitchen",
+           "Living room"
+          ]
+         },
+         "type": {
+          "enum": [
+           "cover",
+           "fan",
+           "light",
+           "lock",
+           "sensor"
+          ]
+         }
+        },
+        "required": [],
+        "type": "object"
+       },
+       "tool": {
+        "const": "list_devices"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     },
+     {
+      "additionalProperties": false,
+      "properties": {
+       "args": {
+        "additionalProperties": false,
+        "properties": {
+         "scene": {
+          "enum": [
+           "Good night",
+           "Movie time",
+           "Morning"
+          ]
+         }
+        },
+        "required": [
+         "scene"
+        ],
+        "type": "object"
+       },
+       "tool": {
+        "const": "run_scene"
+       }
+      },
+      "required": [
+       "tool",
+       "args"
+      ],
+      "type": "object"
+     }
+    ]
+   },
+   "maxItems": 4,
+   "type": "array"
+  },
+  "say": {
+   "maxLength": 240,
+   "type": "string"
+  }
+ },
+ "required": [
+  "calls",
+  "say"
+ ],
+ "type": "object"
+}

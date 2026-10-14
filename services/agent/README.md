@@ -2,8 +2,8 @@
 
 HTTP on `127.0.0.1:8200` (loopback only). Event bus, registry-built prompt with a hard token budget and a stable cached
 prefix, planner + executor split, constrained decoding from the live registry, confirmation flow, SSE chat, SQLite
-persistence. **Not here (S8):** fast path, cost-based scheduler, memory extraction, vision/voice (`audio_ref` and
-`image_refs` are refused with 400). Read first: `CLAUDE.md`, `contracts/mcp-tools.md` (v5), `contracts/agent-events.md` (v6),
+persistence, and (S8) the scheduler in `agent/sched/` (below). **Not here:** memory extraction / persistent fact store,
+real vision/voice backends (images are accepted and dropped; the router's vision sources sit behind an interface). Read first: `CLAUDE.md`, `contracts/mcp-tools.md` (v5), `contracts/agent-events.md` (v6),
 `contracts/openapi/device-hub-internal.yaml` (1.1.0).
 
 ## Run (Windows, PowerShell 5.1)
@@ -63,6 +63,24 @@ untrusted-string handling, no secret/token in logs/events/store/model prompts, s
 mock end-to-end (HTTP SSE), and `test_integration_hub.py` against the **real device-hub** (`services/device-hub`, merged S1, scene flow included) (`--mock` internals, caller
 auth ON, agent secret scope enforced, hub-side token consumption, our action hash equals the hub's).
 `tests/test_llama_real.py` (needs `EDGE_TEST_GGUF`, optional `EDGE_LLAMA_SERVER`) is written, **not run**.
+
+## Scheduler (S8, `agent/sched/`)
+
+All of it sits behind the five tools; nothing here can add one. Config: `AgentConfig.sched` (JSON object, `sched/config.py`).
+
+| Piece | File | Notes |
+|---|---|---|
+| Fast path | `resolver.py`, `text.py` | Deterministic: normalise, intent (on/off, set value, lock, open/close, scene), score every registry device by label/room/type/tag tokens (typo-tolerant), plan only if coverage x intent confidence >= `fast_threshold` (0.85) and the winner beats the runner-up by `fast_margin`; "all lights in X" groups (cap 8). Questions, negation, time/condition, compound and relative phrasing, unknown words ("kitchen fan" with no kitchen fan), out-of-range values fall through to the LLM. Guests: `set_state` utterances are denied (the agent does not know their assigned rooms/scenes), scenes fall through. Execution = `Executor.run_calls`, the same path as an LLM plan |
+| Router | `router.py` | Perception questions: sensor (`read_sensor`), YOLO jetson/pi, VLM yes/no / short / JSON, LLM last. Cost table in config (`est`/`measured` flags), EWMA of observed latency, failure breaker (30 s), health gate (VLM < 400 MB, node down). Vision sources need a registered `PerceptionBackend`; none exists yet, so they are skipped |
+| Constrained decoding | `grammar.py`, `llm.py` | `schema.build_plan_schema` -> `schema_to_gbnf`; `ConstraintCache` rebuilt only when ids/capabilities/ranges/enums/rooms/scenes change (not on a rename); backends `json_schema` (response_format) or `gbnf` (grammar field) |
+| Prefix cache | `prefix.py`, `prompt.py` | Static prefix first, then history/summary/memories/current; `cache_prompt` + pinned `id_slot`; `PrefixTracker` records same-prefix and server `cache_n` per turn |
+| Memory | `memory.py` | Per-user window by token budget (+ the builder's 4-message cap), rolling summary with its own budget, deterministic summariser (hook for an idle LLM one); guests in-process only |
+| Trace | `trace.py`, `scheduler.py` | One per turn: route, candidates, latency, tokens, cache hit, constrained, outcome, flags. Bus event `sched.trace` + action-log row (`status: trace`); no user text. SSE `route` stays `fast|llm|vision` (sensor answers are `fast`) |
+
+Ablation: `fast_path`, `router`, `constrained_decoding`, `prefix_cache` in `sched` config or live with `POST /v1/runtime`
+(`GET /v1/stats` has per-route counters and the cost table). Benchmark (mock LLM, simulated latency, prints per-route
+latency per ablation): `.	oolsench-sched.ps1`. Real constrained-decoding gate: `EDGE_TEST_GGUF` + `tests/test_llama_real.py`
+(both backends; **not run**).
 
 ## Gateway API (contracts/openapi/agent-internal.yaml 1.2.0)
 
