@@ -67,7 +67,9 @@ services:
     build: {context: .., dockerfile: deploy/docker/Dockerfile.gateway}
     user: "10102:10102"
     mem_limit: 256m                              # [est]
-    depends_on: [device-hub, agent]
+    depends_on:
+      device-hub: {condition: service_healthy}
+      agent: {condition: service_started}
     ports:
       - "${GATEWAY_PUBLISH:-127.0.0.1:8000}:8000"   # loopback only; `tailscale serve` adds HTTPS (tools/tailscale-serve.md)
     # 8001 (internal consume listener) is deliberately not published.
@@ -85,7 +87,8 @@ services:
     build: {context: .., dockerfile: deploy/docker/Dockerfile.agent}
     user: "10103:10103"
     mem_limit: 256m                              # [est]
-    depends_on: [device-hub]
+    depends_on:
+      device-hub: {condition: service_healthy}
     extra_hosts:
       - "host.docker.internal:${EDGE_GATEWAY_IP:-172.29.0.1}"   # the host's address on the edge bridge: native llama-server
     # No ports: 8200 is reachable only from the gateway. The agent has NO gateway secret.

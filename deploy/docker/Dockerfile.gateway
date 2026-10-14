@@ -24,4 +24,4 @@ VOLUME ["/var/lib/edge-agent"]
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=6s --start-period=40s --retries=3 CMD ["python", "/app/healthcheck.py", "8000", "/system/health", "alive"]
 ENTRYPOINT ["python", "-m", "gateway"]
-CMD ["serve", "--config", "/etc/edge-agent/config/gateway.json"]
+CMD ["--config", "/etc/edge-agent/config/gateway.json", "serve"]
