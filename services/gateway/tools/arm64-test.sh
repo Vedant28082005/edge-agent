@@ -6,8 +6,8 @@ set -euo pipefail
 python --version
 uname -m
 mkdir -p /build/edge-agent-s4/services /build/edge-agent-s1/services
-tar -C /src/s4 -cf - contracts services/gateway --exclude=.venv --exclude=__pycache__ --exclude=data | tar -C /build/edge-agent-s4 -xf -
-tar -C /src/s1 -cf - contracts services/device-hub --exclude=.venv --exclude=__pycache__ | tar -C /build/edge-agent-s1 -xf -
+tar -C /src/s4 --exclude=.venv --exclude=__pycache__ --exclude=services/gateway/data -cf - contracts services/gateway | tar -C /build/edge-agent-s4 -xf -
+tar -C /src/s1 --exclude=.venv --exclude=__pycache__ -cf - contracts services/device-hub | tar -C /build/edge-agent-s1 -xf -
 
 python -m venv /build/edge-agent-s4/services/gateway/.venv
 /build/edge-agent-s4/services/gateway/.venv/bin/python -m pip install -q --only-binary=:all: -r /build/edge-agent-s4/services/gateway/requirements-dev.txt
