@@ -41,6 +41,7 @@ paths:
       responses:
         '200': {description: Tokens, content: {application/json: {schema: {$ref: '#/components/schemas/TokenPair'}}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
   /auth/refresh:
     post:
       tags: [auth]
@@ -90,7 +91,9 @@ paths:
         '200': {description: Result, content: {application/json: {schema: {$ref: '#/components/schemas/SetResult'}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
-        '409': {description: Confirmation required or endpoint offline, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "Nothing executed: `confirmation_required` (risk:confirm without a valid token) or `endpoint_offline`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /scenes:
     get:
       tags: [scenes]
@@ -144,6 +147,8 @@ paths:
         '200': {description: Per-action results, content: {application/json: {schema: {$ref: '#/components/schemas/SceneRunResult'}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {description: Nothing executed; risk:confirm actions need a confirmation token, content: {application/json: {schema: {$ref: '#/components/schemas/SceneRunResult'}}}}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /confirmations:
     post:
       tags: [devices]
@@ -186,6 +191,10 @@ paths:
                   expires_at: {type: integer}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfirmationConflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /confirmations/{request_id}/decline:
     post:
       tags: [devices]
@@ -197,6 +206,9 @@ paths:
         '204': {description: Declined}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfirmationConflict'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /confirmations/{request_id}/retry:
     post:
       tags: [devices]
@@ -217,6 +229,8 @@ paths:
           content: {application/json: {schema: {type: object, required: [request_id], properties: {request_id: {type: string}}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/ConfirmationConflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
   /chat:
     post:
       tags: [chat]
@@ -329,10 +343,21 @@ paths:
       tags: [system]
       operationId: websocket
       description: |
-        WebSocket upgrade. Server pushes JSON messages
-        {type: state|perception|notification|async_result|registry_changed, ...}.
+        WebSocket upgrade. The server pushes JSON messages `{type, ...}` filtered by the caller's role and rooms.
+        Types: `state`, `perception`, `registry_changed`, `notification`, `async_result` (late VLM answer) and the
+        confirmation and settle messages below. Settle events are **their own types and are NOT generic notifications**.
+
+        * `confirmation_request` `{request_id, summary, action, action_hash, expires_in_s}`: a `risk: confirm` action awaits this user.
+        * `confirmation_declined` `{request_id, summary}`: the user declined; nothing was executed.
+        * `action_settled` `{call_id, endpoint_id, capability, value, observed, elapsed_ms}`: a motion reached its target.
+        * `action_settle_timeout` `{call_id, endpoint_id, capability, value, observed, settle_s}`: it did not converge (`observed` may be null).
+        * `confirmation_expired` `{request_id, summary, reason}`: no answer in time or the token expired; nothing was executed.
+        * `notification` `{level, text}` is for everything else (e.g. `level: action_blocked`).
+        Payloads match `agent-events.md`.
       responses:
         '101': {description: Switching protocols}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
 
   # ------------------------------------------------------------ INTERNAL (service-to-service only)
   # Everything below is on a separate internal listener, NOT on the public gateway port 8000:
@@ -688,6 +713,15 @@ components:
     Unauthorized: {description: Missing or invalid token, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     Forbidden: {description: Role not allowed, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     NotFound: {description: Not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    ConfirmationConflict:
+      description: |
+        Conflict on a confirmation request; nothing was executed. `error` is one of
+        `request_expired` (TTL passed), `request_already_handled` (approved, declined or retried before),
+        `request_not_retryable` (retry of a request that is not declined/expired, or created by a non-user trigger), and
+        `action_changed` (the action now resolves differently than when the request was issued, e.g. a scene's risky
+        targets changed, the endpoint was re-risked or disabled; the stored action hash no longer matches. The user must
+        start a new request).
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
     TooLarge: {description: "Body or upload over the limit (`too_large`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     UnsupportedMedia: {description: "Media type not accepted (`unsupported_media_type`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     TooManyRequests:
