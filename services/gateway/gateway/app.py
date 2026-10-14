@@ -35,6 +35,16 @@ NODE_RE = re.compile(r"^esp32-[0-9a-f]{12}$")
 PLACEHOLDER = Path(__file__).resolve().parent.parent / "web_placeholder"
 
 
+class SpaStatic(StaticFiles):
+    """Static files for GET/HEAD only; any other method on an unknown or static path is a plain 404."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD"):
+            await jerr(404, "not_found")(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 class ApiError(Exception):
     def __init__(self, status: int, code: str, message: str = "", headers: dict | None = None) -> None:
         self.status, self.code, self.message, self.headers = status, code, message, headers or {}
@@ -738,6 +748,6 @@ def create_public_app(ctx: Ctx) -> FastAPI:
     app.include_router(r)
     static = Path(cfg.static_dir) if cfg.static_dir and Path(cfg.static_dir).is_dir() else PLACEHOLDER
     if static.is_dir():
-        app.mount("/", StaticFiles(directory=str(static), html=True), name="web")
+        app.mount("/", SpaStatic(directory=str(static), html=True), name="web")
     app.state.ctx = ctx
     return app

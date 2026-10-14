@@ -22,8 +22,14 @@ from .security import SECRETS, hash_password, sha256_hex
 
 
 def canon(obj) -> str:
-    """JCS for the shapes used here (strings, ints, bools). The real hub's own implementation is authoritative."""
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """JCS (RFC 8785) for the shapes used here; integral floats print as ints. The real hub's implementation is authoritative."""
+    def norm(x):
+        if isinstance(x, float) and x.is_integer():
+            return int(x)
+        if isinstance(x, dict):
+            return {k: norm(v) for k, v in x.items()}
+        return [norm(v) for v in x] if isinstance(x, list) else x
+    return json.dumps(norm(obj), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def action_hash(action: dict) -> str:
