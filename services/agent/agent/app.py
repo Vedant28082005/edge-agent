@@ -8,7 +8,7 @@ gateway), authentication mandatory on every operation including /v1/health (auth
   PUT|DELETE /v1/memory/{memory_id}   edit / delete one memory, only if it belongs to user_id (else 404)
   GET  /v1/health                     {ok, llm, hub}
 Extras, also authenticated and loopback-only (not part of the contract, for S10 and operators): GET /v1/stats,
-GET|POST /v1/runtime {"constrained": bool}.
+GET|POST /v1/runtime {"constrained"|"fast_path"|"router"|"prefix_cache": bool}.
 
 `role` and `user_id` are trusted only because the caller is the authenticated gateway. Request bodies are validated with
 the contract's schemas (additionalProperties: false), and a confirmation token is never logged or echoed."""
@@ -221,10 +221,12 @@ def create_app(agent: Agent, auth: ApiAuth | None) -> Starlette:
                 body = json.loads(await request.body())
             except (json.JSONDecodeError, ValueError):
                 body = None
-            if not isinstance(body, dict) or not isinstance(body.get("constrained"), bool):
-                return err(400, "bad_request", "body must be {\"constrained\": bool}")
-            agent.llm.constrained = body["constrained"]
-        return JSONResponse({"constrained": agent.llm.constrained})
+            keys = {"constrained", "constrained_decoding", "fast_path", "router", "prefix_cache"}
+            if (not isinstance(body, dict) or not body or not set(body) <= keys
+                    or not all(isinstance(v, bool) for v in body.values())):
+                return err(400, "bad_request", "body must be a JSON object of booleans: " + ", ".join(sorted(keys)))
+            agent.set_flags(**body)
+        return JSONResponse({"constrained": agent.llm.constrained, **agent.sched_cfg.flags()})
 
     routes = [
         Route("/v1/chat", chat, methods=["POST"]),

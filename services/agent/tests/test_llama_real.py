@@ -2,7 +2,8 @@
 needs a `llama-server` binary on PATH or in EDGE_LLAMA_SERVER. Measures prompt tokens (real /tokenize vs our estimate),
 prefill time and prefix-cache hits for two consecutive turns, and prints the numbers (run with `-s`).
 
-WRITTEN BUT NOT RUN in the S3 session (no model path was given)."""
+WRITTEN BUT NOT RUN (S3 and S8 sessions: no model path was given). S8 added the `constraint_backend` parameter
+(json_schema = response_format, gbnf = our own grammar field): this is the gate for both unverified request shapes."""
 import asyncio
 import os
 import shutil
@@ -30,7 +31,8 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-async def test_one_real_turn(tmp_path):
+@pytest.mark.parametrize("backend", ["json_schema", "gbnf"])
+async def test_one_real_turn(tmp_path, backend):
     exe = os.environ.get("EDGE_LLAMA_SERVER") or shutil.which("llama-server")
     if not exe:
         pytest.skip("llama-server binary not found (set EDGE_LLAMA_SERVER)")
@@ -54,7 +56,8 @@ async def test_one_real_turn(tmp_path):
         url = await fake.start()
         sf = tmp_path / "agent.secret"
         sf.write_text(SECRET)
-        cfg = AgentConfig(hub_url=url, hub_secret_file=str(sf), db_path=":memory:", llm_url=base, llm_timeout_s=900)
+        cfg = AgentConfig(hub_url=url, hub_secret_file=str(sf), db_path=":memory:", llm_url=base, llm_timeout_s=900,
+                          sched={"fast_path": False, "router": False, "constraint_backend": backend})   # force the LLM path
         agent = Agent.from_config(cfg, LlmClient(base, constrained=True, timeout_s=900))
         await agent.start()
         try:

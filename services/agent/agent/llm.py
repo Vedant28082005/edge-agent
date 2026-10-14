@@ -1,6 +1,7 @@
 """llama-server client (OpenAI-compatible /v1/chat/completions).
 
-* temperature 0, `cache_prompt: true`, `id_slot: 0` (single slot: the static prefix stays in that slot's KV cache).
+* temperature 0, `cache_prompt: true`, `id_slot` pinned (single slot: the static prefix stays in that slot's KV cache);
+  both are dropped when the `prefix_cache` ablation flag is off.
 * Constrained mode (runtime switch): `response_format = {"type": "json_schema", "json_schema": {"schema": <from the live
   registry>}}`; llama.cpp compiles it to a GBNF grammar and masks tokens, so the reply can only be a plan whose calls
   name existing endpoints, their own capabilities and in-range values. Unconstrained mode sends no schema (S10 ablation);
@@ -15,6 +16,9 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 import httpx
+
+from .sched.grammar import ConstraintBackend, JsonSchemaConstraint
+from .sched.prefix import cache_fields
 
 log = logging.getLogger("agent.llm")
 
@@ -46,6 +50,8 @@ class LlmClient:
         self._base, self.model, self.constrained, self.max_tokens = base_url.rstrip("/"), model, constrained, max_tokens
         self._http = http or httpx.AsyncClient(timeout=httpx.Timeout(timeout_s, connect=3.0))
         self._own_http = http is None
+        self.constraint: ConstraintBackend = JsonSchemaConstraint()   # how a constraint is sent (sched.constraint_backend)
+        self.prefix_cache, self.id_slot = True, 0                      # cache_prompt + id_slot (sched.prefix_cache)
         self._slot = asyncio.Semaphore(1)
         self._waiting = 0
         self._max_queued = max_queued
@@ -63,10 +69,9 @@ class LlmClient:
 
     def payload(self, messages: list[dict], schema: dict | None) -> dict:
         body: dict = {"model": self.model, "messages": messages, "temperature": 0, "top_k": 1, "seed": 0,
-                      "max_tokens": self.max_tokens, "stream": False, "cache_prompt": True, "id_slot": 0}
+                      "max_tokens": self.max_tokens, "stream": False, **cache_fields(self.prefix_cache, self.id_slot)}
         if self.constrained and schema is not None:
-            body["response_format"] = {"type": "json_schema",
-                                       "json_schema": {"name": "plan", "strict": True, "schema": schema}}
+            self.constraint.apply(body, schema)
         return body
 
     async def complete(self, messages: list[dict], schema: dict | None) -> LlmResult:
