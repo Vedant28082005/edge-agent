@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import re
@@ -195,7 +196,15 @@ def dump(m: BaseModel) -> dict:
 
 # ------------------------------------------------------------------ app
 def create_public_app(ctx: Ctx) -> FastAPI:
-    app = FastAPI(title="Edge Agent Gateway", docs_url=None, redoc_url=None, openapi_url=None)
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        if ctx.autostart:                              # hub/agent subscribers run inside the server's event loop
+            ctx.start()
+        yield
+        if ctx.autostart:
+            await ctx.shutdown()
+
+    app = FastAPI(title="Edge Agent Gateway", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     r = APIRouter()
     cfg = ctx.cfg
     # Uploads must never touch the disk: keep multipart parts in memory (Starlette spools >1 MiB to a temp file by default).
@@ -629,8 +638,8 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             ctx.bc.remove(client)
             try:
                 await sock.close(code=4401 if client.closed.is_set() else 1000)
-            except RuntimeError:
-                pass
+            except (RuntimeError, WebSocketDisconnect):
+                pass                                            # the peer is already gone
 
     # ================================================================== /admin/*  (admin only)
     def log_admin(u: User, action: str, target: str = "", detail: dict | None = None, result: str = "ok") -> None:

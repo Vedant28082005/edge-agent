@@ -36,6 +36,7 @@ class Ctx:
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     tasks: list = field(default_factory=list)
     agent_push: bool = False
+    autostart: bool = False                       # start background subscribers from the app lifespan
 
     def start(self, retry_s: float = 1.0) -> None:
         self.stop = asyncio.Event()
