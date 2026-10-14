@@ -71,6 +71,7 @@ print("ok   openapi admin gating checked")
 OPENAPI_SUITES = {
     "consume-request": "ConsumeRequest",
     "consume-response": "ConsumeResponse",
+    "scene-action": "SceneAction",
 }
 spec_for_refs = dict(spec)
 # ConsumeResponse = granted or denied

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.8.1
+  version: 2.9.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -665,23 +665,29 @@ components:
         verified: {type: boolean, description: Read-back matched the target; always false while status is moving (see mcp-tools.md)}
         error: {type: string}
         values: {type: object, additionalProperties: true}
+    SceneTargetFixed:
+      type: object
+      additionalProperties: false
+      required: [endpoint_id]
+      properties:
+        endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+    SceneTargetSelector:
+      type: object
+      description: Selector resolved at run time; fields combine with AND.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        room: {type: string, maxLength: 48}
+        type: {$ref: '#/components/schemas/EndpointType'}
+        tag: {$ref: '#/components/schemas/Tag'}
     SceneAction:
       type: object
       required: [target, capability, value]
       properties:
         target:
           oneOf:
-            - type: object
-              required: [endpoint_id]
-              properties:
-                endpoint_id: {$ref: '#/components/schemas/EndpointId'}
-            - type: object
-              description: Selector resolved at run time
-              minProperties: 1
-              properties:
-                room: {type: string}
-                type: {$ref: '#/components/schemas/EndpointType'}
-                tag: {$ref: '#/components/schemas/Tag'}
+            - $ref: '#/components/schemas/SceneTargetFixed'
+            - $ref: '#/components/schemas/SceneTargetSelector'
         capability: {type: string}
         value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
     SceneInput:
