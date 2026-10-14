@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Internal API (agent)
-  version: 1.1.0
+  version: 1.2.0
   description: |
     The agent's local API. Listens on 127.0.0.1:8200 only (never on a public or tailnet interface); the only
     caller is the gateway. Changing this file requires bumping info.version.
@@ -114,16 +114,39 @@ paths:
       responses:
         '200': {description: Memories, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Memory'}}}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
-  /v1/memory/{id}:
+  /v1/memory/{memory_id}:
     delete:
       tags: [memory]
       operationId: agentDeleteMemory
       description: Deletes one memory, only if it belongs to `user_id` (otherwise 404).
       parameters:
-        - {name: id, in: path, required: true, schema: {type: string, maxLength: 64}}
+        - {name: memory_id, in: path, required: true, schema: {type: string, maxLength: 64}}
         - {name: user_id, in: query, required: true, schema: {type: string, minLength: 1, maxLength: 64}}
       responses:
         '204': {description: Deleted}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: No such memory for this user, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    put:
+      tags: [memory]
+      operationId: agentUpdateMemory
+      description: |
+        Replaces the text of one memory, only if it belongs to `user_id` (a memory of another user is 404, never 403,
+        so existence is not revealed). Per-user; authentication is mandatory like on every operation.
+      parameters:
+        - {name: memory_id, in: path, required: true, schema: {type: string, maxLength: 64}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [user_id, text]
+              properties:
+                user_id: {type: string, minLength: 1, maxLength: 64}
+                text: {type: string, minLength: 1, maxLength: 500}
+      responses:
+        '200': {description: Updated memory, content: {application/json: {schema: {$ref: '#/components/schemas/Memory'}}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {description: No such memory for this user, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   /v1/health:

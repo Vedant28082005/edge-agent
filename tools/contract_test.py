@@ -187,6 +187,21 @@ for path, op in agent_ops:
                 if t not in allow:
                     failures += 1
                     print(f"FAIL hub-internal allowlist must contain {t}")
+# --- device-hub scene-run 409 body must validate samples ---------------------------
+_v409 = Draft202012Validator({"$ref": "#/components/schemas/SceneRunNotExecuted", "components": hub["components"]})
+for kind in ("valid", "invalid"):
+    files = sorted((contracts / "samples" / "scene-run-409" / kind).glob("*.json"))
+    if not files:
+        failures += 1
+        print(f"FAIL: no samples for scene-run-409 in {kind}/")
+    for f in files:
+        counts[kind] += 1
+        errors = list(_v409.iter_errors(json.loads(f.read_text(encoding="utf-8"))))
+        if bool(errors) == (kind == "invalid"):
+            print(f"ok   scene-run-409/{kind}/{f.name}")
+        else:
+            failures += 1
+            print(f"FAIL scene-run-409/{kind}/{f.name}")
 for path, item in hub["paths"].items():
     for method, op in item.items():
         if method in ("get", "post", "put", "patch", "delete") and "agent" in (op.get("x-scopes") or []) and (path, method) not in (("/events", "get"), ("/mcp", "post")):
@@ -224,7 +239,7 @@ for path, item in agent_api["paths"].items():
         if "401" not in op["responses"]:
             failures += 1
             print(f"FAIL agent-internal {method.upper()} {path}: missing 401 response")
-for need in ("/v1/chat", "/v1/confirmations/{request_id}", "/v1/events", "/v1/memory", "/v1/memory/{id}", "/v1/health"):
+for need in ("/v1/chat", "/v1/confirmations/{request_id}", "/v1/events", "/v1/memory", "/v1/memory/{memory_id}", "/v1/health"):
     if need not in agent_api["paths"]:
         failures += 1
         print(f"FAIL agent-internal: missing path {need}")

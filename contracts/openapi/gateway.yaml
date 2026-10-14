@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.9.0
+  version: 2.10.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -344,7 +344,7 @@ paths:
       operationId: websocket
       description: |
         WebSocket upgrade. The server pushes JSON messages `{type, ...}` filtered by the caller's role and rooms.
-        Types: `state`, `perception`, `registry_changed`, `notification`, `async_result` (late VLM answer) and the
+        Types: `state`, `perception`, `scenes_changed`, `registry_changed`, `notification`, `async_result` (late VLM answer) and the
         confirmation and settle messages below. Settle events are **their own types and are NOT generic notifications**.
 
         * `confirmation_request` `{request_id, summary, action, action_hash, expires_in_s}`: a `risk: confirm` action awaits this user.
@@ -352,6 +352,10 @@ paths:
         * `action_settled` `{call_id, endpoint_id, capability, value, observed, elapsed_ms}`: a motion reached its target.
         * `action_settle_timeout` `{call_id, endpoint_id, capability, value, observed, settle_s}`: it did not converge (`observed` may be null).
         * `confirmation_expired` `{request_id, summary, reason}`: no answer in time or the token expired; nothing was executed.
+        * `scenes_changed` `{scene_id, change}` (`change`: `created|updated|deleted`): a scene was changed. Delivered ONLY to users who
+          can see the affected scene (admins; members and guests only when the scene's room selectors and assignments make it
+          visible to them, evaluated at delivery time; for `deleted`, by visibility just before deletion); everyone else gets nothing.
+          The message carries no scene content: the client refetches `GET /scenes`.
         * `notification` `{level, text}` is for everything else (e.g. `level: action_blocked`).
         Payloads match `agent-events.md`.
 
@@ -360,6 +364,10 @@ paths:
         `edge-ticket.<ticket>` or as the first message `{"type":"auth","ticket":"..."}` (the server closes with 4401 if
         no valid ticket arrives within 5 s). A header-capable client may also send `Authorization: Bearer <access JWT>`.
         The connection ends when the access token that created it expires (close 4401); the client refreshes and reconnects.
+
+        **Close code 4429 (rate limited):** the server closes with 4429 when the client exceeds the connection or message rate
+        limit (too many connects, tickets or inbound messages). The client must wait before reconnecting (back off, at
+        least 5 s, doubling up to 60 s) and must not retry in a tight loop.
       security: []
       responses:
         '101': {description: Switching protocols}
@@ -751,7 +759,7 @@ components:
         targets changed, the endpoint was re-risked or disabled; the stored action hash no longer matches. The user must
         start a new request).
       content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
-    TooLarge: {description: "Body or upload over the limit (`too_large`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    TooLarge: {description: "Body or upload over the limit (`too_large`). Also returned when an upload has no known Content-Length (no `Content-Length` header, e.g. chunked transfer): the server does not buffer unbounded bodies and rejects with 413 instead of 411", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     UnsupportedMedia: {description: "Media type not accepted (`unsupported_media_type`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     TooManyRequests:
       description: Rate or quota limit (`rate_limited`, `too_many_uploads`). Always sets Retry-After (seconds).
