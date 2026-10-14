@@ -1,4 +1,4 @@
-# MQTT contract (v5)
+# MQTT contract (v6)
 
 Broker: Mosquitto on `pi-brain`, **TLS on 8883** (1883 disabled), dynamic-security plugin, anonymous access off. Prefix for all topics: `home/v1/`. Payloads: JSON, UTF-8, max 16 KiB.
 
@@ -147,3 +147,8 @@ TLS certificate dates are checked against the board's clock, and a board without
   - Ack means "accepted, motion started"; `set_state` returns `done`/`moving`; `action_settled` and `action_settle_timeout` events; `run_scene` per-action statuses `done|moving|...`.
   - BLE bundle / credentials: username and client_id are both `node_id`; clean session.
   - Idempotent dynsec node-user creation (also in `CLAUDE.md`).
+
+- **S0f** (announce stays schema 2; `mqtt.md` v6, `agent-internal.yaml` 1.2.0, `gateway.yaml` 2.10.0, `device-hub-internal.yaml` 1.3.0):
+  - `agent-internal.yaml`: `PUT /v1/memory/{memory_id}` (body `{user_id, text<=500}`; per-user, auth mandatory; another user's memory is 404). The path parameter of `DELETE` is renamed `{id}` -> `{memory_id}` (wire-compatible).
+  - `gateway.yaml`: WebSocket type `scenes_changed` `{scene_id, change: created|updated|deleted}`, delivered only to users who can see the scene (rooms and assignments); close code 4429 (rate limited, client backs off); 413 also for an upload with no known Content-Length.
+  - `device-hub-internal.yaml`: `SceneRunNotExecuted` schema for the scene-run 409 (requires `executed:false` and `status`; `needs_confirmation` also requires `scene_id`, `needs_confirmation[]`, `action_hash`). New `samples/scene-run-409/` and a `tools\contract_test.py` check; the memory path name in that script was updated.
