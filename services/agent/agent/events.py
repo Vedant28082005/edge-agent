@@ -81,7 +81,7 @@ class RulesEngine:
     actions go through the same executor with trigger kind 'rule', which means `risk: confirm` endpoints only ever
     produce a notification (policy.needs_confirmation), never a prompt or an execution."""
 
-    def __init__(self, store: Any, run_action: Callable[[dict, str, str], Awaitable[Any]] | None = None) -> None:
+    def __init__(self, store: Any, run_action: Callable[[dict, str, str, str], Awaitable[Any]] | None = None) -> None:
         self.store = store
         self.run_action = run_action
         self.matched = 0
@@ -102,4 +102,5 @@ class RulesEngine:
             if self.run_action is None:
                 continue
             for action in rule.get("actions", []):
-                await self.run_action(action, f"rule:{rule['id']}", f"rule '{rule.get('name', rule['id'])}' on {event.type}")
+                await self.run_action(action, f"rule:{rule['id']}", f"rule '{rule.get('name', rule['id'])}' on {event.type}",
+                                      str(rule.get("name", rule["id"])))

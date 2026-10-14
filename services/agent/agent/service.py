@@ -128,12 +128,12 @@ class Agent:
         self.bus.publish(Event(USER_MESSAGE, {"ctx": ctx}, source="chat", user_id=user_id))
         return ctx
 
-    async def _run_rule_action(self, action: dict, trigger_ref: str, reason: str):
+    async def _run_rule_action(self, action: dict, trigger_ref: str, reason: str, name: str = ""):
         """Rules engine hook: a rule's action runs through the same executor, with a non-user trigger."""
         c = self.cfg
         ctx = ReqCtx("rule", "rule", reason, Trigger("rule", ref=trigger_ref),
                      Budget(1, 1, 30.0, c.max_retries))
-        ctx.reason = reason[:200]
+        ctx.reason, ctx.label = reason[:200], name
         out = await self.executor.run_call(ctx, action.get("tool"), action.get("args"))
         ctx.close()
         return out

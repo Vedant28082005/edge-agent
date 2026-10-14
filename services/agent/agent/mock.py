@@ -300,7 +300,8 @@ class ScriptedLLM:
     # ------------------------------------------------------------------------------------------ the script
     def respond(self, messages: list[dict]) -> dict:
         last = messages[-1]["content"]
-        text = next((ln[6:] for ln in reversed(last.splitlines()) if ln.startswith("User: ")), "")
+        text = next((ln[6:] for m in reversed(messages) for ln in reversed(m["content"].splitlines())
+                     if m["role"] == "user" and ln.startswith("User: ")), "")
         for pat, rep in self.script:
             if re.search(pat, text, re.I):
                 return rep(messages) if callable(rep) else rep
@@ -362,7 +363,7 @@ class ScriptedLLM:
     @staticmethod
     def _find(devs, low: str, typ: str | None = None):
         words = _words(low)
-        best, best_s, tie = None, 1, False
+        best, best_s, tie = None, (0 if typ else 1), False
         for d in devs:
             if typ and d[3] != typ:
                 continue

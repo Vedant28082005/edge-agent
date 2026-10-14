@@ -64,6 +64,7 @@ class ReqCtx:
         self._settled = asyncio.Event()
         self._settled.set()
         self.reason = f"user request: {text[:100]}"
+        self.label = ""                     # human name of a non-user trigger (a rule's name)
 
     async def emit(self, name: str, data: dict[str, Any]) -> bool:
         """Queue an SSE event. Returns False when the stream is gone (detached/closed)."""

@@ -124,7 +124,7 @@ class ChatService:
                 if not outs:
                     await ctx.emit("error", {"code": "budget_exceeded", "message": "request budget exceeded"})
                     return
-                say = say or "I stopped here because I reached this request's limit."
+                say = "I stopped here because I reached this request's limit."
                 break
             try:
                 prompt = self.builder.build(text, history, summary, [], extra_tail, tool_results)

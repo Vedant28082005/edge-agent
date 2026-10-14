@@ -21,6 +21,12 @@ class Env:
     def __init__(self, agent, fake, llm, server, tmp):
         self.agent, self.fake, self.llm, self.server, self.tmp = agent, fake, llm, server, tmp
 
+    async def close(self):
+        await self.agent.stop()
+        self.fake.drop_streams()
+        await self.server.stop()
+        _SECRETS.discard(SECRET)
+
     async def chat(self, text, user="alice", session="s1", timeout=10.0, wait_close=True):
         ctx = self.agent.new_request(user, session, text)
         return ctx, await collect(ctx, timeout, wait_close)
@@ -70,6 +76,4 @@ async def make_env(tmp_path, **cfg_kw):
 async def env(tmp_path):
     e = await make_env(tmp_path)
     yield e
-    await e.agent.stop()
-    await e.server.stop()
-    _SECRETS.discard(SECRET)
+    await e.close()

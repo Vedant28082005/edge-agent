@@ -138,9 +138,11 @@ class HubEventStream:
         self._stop.set()
         if self._task:
             self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+            await asyncio.wait({self._task}, timeout=0.2)
         if self._own_http:
-            await self._http.aclose()
+            await self._http.aclose()            # drops a connection the cancelled task could not close itself
+        if self._task and not self._task.done():
+            await asyncio.wait({self._task}, timeout=2.0)
 
     async def run(self) -> None:
         backoff = 0.25

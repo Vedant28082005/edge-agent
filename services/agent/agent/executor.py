@@ -269,7 +269,7 @@ def _caps() -> set[str]:
 
 
 def _trigger_label(ctx: ReqCtx) -> str:
-    return f"Rule '{clean_label(ctx.trigger.ref, 32)}'" if ctx.trigger.kind == "rule" else f"A {ctx.trigger.kind} trigger"
+    return f"Rule '{clean_label(ctx.label or ctx.trigger.ref, 32)}'" if ctx.trigger.kind == "rule" else f"A {ctx.trigger.kind} trigger"
 
 
 def _describe(tool: str, args: dict, reg: DeviceRegistry) -> str:
