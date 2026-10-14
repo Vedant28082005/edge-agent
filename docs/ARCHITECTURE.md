@@ -25,6 +25,7 @@ Labels: [measured] = measured on the real hardware. [est] = estimate, must be me
 | D11 | Multi-user with roles `admin` / `member` / `guest`. |
 | D12 | Dashboard: React + Vite + TypeScript + Tailwind. |
 | D13 | Agentic features are built as hooks in v1 and filled in if time permits (section 9). |
+| D14 | Internal APIs (device-hub, agent, the gateway's `/internal/*`) are reachable only over loopback/unix socket, or the private internal compose network; never published. Each is authenticated per calling service (`X-Service-Secret`, verifier files). |
 
 ### Changes from v1 of the plan
 
@@ -57,9 +58,13 @@ Device model is now node/endpoint. MQTT topics are per node. Added BLE provision
 | ESP32s | LAN only | lights, fans, sensors, relays, etc. |
 | Clients | tailnet | React dashboard (Chromium), Flutter Android app |
 
-Ports (proposal): mosquitto 8883 (TLS; 1883 disabled), llama-server 8080 (localhost), gateway 8000 (HTTPS via `tailscale serve`), agent 8200 (localhost), device-hub 8100 (localhost), vision-node 8300, yolo-node 8400.
+Ports (proposal): mosquitto 8883 (TLS; 1883 disabled), llama-server 8080 (bound to the edge bridge host address `172.29.0.1`, so containers reach it as `host.docker.internal` and the LAN cannot), gateway 8000 (published on `127.0.0.1` only, HTTPS via `tailscale serve`), agent 8200 and device-hub 8100 (internal compose network only, not published), vision-node 8300, yolo-node 8400.
 
 Process management: llama-server and the VLM/whisper servers native via systemd. Other services in docker compose (ARM64 images built with buildx).
+
+Broker certificate: the server cert's SANs must contain `mosquitto` (the name the hub container uses to reach the broker), the Pi's LAN IP (what boards use) and its Tailscale/LAN names; `setup-pi-brain.sh` refuses a cert without `mosquitto`. The hub's MQTT password (`hub-mqtt.password`) and its dynsec client are created on the Pi by `setup-pi-brain.sh`; nothing is staged by hand. The agent's local API is checked against `agent-verifiers/agent-api.sha256` (owned by the agent user); the gateway holds the matching `agent-api.secret`.
+
+Known limitation: behind `tailscale serve` the gateway sees every client as the container bridge address, so its per-IP login-failure limit (20 per 15 min) is shared by all users (the per-user+IP limit is not). A future gateway `trusted_proxies` setting would restore the real client IP.
 
 Whisper runs on a different Pi from the 7B, so STT and LLM can overlap. Whisper and the VLM share the 4GB Pi and are serialized there (voice has queue priority).
 
