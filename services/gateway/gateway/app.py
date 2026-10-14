@@ -613,7 +613,6 @@ def create_public_app(ctx: Ctx) -> FastAPI:
 
     @r.put("/memory/{memory_id}")
     async def put_memory(memory_id: str, body: MemoryIn, u: User = Depends(authed)):
-        # NOTE: agent-internal.yaml has no PUT /v1/memory/{id} (only GET and DELETE); this call is not covered by the contract.
         if u.role == "guest":
             raise ApiError(403, "forbidden")
         status, res = await agent_json("PUT", f"/v1/memory/{memory_id}", json={"user_id": u.user_id, "text": body.text})
@@ -700,9 +699,14 @@ def create_public_app(ctx: Ctx) -> FastAPI:
                 if getter in done:
                     await sock.send_json(getter.result())
 
+        flooded = asyncio.Event()
+
         async def reader():
             while True:
                 await sock.receive_text()                       # client messages are ignored; this notices disconnects
+                if ctx.limiter.hit("ws_msg", user.user_id):     # inbound message flood: close 4429, the client backs off
+                    flooded.set()
+                    return
 
         expiry = max(1.0, ident[1] - ctx.clock())               # the socket ends with the access token that created it
         tasks = [asyncio.ensure_future(pump()), asyncio.ensure_future(reader())]
@@ -713,7 +717,7 @@ def create_public_app(ctx: Ctx) -> FastAPI:
                 t.cancel()
             ctx.bc.remove(client)
             try:
-                await sock.close(code=4401)
+                await sock.close(code=4429 if flooded.is_set() else 4401)
             except (RuntimeError, WebSocketDisconnect):
                 pass                                            # the peer is already gone
 

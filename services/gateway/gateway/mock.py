@@ -384,6 +384,10 @@ class FakeAgent:
         @app.put("/v1/memory/{mid}")
         async def mem_put(mid: str, request: Request):
             b = await request.json()
+            if not isinstance(b, dict) or set(b) != {"user_id", "text"} or not isinstance(b["text"], str) \
+                    or not 1 <= len(b["text"]) <= 500 or not isinstance(b["user_id"], str) or not 1 <= len(b["user_id"]) <= 64 \
+                    or len(mid) > 64:
+                return JSONResponse({"error": "bad_request"}, status_code=400)
             if mid not in self.memories.get(b["user_id"], {}):
                 return JSONResponse({"error": "not_found"}, status_code=404)
             self.memories[b["user_id"]][mid] = b["text"]

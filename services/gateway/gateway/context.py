@@ -43,7 +43,7 @@ class Ctx:
 
     def start(self, retry_s: float = 1.0) -> None:
         self.stop = asyncio.Event()
-        self.tasks = [asyncio.create_task(run_hub_subscriber(self.hub, self.bc, self.stop, retry_s))]
+        self.tasks = [asyncio.create_task(run_hub_subscriber(self.hub, self.bc, self.stop, retry_s, self.confirm.assigned))]
         if self.agent_push:
             self.tasks.append(asyncio.create_task(run_agent_subscriber(self.agent, self.bc, self.confirm, self.stop, retry_s)))
         self.tasks.append(asyncio.create_task(self._sweeper(self.stop)))

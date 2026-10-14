@@ -26,6 +26,7 @@ class Event:
     endpoint_id: str | None = None
     endpoint_ids: list[str] | None = None
     room: str | None = None
+    visible: object | None = None            # callable(User) -> bool, evaluated at delivery time (scenes_changed)
 
 
 @dataclass(eq=False)
@@ -38,6 +39,7 @@ class Client:
 class Broadcaster:
     def __init__(self, queue_size: int = 256) -> None:
         self.room_of: dict[str, str] = {}          # endpoint_id -> room; never forgets (forgotten endpoints stay filtered)
+        self.scenes: dict[str, dict] = {}          # scene_id -> last known scene (to judge visibility of a deleted scene)
         self.clients: set[Client] = set()
         self.queue_size = queue_size
 
@@ -61,6 +63,8 @@ class Broadcaster:
 
     # ---- filtering (pure)
     def render(self, user: User, ev: Event) -> dict | None:
+        if ev.visible is not None:
+            return {"type": ev.type, **ev.data} if ev.visible(user) else None
         if ev.user_id is not None:
             return {"type": ev.type, **ev.data} if ev.user_id == user.user_id else None
         if ev.admin_only:
@@ -118,7 +122,7 @@ def from_hub(env: dict) -> Event | None:
         return Event("notification", {"level": "info", "text": f"{node} is {'online' if d.get('online') else 'offline'}"}, admin_only=True)
     if t == "pending_node" and node:
         return Event("notification", {"level": "info", "text": f"{node} is waiting for approval"}, admin_only=True)
-    return None                                              # scenes_changed etc.: not part of the WebSocket contract
+    return None                                              # scenes_changed is handled by scene_events (needs the hub)
 
 
 AGENT_FIELDS = {
@@ -143,6 +147,50 @@ def from_agent(name: str, d: dict) -> Event | None:
                  no_guest=owner is None and ep is None)
 
 
+SCENE_CHANGE = {"create": "created", "delete": "deleted"}
+
+
+async def scene_events(env: dict, hub, bc: Broadcaster, assigned) -> list[Event]:
+    """hub `scenes_changed {reason, scene_ids}` -> one WebSocket `scenes_changed {scene_id, change}` per scene, delivered only to
+    users who can see that scene (admin; members by rooms or ownership; guests by assignment), judged when it is delivered; a
+    deleted scene is judged by its last known content (visibility just before the deletion). Unknown scenes: admins only."""
+    from . import policy
+    d = env.get("data") or {}
+    change = SCENE_CHANGE.get(d.get("reason"), "updated")          # broken/unbroken flags and re-validation are updates
+    out = []
+    for sid in (d.get("scene_ids") or [])[:100]:
+        if not isinstance(sid, str):
+            continue
+        scene = None
+        if change == "deleted":
+            scene = bc.scenes.pop(sid, None)
+        else:
+            try:
+                status, body = await hub.hub("GET", f"/scenes/{sid}")
+            except UpstreamError:
+                status, body = 0, None
+            if status == 200 and isinstance(body, dict):
+                scene = bc.scenes[sid] = body
+            else:
+                scene = bc.scenes.get(sid)
+        if scene is None:
+            out.append(Event("scenes_changed", {"scene_id": sid, "change": change}, admin_only=True))
+        else:
+            snap = dict(scene)
+            out.append(Event("scenes_changed", {"scene_id": sid, "change": change},
+                             visible=lambda u, snap=snap: policy.scene_visible(u, snap, assigned(u))))
+    return out
+
+
+async def refresh_scenes(hub, bc: Broadcaster) -> None:
+    try:
+        status, body = await hub.hub("GET", "/scenes")
+    except UpstreamError:
+        return
+    if status == 200 and isinstance(body, list):
+        bc.scenes = {s["scene_id"]: s for s in body if isinstance(s, dict) and isinstance(s.get("scene_id"), str)}
+
+
 async def refresh_rooms(hub, bc: Broadcaster) -> None:
     try:
         status, body = await hub.hub("GET", "/devices")
@@ -154,12 +202,13 @@ async def refresh_rooms(hub, bc: Broadcaster) -> None:
                 bc.room_of[e["endpoint_id"]] = e.get("room", "")
 
 
-async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Event, retry_s: float = 1.0) -> None:
+async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Event, retry_s: float = 1.0, assigned=None) -> None:
     last_id: str | None = None
     delay = retry_s
     while not stop.is_set():
         try:
             await refresh_rooms(hub, bc)
+            await refresh_scenes(hub, bc)
             hdr = {"Last-Event-ID": last_id} if last_id else None
             async for fid, ev, data in hub.sse("/events", params={"types": HUB_TYPES}, headers=hdr):
                 delay = retry_s
@@ -173,6 +222,10 @@ async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Eve
                     continue
                 if env.get("type") == "registry_changed":
                     await refresh_rooms(hub, bc)
+                if env.get("type") == "scenes_changed" and assigned is not None:
+                    for sev in await scene_events(env, hub, bc, assigned):
+                        bc.publish(sev)
+                    continue
                 out = from_hub(env)
                 if out:
                     bc.publish(out)

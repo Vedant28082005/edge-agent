@@ -223,6 +223,9 @@ def test_risk_confirm_scene_full_token_flow(api, stack):
     assert sc.json()["owner"] == stack.ctx.db.one("SELECT user_id FROM users WHERE username='admin'")["user_id"]
     run = api.post(f"/scenes/{sid}/run", headers=a)
     assert run.status_code == 409 and run.json()["executed"] is False and run.json()["status"] == "needs_confirmation"
+    from test_contract import hub_validate
+    hub_validate(run.json())                                              # the real hub's 409 is the contract's SceneRunNotExecuted
+    assert run.json()["scene_id"] == sid and len(run.json()["action_hash"]) == 64
     mint = api.post("/confirmations", json={"action": {"type": "run_scene", "scene": sid}}, headers=a)
     assert mint.status_code == 200, mint.text
     tok = mint.json()["confirmation_token"]

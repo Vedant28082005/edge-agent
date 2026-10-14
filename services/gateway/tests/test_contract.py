@@ -34,7 +34,7 @@ def effective_security(op: dict) -> list:
 
 
 def test_spec_version_known():
-    assert SPEC["info"]["version"] == "2.9.0", "gateway.yaml changed: re-check the implementation, then update this pin"
+    assert SPEC["info"]["version"] == "2.10.0", "gateway.yaml changed: re-check the implementation, then update this pin"
 
 
 def test_every_public_route_exists_and_no_extra(gw):
@@ -173,3 +173,29 @@ def test_scene_action_contract_samples(gw, kind, expect):
         action = json.loads(f.read_text(encoding="utf-8"))
         r = gw.pub.post("/scenes", json={"name": "sample", "actions": [action]}, headers=gw.h("admin"))
         assert r.status_code == expect, f"{kind}/{f.name}: {r.status_code}"
+
+
+HUB = yaml.safe_load((CONTRACTS / "openapi" / "device-hub-internal.yaml").read_text(encoding="utf-8"))
+
+
+def hub_validate(instance) -> None:
+    Draft202012Validator({"$ref": "#/components/schemas/SceneRunNotExecuted", "components": HUB["components"]}).validate(instance)
+
+
+@pytest.mark.parametrize("kind", ["valid", "invalid"])
+def test_scene_run_409_samples_and_what_the_gateway_forwards(gw, kind):
+    import json
+    files = sorted((CONTRACTS / "samples" / "scene-run-409" / kind).glob("*.json"))
+    assert files
+    for f in files:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        if kind == "valid":
+            hub_validate(data)
+        else:
+            with pytest.raises(Exception):
+                hub_validate(data)
+    # the gateway passes the hub's 409 through untouched, and it is exactly that schema
+    r = gw.pub.post("/scenes/sc_00000002/run", headers=gw.h("admin"))
+    assert r.status_code == 409
+    hub_validate(r.json())
+    assert r.json()["status"] == "needs_confirmation" and r.json()["scene_id"] == "sc_00000002" and len(r.json()["action_hash"]) == 64

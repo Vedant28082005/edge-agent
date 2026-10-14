@@ -233,3 +233,31 @@ def test_admin_calls_carry_the_actor_and_hub_gets_user_scoped_bodies(gw):
     gw.pub.post("/admin/nodes/esp32-aabbccddeeff/identify", json={"duration_s": 5}, headers=gw.h("admin"))
     gw.pub.post("/devices/ep_00000001/set", json={"capability": "power", "value": True}, headers=gw.h("member"))
     assert [c["actor"] for c in gw.m.hub.calls if c["path"].endswith(("identify", "/set"))] == [gw.uid("admin"), gw.uid("member")]
+
+
+def test_memory_put_follows_agent_internal_yaml(gw):
+    me = gw.uid("member")
+    gw.m.agent.memories[me] = {"m1": "likes tea"}
+    gw.m.agent.memories["someone-else"] = {"m9": "secret"}
+    r = gw.pub.put("/memory/m1", json={"text": "likes coffee"}, headers=gw.h("member"))
+    assert r.status_code == 200 and r.json() == {"memory_id": "m1", "text": "likes coffee", "updated_at": 2}
+    assert gw.m.agent.memories[me]["m1"] == "likes coffee"
+    # the agent got exactly {user_id, text} on /v1/memory/{memory_id}, authenticated
+    assert any(c["method"] == "PUT" and c["path"] == "/v1/memory/m1" and c["secret_ok"] for c in gw.m.agent.calls)
+    r = gw.pub.put("/memory/m9", json={"text": "hax"}, headers=gw.h("member"))
+    assert r.status_code == 404 and gw.m.agent.memories["someone-else"]["m9"] == "secret"      # never 403: existence is not revealed
+    for bad in ({"text": ""}, {"text": "x" * 501}, {}, {"text": "ok", "user_id": "u_other"}):
+        assert gw.pub.put("/memory/m1", json=bad, headers=gw.h("member")).status_code == 400
+    assert gw.pub.put("/memory/" + "m" * 65, json={"text": "ok"}, headers=gw.h("member")).status_code in (400, 404)
+    assert gw.pub.put("/memory/m1", json={"text": "x"}, headers=gw.h("guest")).status_code == 403
+
+
+def test_upload_with_unknown_content_length_is_413(gw):
+    def chunks():
+        yield b"--b\r\nContent-Disposition: form-data; name=\"image\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n"
+        yield PNG
+        yield b"\r\n--b--\r\n"
+    for path in ("/images", "/voice"):
+        r = gw.pub.post(path, content=chunks(), headers={**gw.h("member"), "Content-Type": "multipart/form-data; boundary=b"})
+        assert r.status_code == 413 and r.json()["error"] == "too_large", path           # chunked: no Content-Length, not 411
+    assert len(gw.ctx.media) == 0

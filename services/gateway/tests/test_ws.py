@@ -304,3 +304,95 @@ def test_agent_events_stream_is_subscribed_by_default_and_fanned_out(gw):
             gw.pub.portal.call(gw.ctx.shutdown)
             ws_m.__exit__(None, None, None)
             ws_a.__exit__(None, None, None)
+
+
+# ------------------------------------------------------------------ scenes_changed (gateway.yaml 2.10.0)
+def scene_msgs(gw, reason, ids):
+    import asyncio
+    from gateway.events import scene_events
+    evs = asyncio.run(scene_events({"type": "scenes_changed", "data": {"reason": reason, "scene_ids": ids}}, gw.ctx.hub, gw.ctx.bc,
+                                   gw.ctx.confirm.assigned))
+    users = {r: gw.ctx.auth.get(gw.uid(r)) for r in ("admin", "member", "guest")}
+    return {r: [m for e in evs if (m := gw.ctx.bc.render(u, e))] for r, u in users.items()}
+
+
+def test_scenes_changed_only_reaches_users_who_can_see_the_scene(gw):
+    asyncio_run = __import__("asyncio").run
+    asyncio_run(__import__("gateway.events", fromlist=["x"]).refresh_scenes(gw.ctx.hub, gw.ctx.bc))
+    got = scene_msgs(gw, "update", ["sc_00000001"])                      # Bedroom light: admin + member; guest not assigned
+    assert got["admin"] == got["member"] == [{"type": "scenes_changed", "scene_id": "sc_00000001", "change": "updated"}]
+    assert got["guest"] == []
+    gw.ctx.db.run("INSERT INTO scene_assignments(user_id,scene_id) VALUES(?,?)", (gw.uid("guest"), "sc_00000001"))
+    assert scene_msgs(gw, "update", ["sc_00000001"])["guest"] != []     # assignments are judged at delivery time
+    hall = scene_msgs(gw, "create", ["sc_00000002"])                    # touches Hall: the member has no access
+    assert hall["admin"] == [{"type": "scenes_changed", "scene_id": "sc_00000002", "change": "created"}]
+    assert hall["member"] == [] and hall["guest"] == []
+    assert scene_msgs(gw, "update", ["sc_00000004"])["member"] == []    # room-less selector: admin only
+    mine = gw.m.hub.add_scene("sc_000000aa", "Mine", gw.uid("member"), [{"target": {"room": "Hall"}, "capability": "power", "value": True}])
+    assert scene_msgs(gw, "create", [mine["scene_id"]])["member"] != []  # the owner always sees their own scene
+    assert scene_msgs(gw, "revalidate", ["sc_00000001"])["admin"][0]["change"] == "updated"   # broken flags etc. are updates
+    assert set(scene_msgs(gw, "update", ["sc_00000001"])["admin"][0]) == {"type", "scene_id", "change"}   # no scene content
+
+
+def test_deleted_scene_is_judged_by_its_last_known_content(gw):
+    import asyncio
+    from gateway.events import refresh_scenes
+    asyncio.run(refresh_scenes(gw.ctx.hub, gw.ctx.bc))
+    del gw.m.hub.scenes["sc_00000002"]                                   # the hub already forgot it
+    got = scene_msgs(gw, "delete", ["sc_00000002"])
+    assert got["admin"] == [{"type": "scenes_changed", "scene_id": "sc_00000002", "change": "deleted"}]
+    assert got["member"] == [] and got["guest"] == []                    # Hall scene: still not for the member
+    del gw.m.hub.scenes["sc_00000001"]
+    assert scene_msgs(gw, "delete", ["sc_00000001"])["member"][0]["change"] == "deleted"       # Bedroom scene: visible before deletion
+    unknown = scene_msgs(gw, "delete", ["sc_ffffffff"])                  # never seen: admins only
+    assert unknown["admin"] != [] and unknown["member"] == [] and unknown["guest"] == []
+
+
+def test_scenes_changed_flows_through_the_hub_subscriber_to_sockets(gw):
+    with gw.pub:
+        socks = {r: connect(gw, r) for r in ("admin", "member", "guest")}
+        gw.pub.portal.call(lambda: gw.ctx.start(retry_s=0.05))
+        try:
+            gw.m.hub.push("scenes_changed", {"reason": "update", "scene_ids": ["sc_00000001", "sc_00000002"]})
+            adm = collect(socks["admin"][1], 2)
+            assert [(m["type"], m["scene_id"], m["change"]) for m in adm] == [
+                ("scenes_changed", "sc_00000001", "updated"), ("scenes_changed", "sc_00000002", "updated")]
+            assert [m["scene_id"] for m in collect(socks["member"][1], 1)] == ["sc_00000001"]            # the Hall scene is not for them
+            gw.pub.portal.call(gw.ctx.bc.publish, Event("notification", {"level": "info", "text": "SENTINEL"}))
+            assert collect(socks["member"][1], 1)[0]["text"] == "SENTINEL"
+            assert collect(socks["guest"][1], 1)[0]["text"] == "SENTINEL"                                # guest: nothing before the sentinel
+        finally:
+            gw.pub.portal.call(gw.ctx.shutdown)
+            for ws, _ in socks.values():
+                ws.__exit__(None, None, None)
+
+
+# ------------------------------------------------------------------ close code 4429
+def test_inbound_message_flood_closes_with_4429(gw):
+    mx = gw.ctx.limiter.limits["ws_msg"][0]
+    ws, s = connect(gw, "member")
+    try:
+        with pytest.raises(WebSocketDisconnect) as e:
+            for _ in range(mx + 5):
+                s.send_text("x")
+            s.receive_json()
+        assert e.value.code == 4429
+    finally:
+        try:
+            ws.__exit__(None, None, None)
+        except Exception:
+            pass
+
+
+def test_too_many_connects_closes_with_4429(gw):
+    gw.ctx.limiter.limits["ws"] = (2, 60)
+    for _ in range(2):
+        ws, _s = connect(gw, "member")
+        ws.__exit__(None, None, None)
+    t = ticket(gw, "member")
+    with pytest.raises(WebSocketDisconnect) as e:
+        with gw.pub.websocket_connect("/ws", subprotocols=[f"edge-ticket.{t}"]) as s:
+            s.receive_json()
+    assert e.value.code == 4429
+    ws, _s = connect(gw, "admin")                                        # per user
+    ws.__exit__(None, None, None)

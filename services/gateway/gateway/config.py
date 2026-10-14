@@ -48,7 +48,7 @@ class Config:
     ws_auth_timeout_s: float = 5.0                # first-message auth deadline
     # per-user request limits {name: [max requests, window seconds]}; exceeding -> 429 + Retry-After
     rate_limits: dict = field(default_factory=lambda: {"chat": [30, 60], "voice": [20, 60], "confirm": [30, 60],
-                                                       "ticket": [10, 60], "ws": [20, 60]})
+                                                       "ticket": [10, 60], "ws": [20, 60], "ws_msg": [20, 10]})
     mock: bool = False
 
     def __post_init__(self) -> None:
