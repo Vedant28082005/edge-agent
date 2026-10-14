@@ -1,0 +1,7 @@
+{
+  "target": {
+    "endpoint_id": "ep_0a1b2c3d"
+  },
+  "capability": "on",
+  "value": true
+}

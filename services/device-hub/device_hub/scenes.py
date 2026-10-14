@@ -301,8 +301,8 @@ class SceneService:
         if risky:
             action = run_scene_action(scene["scene_id"], risky)
             if not self.executor.confirm_ok(action, user_id, token):
-                return {"ok": False, "executed": False, "status": "needs_confirmation",
-                        "needs_confirmation": action["actions"]}
+                return {"ok": False, "executed": False, "status": "needs_confirmation", "scene_id": scene["scene_id"],
+                        "needs_confirmation": action["actions"], "action_hash": action_hash(action)}
         # 2) pre-flight each action
         for it in items:
             cap, coerced, err = self.executor.check_action(it.ep, it.capability, it.value)

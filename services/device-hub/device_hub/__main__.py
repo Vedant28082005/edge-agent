@@ -43,8 +43,9 @@ def main(argv: list[str] | None = None) -> int:
     fake_gw = None
     if args.mock:
         from .mock import build_mock_hub
-        hub, _broker, fake_gw, _nodes = build_mock_hub(cfg.db_path if args.config else ":memory:", cfg.http.port,
-                                                       seed=not args.no_seed)
+        if not args.config:
+            cfg.db_path = ":memory:"
+        hub, _broker, fake_gw, _nodes = build_mock_hub(seed=not args.no_seed, cfg=cfg)
         log.info("MOCK mode: in-memory broker, fake gateway, %d demo nodes", len(_nodes))
     else:
         from .hub import Hub
