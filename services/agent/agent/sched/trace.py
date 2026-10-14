@@ -1,5 +1,5 @@
-"""One trace per turn, for S10. Emitted on the internal event bus as `sched.trace` and written to the action log
-(`status: "trace"`, no tool, the trace in `detail`). Never contains the user's text, tool arguments, tokens or secrets: only
+"""One trace per turn, for S10. Emitted on the internal event bus as `sched.trace` and written to the `turn_traces` table
+(`Store.log_trace`/`Store.traces`; not the action log, own retention cap). Never contains the user's text, tool arguments, tokens or secrets: only
 route, source ids, endpoint ids, counts and latencies."""
 from __future__ import annotations
 
