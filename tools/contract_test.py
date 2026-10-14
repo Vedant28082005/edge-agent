@@ -234,17 +234,30 @@ cd_validator = Draft202012Validator({"$ref": "#/components/schemas/ConfirmationD
 _h = "a" * 64
 _act = {"type": "run_scene", "scene_id": "sc_9a8b7c6d", "actions": [{"endpoint_id": "ep_1b2c3d4e", "capability": "lock", "value": "unlocked"}]}
 for name, body, want_ok in [
-    ("approved with token", {"decision": "approved", "user_id": "u1", "action": _act, "action_hash": _h, "confirmation_token": "A" * 43}, True),
-    ("declined without token", {"decision": "declined", "user_id": "u1", "action": _act, "action_hash": _h}, True),
-    ("expired without token", {"decision": "expired", "user_id": "u1", "action": _act, "action_hash": _h}, True),
-    ("approved without token", {"decision": "approved", "user_id": "u1", "action": _act, "action_hash": _h}, False),
-    ("declined with token", {"decision": "declined", "user_id": "u1", "action": _act, "action_hash": _h, "confirmation_token": "A" * 43}, False),
-    ("approved without action", {"decision": "approved", "user_id": "u1", "action_hash": _h, "confirmation_token": "A" * 43}, False),
+    ("approved with token", {"decision": "approved", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h, "confirmation_token": "A" * 43}, True),
+    ("declined without token", {"decision": "declined", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h}, True),
+    ("expired without token", {"decision": "expired", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h}, True),
+    ("approved without token", {"decision": "approved", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h}, False),
+    ("declined with token", {"decision": "declined", "user_id": "u1", "role": "member", "action": _act, "action_hash": _h, "confirmation_token": "A" * 43}, False),
+    ("approved without action", {"decision": "approved", "user_id": "u1", "role": "member", "action_hash": _h, "confirmation_token": "A" * 43}, False),
 ]:
     ok = (not list(cd_validator.iter_errors(body))) == want_ok
     if not ok:
         failures += 1
     print(("ok   " if ok else "FAIL ") + f"agent-internal confirmation decision: {name}")
+_nr = {"decision": "declined", "user_id": "u1", "action": _act, "action_hash": _h}
+_bad_role = {**_nr, "role": "root"}
+for name, body in [("missing role", _nr), ("unknown role", _bad_role)]:
+    ok = bool(list(cd_validator.iter_errors(body)))
+    if not ok:
+        failures += 1
+    print(("ok   " if ok else "FAIL ") + f"agent-internal confirmation decision rejected: {name}")
+chat_validator = Draft202012Validator({"$ref": "#/components/schemas/ChatRequest", "components": agent_api["components"]})
+for name, body, want_ok in [("chat with role", {"user_id": "u1", "role": "guest", "session_id": "s"}, True), ("chat without role", {"user_id": "u1", "session_id": "s"}, False)]:
+    ok = (not list(chat_validator.iter_errors(body))) == want_ok
+    if not ok:
+        failures += 1
+    print(("ok   " if ok else "FAIL ") + f"agent-internal {name}")
 
 # --- canonical action hash vectors -------------------------------------------------
 import copy

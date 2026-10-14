@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Internal API (agent)
-  version: 1.0.0
+  version: 1.1.0
   description: |
     The agent's local API. Listens on 127.0.0.1:8200 only (never on a public or tailnet interface); the only
     caller is the gateway. Changing this file requires bumping info.version.
@@ -14,6 +14,11 @@ info:
     `device-hub-internal.yaml`): neither authorizes anything on the other API. Secrets are read from files, never
     from env or argv, and never logged. No auth is possible only with `--mock` AND `--insecure-no-auth`; the agent
     refuses `--insecure-no-auth` without `--mock`.
+
+    `role` (`admin|member|guest`) in `POST /v1/chat` and `POST /v1/confirmations/{request_id}` is set only by the
+    gateway, from its own DB, and the agent trusts it only because the call is authenticated as the gateway. The
+    agent never infers a role from a user id, a username or anything in a prompt, and uses it only to scope what it
+    offers (for example guests get no `risk: confirm` prompts and no memory).
 
     `user_id` in bodies is trusted only because the caller is the authenticated gateway. Device- and user-supplied
     strings are untrusted (CLAUDE.md rule 6).
@@ -151,9 +156,10 @@ components:
     ChatRequest:
       type: object
       additionalProperties: false
-      required: [user_id, session_id]
+      required: [user_id, role, session_id]
       properties:
         user_id: {type: string, minLength: 1, maxLength: 64}
+        role: {$ref: '#/components/schemas/Role'}
         session_id: {type: string, maxLength: 64}
         text: {type: string, maxLength: 4000}
         images:
@@ -200,10 +206,11 @@ components:
     ConfirmationDecision:
       type: object
       additionalProperties: false
-      required: [decision, user_id, action, action_hash]
+      required: [decision, user_id, role, action, action_hash]
       properties:
         decision: {type: string, enum: [approved, declined, expired]}
         user_id: {type: string, minLength: 1, maxLength: 64}
+        role: {$ref: '#/components/schemas/Role'}
         action: {$ref: '#/components/schemas/ConfirmAction'}
         action_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
         confirmation_token:
@@ -215,6 +222,7 @@ components:
         - if: {properties: {decision: {const: approved}}}
           then: {required: [confirmation_token]}
           else: {not: {required: [confirmation_token]}}
+    Role: {type: string, enum: [admin, member, guest], description: Set only by the gateway; never inferred by the agent}
     Memory:
       type: object
       required: [memory_id, text]
