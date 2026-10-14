@@ -1,0 +1,5 @@
+# Pure Python (or manylinux aarch64 wheels). No GPU, no C toolchain needed on the Pi. Python 3.11+.
+httpx>=0.27
+starlette>=0.37
+uvicorn>=0.30
+jsonschema>=4.21

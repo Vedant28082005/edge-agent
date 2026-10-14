@@ -1,0 +1,15 @@
+[project]
+name = "edge-agent"
+version = "0.1.0"
+description = "Edge agent v1: event bus, prompt builder, constrained planner, executor, SSE chat API"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27", "starlette>=0.37", "uvicorn>=0.30", "jsonschema>=4.21"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 60
+asyncio_mode = "auto"
+markers = [
+  "integration: runs the real device-hub from ../edge-agent-s1 in --mock",
+  "llama: needs EDGE_TEST_GGUF (a real llama-server turn)",
+]

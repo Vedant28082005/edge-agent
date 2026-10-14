@@ -1,0 +1,141 @@
+"""SQLite persistence: per-user messages and a rolling summary, the action log, and the (empty) rules table.
+
+Per-user isolation: every read/write of conversation data takes `user_id` and filters on it; there is no query that
+returns another user's rows. Guests (user ids `guest` or `guest:*`, see config) have no persistent memory: their
+messages and summary live in a small in-process LRU only. The action log is an audit trail and is kept for everyone.
+No token, secret or `_meta` ever reaches this module (callers pass validated tool arguments and result summaries)."""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import time
+from collections import OrderedDict
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, session_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK(role IN ('user','assistant')), text TEXT NOT NULL, ts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS messages_user ON messages(user_id, session_id, id);
+CREATE TABLE IF NOT EXISTS summaries(
+  user_id TEXT NOT NULL, session_id TEXT NOT NULL, text TEXT NOT NULL, upto_id INTEGER NOT NULL DEFAULT 0, ts REAL NOT NULL,
+  PRIMARY KEY(user_id, session_id));
+CREATE TABLE IF NOT EXISTS action_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, user_id TEXT, req_id TEXT, trigger_kind TEXT NOT NULL,
+  trigger_ref TEXT, reason TEXT, tool TEXT, args TEXT, status TEXT NOT NULL, ok INTEGER, detail TEXT);
+CREATE INDEX IF NOT EXISTS action_log_ts ON action_log(ts);
+CREATE TABLE IF NOT EXISTS rules(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, event_type TEXT NOT NULL, when_json TEXT NOT NULL DEFAULT '{}',
+  actions_json TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1);
+"""
+
+
+class Store:
+    def __init__(self, path: str = ":memory:", guest_prefix: str = "guest", guest_cache: int = 64) -> None:
+        self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self._db.row_factory = sqlite3.Row
+        self._lock = threading.Lock()
+        if path != ":memory:":
+            self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.executescript(SCHEMA)
+        self._guest_prefix = guest_prefix
+        self._guest: OrderedDict[tuple[str, str], list[tuple[str, str]]] = OrderedDict()
+        self._guest_cache = guest_cache
+
+    def is_guest(self, user_id: str) -> bool:
+        return user_id == self._guest_prefix or user_id.startswith(self._guest_prefix + ":")
+
+    def close(self) -> None:
+        self._db.close()
+
+    def _q(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._db.execute(sql, args).fetchall()
+
+    # ------------------------------------------------------------------------------------------ conversation
+    def add_message(self, user_id: str, session_id: str, role: str, text: str) -> None:
+        if self.is_guest(user_id):
+            key = (user_id, session_id)
+            h = self._guest.setdefault(key, [])
+            h.append((role, text))
+            del h[:-8]
+            self._guest.move_to_end(key)
+            while len(self._guest) > self._guest_cache:
+                self._guest.popitem(last=False)
+            return
+        self._q("INSERT INTO messages(user_id,session_id,role,text,ts) VALUES(?,?,?,?,?)",
+                (user_id, session_id, role, text, time.time()))
+
+    def recent(self, user_id: str, session_id: str, n: int = 4) -> list[tuple[str, str]]:
+        if self.is_guest(user_id):
+            return list(self._guest.get((user_id, session_id), []))[-n:]
+        rows = self._q("SELECT role,text FROM messages WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT ?",
+                       (user_id, session_id, n))
+        return [(r["role"], r["text"]) for r in reversed(rows)]
+
+    def summary(self, user_id: str, session_id: str) -> str:
+        if self.is_guest(user_id):
+            return ""
+        rows = self._q("SELECT text FROM summaries WHERE user_id=? AND session_id=?", (user_id, session_id))
+        return rows[0]["text"] if rows else ""
+
+    def roll_summary(self, user_id: str, session_id: str, keep: int = 4, max_chars: int = 400) -> bool:
+        """Fold messages older than the last `keep` into the rolling summary (deterministic, no LLM: the LLM-written
+        summary is S8's idle job). Returns True if something was folded."""
+        if self.is_guest(user_id):
+            return False
+        rows = self._q("SELECT id FROM messages WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT 1 OFFSET ?",
+                       (user_id, session_id, keep - 1))
+        if not rows:
+            return False
+        cutoff = rows[0]["id"]
+        done = self._q("SELECT upto_id FROM summaries WHERE user_id=? AND session_id=?", (user_id, session_id))
+        upto = done[0]["upto_id"] if done else 0
+        old = self._q("SELECT role,text FROM messages WHERE user_id=? AND session_id=? AND id>? AND id<? ORDER BY id",
+                      (user_id, session_id, upto, cutoff))
+        if not old:
+            return False
+        add = " ".join(("U: " if r["role"] == "user" else "A: ") + r["text"][:80] for r in old)
+        text = ((done and self.summary(user_id, session_id) or "") + " " + add).strip()[-max_chars:]
+        self._q("INSERT INTO summaries(user_id,session_id,text,upto_id,ts) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(user_id,session_id) DO UPDATE SET text=excluded.text, upto_id=excluded.upto_id, ts=excluded.ts",
+                (user_id, session_id, text, cutoff - 1, time.time()))
+        return True
+
+    def forget_user(self, user_id: str) -> None:
+        self._q("DELETE FROM messages WHERE user_id=?", (user_id,))
+        self._q("DELETE FROM summaries WHERE user_id=?", (user_id,))
+
+    # ------------------------------------------------------------------------------------------ action log
+    def log_action(self, *, user_id: str | None, req_id: str | None, trigger_kind: str, trigger_ref: str | None,
+                   reason: str, tool: str | None, args: dict | None, status: str, ok: bool | None,
+                   detail: dict | None = None) -> int:
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO action_log(ts,user_id,req_id,trigger_kind,trigger_ref,reason,tool,args,status,ok,detail) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (time.time(), user_id, req_id, trigger_kind, trigger_ref, reason[:200], tool,
+                 json.dumps(args, sort_keys=True) if args is not None else None, status,
+                 None if ok is None else int(ok), json.dumps(detail, sort_keys=True) if detail else None))
+            return cur.lastrowid or 0
+
+    def action_log(self, limit: int = 50, user_id: str | None = None) -> list[dict]:
+        if user_id is None:
+            rows = self._q("SELECT * FROM action_log ORDER BY id DESC LIMIT ?", (limit,))
+        else:
+            rows = self._q("SELECT * FROM action_log WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit))
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------------------------------ rules (empty in v1)
+    def enabled_rules(self) -> list[dict]:
+        out = []
+        for r in self._q("SELECT * FROM rules WHERE enabled=1 ORDER BY id"):
+            out.append({"id": r["id"], "name": r["name"], "event_type": r["event_type"],
+                        "when": json.loads(r["when_json"]), "actions": json.loads(r["actions_json"])})
+        return out
+
+    def add_rule(self, name: str, event_type: str, when: dict, actions: list[dict]) -> int:
+        with self._lock:
+            cur = self._db.execute("INSERT INTO rules(name,event_type,when_json,actions_json) VALUES(?,?,?,?)",
+                                   (name, event_type, json.dumps(when), json.dumps(actions)))
+            return cur.lastrowid or 0

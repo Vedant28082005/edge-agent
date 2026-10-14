@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest
+pytest-asyncio
+pytest-timeout
+# only for tests/test_integration_hub.py (runs the real device-hub from the S1 worktree in --mock)
+mcp>=1.9,<2
+paho-mqtt>=2.1,<3
