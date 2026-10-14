@@ -1,19 +1,108 @@
-# Production stack on pi-brain. Broker only for now; other services are added by their sessions.
-# Run from the deploy/ folder:  docker compose -f compose.yml up -d
+# Production stack on pi-brain: mosquitto + device-hub + gateway + agent. llama-server is NOT here: it runs natively
+# under systemd (deploy/systemd/llama-server.service) and the agent reaches it through host.docker.internal.
+# Run from the deploy/ folder (tools\deploy.ps1 -Target brain -Up does this):  docker compose up -d
 #
-# MOSQUITTO_STATE_DIR holds the secret/stateful parts (certs/ and data/). Default ./mosquitto is for the dev PC.
-# On the Pi, tools/setup-pi-brain.sh installs them under /etc/edge-agent/mosquitto (owned by uid 1883, key mode 600)
-# and writes MOSQUITTO_STATE_DIR into deploy/.env, so routine deploys never touch secrets or need root.
+# Host layout (created by tools/setup-pi-brain.sh):
+#   MOSQUITTO_STATE_DIR  certs/ + data/ for the broker          (default ./mosquitto on the dev PC; /etc/edge-agent/mosquitto on the Pi)
+#   SECRETS_DIR          /etc/edge-agent/secrets: each service mounts ONLY its own files (see below)
+#   CONFIG_DIR           /etc/edge-agent/config: non-secret JSON (deploy/config)
+#   DATA_DIR             /var/lib/edge-agent/<service>: the one writable volume per service
+# Memory limits are [est]: not measured on a Pi. The 8GB Pi also runs the 7B model (~5 GB resident [est]).
+#
+# Exposure: ONLY the gateway (127.0.0.1:8000, `tailscale serve` fronts it) and mosquitto (8883, boards) publish a port.
+# device-hub 8100, agent 8200 and the gateway's internal consume listener 8001 stay on the private network.
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "5m", max-file: "3"}       # protects the SD card
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  tmpfs: ["/tmp:size=16m,mode=1777"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 256
+  logging: *logging
+  networks: [edge]
+  pull_policy: never                             # images come from tools\deploy.ps1 (docker load), never a registry
+
 services:
   mosquitto:
-    image: eclipse-mosquitto:2.0.20   # multi-arch (linux/arm64 for the Pi)
-    container_name: edge-mosquitto
+    image: eclipse-mosquitto:2.0.20              # multi-arch (linux/arm64 for the Pi)
+    container_name: ${MOSQUITTO_CONTAINER:-edge-mosquitto}
     restart: unless-stopped
+    logging: *logging
+    networks: [edge]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m                               # [est]
     ports:
-      - "8883:8883"                   # TLS only; 1883 is not configured
+      - "${MOSQUITTO_PUBLISH:-8883}:8883"        # TLS only; 1883 is not configured
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ${MOSQUITTO_STATE_DIR:-./mosquitto}/certs/ca.crt:/mosquitto/certs/ca.crt:ro
       - ${MOSQUITTO_STATE_DIR:-./mosquitto}/certs/server.crt:/mosquitto/certs/server.crt:ro
       - ${MOSQUITTO_STATE_DIR:-./mosquitto}/certs/server.key:/mosquitto/certs/server.key:ro
       - ${MOSQUITTO_STATE_DIR:-./mosquitto}/data:/mosquitto/data
+
+  device-hub:
+    <<: *hardening
+    image: edge-agent/device-hub:${EDGE_TAG:-latest}
+    build: {context: .., dockerfile: deploy/docker/Dockerfile.device-hub}
+    user: "10101:10101"
+    mem_limit: 256m                              # [est]
+    depends_on: [mosquitto]
+    # No ports: 8100 is reachable only from the gateway and the agent on the private network.
+    volumes:
+      - ${DATA_DIR:-/var/lib/edge-agent}/device-hub:/var/lib/edge-agent
+      - ${CONFIG_DIR:-/etc/edge-agent/config}/device-hub.json:/etc/edge-agent/config/device-hub.json:ro
+      - ${MOSQUITTO_STATE_DIR:-./mosquitto}/certs/ca.crt:/etc/edge-agent/mosquitto/ca.crt:ro
+      # its own secret (calls the gateway's consume endpoint), the hub's MQTT admin password, and verifiers only:
+      - ${SECRETS_DIR:-/etc/edge-agent/secrets}/device-hub.secret:/etc/edge-agent/secrets/device-hub.secret:ro
+      - ${SECRETS_DIR:-/etc/edge-agent/secrets}/hub-mqtt.password:/etc/edge-agent/secrets/hub-mqtt.password:ro
+      - ${SECRETS_DIR:-/etc/edge-agent/secrets}/hub-verifiers:/etc/edge-agent/secrets/hub-verifiers:ro
+
+  gateway:
+    <<: *hardening
+    image: edge-agent/gateway:${EDGE_TAG:-latest}
+    build: {context: .., dockerfile: deploy/docker/Dockerfile.gateway}
+    user: "10102:10102"
+    mem_limit: 256m                              # [est]
+    depends_on:
+      device-hub: {condition: service_healthy}
+      agent: {condition: service_started}
+    ports:
+      - "${GATEWAY_PUBLISH:-127.0.0.1:8000}:8000"   # loopback only; `tailscale serve` adds HTTPS (tools/tailscale-serve.md)
+    # 8001 (internal consume listener) is deliberately not published.
+    volumes:
+      - ${DATA_DIR:-/var/lib/edge-agent}/gateway:/var/lib/edge-agent
+      - ${CONFIG_DIR:-/etc/edge-agent/config}/gateway.json:/etc/edge-agent/config/gateway.json:ro
+      # its own secret for device-hub, its own secret for the agent's local API, and the verifier for device-hub's secret:
+      - ${SECRETS_DIR:-/etc/edge-agent/secrets}/gateway.secret:/etc/edge-agent/secrets/gateway.secret:ro
+      - ${SECRETS_DIR:-/etc/edge-agent/secrets}/agent-api.secret:/etc/edge-agent/secrets/agent-api.secret:ro
+      - ${SECRETS_DIR:-/etc/edge-agent/secrets}/verifiers:/etc/edge-agent/secrets/verifiers:ro
+
+  agent:
+    <<: *hardening
+    image: edge-agent/agent:${EDGE_TAG:-latest}
+    build: {context: .., dockerfile: deploy/docker/Dockerfile.agent}
+    user: "10103:10103"
+    mem_limit: 256m                              # [est]
+    depends_on:
+      device-hub: {condition: service_healthy}
+    extra_hosts:
+      - "host.docker.internal:${EDGE_GATEWAY_IP:-172.29.0.1}"   # the host's address on the edge bridge: native llama-server
+    # No ports: 8200 is reachable only from the gateway. The agent has NO gateway secret.
+    volumes:
+      - ${DATA_DIR:-/var/lib/edge-agent}/agent:/var/lib/edge-agent
+      - ${CONFIG_DIR:-/etc/edge-agent/config}/agent.json:/etc/edge-agent/config/agent.json:ro
+      # its own secret for device-hub (five runtime tools), and the verifier for the gateway's agent-api secret:
+      - ${SECRETS_DIR:-/etc/edge-agent/secrets}/agent.secret:/etc/edge-agent/secrets/agent.secret:ro
+      - ${SECRETS_DIR:-/etc/edge-agent/secrets}/agent-verifiers:/etc/edge-agent/secrets/agent-verifiers:ro
+
+networks:
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${EDGE_SUBNET:-172.29.0.0/24}
+          gateway: ${EDGE_GATEWAY_IP:-172.29.0.1}

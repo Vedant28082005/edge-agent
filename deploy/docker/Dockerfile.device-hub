@@ -1,0 +1,27 @@
+# device-hub image. Build context = repo root:
+#   docker buildx build -f deploy/docker/Dockerfile.device-hub --platform linux/arm64 .
+# Wheels only (--only-binary=:all:, pinned lock file), so the final image has no compiler, pip or build tools.
+# Runs as fixed uid 10101 with a read-only root filesystem (compose adds a tmpfs on /tmp and one writable data volume).
+FROM python:3.11-slim-bookworm AS build
+COPY deploy/docker/requirements-device-hub.lock /tmp/requirements.lock
+RUN python -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir --only-binary=:all: -r /tmp/requirements.lock \
+ && /opt/venv/bin/pip uninstall -y pip >/dev/null
+
+FROM python:3.11-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PATH=/opt/venv/bin:$PATH
+RUN groupadd --system --gid 10101 edge \
+ && useradd --system --uid 10101 --gid 10101 --no-create-home --shell /usr/sbin/nologin edge \
+ && install -d -o 10101 -g 10101 -m 750 /var/lib/edge-agent \
+ && pip uninstall -y pip setuptools wheel >/dev/null 2>&1 || true
+COPY --from=build /opt/venv /opt/venv
+COPY services/device-hub/device_hub /app/device_hub
+COPY contracts /app/contracts
+COPY deploy/docker/healthcheck.py /app/healthcheck.py
+WORKDIR /app
+USER 10101:10101
+VOLUME ["/var/lib/edge-agent"]
+EXPOSE 8100
+HEALTHCHECK --interval=30s --timeout=6s --start-period=40s --retries=3 CMD ["python", "/app/healthcheck.py", "8100", "/health", "200"]
+ENTRYPOINT ["python", "-m", "device_hub"]
+CMD ["--config", "/etc/edge-agent/config/device-hub.json"]

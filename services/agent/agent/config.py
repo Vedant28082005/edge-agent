@@ -10,6 +10,7 @@ from pathlib import Path
 class AgentConfig:
     host: str = "127.0.0.1"                   # internal service: loopback only (ARCHITECTURE section 2)
     port: int = 8200
+    allow_non_loopback: bool = False          # container deploys only: bind 0.0.0.0 inside a private (unpublished) network
     hub_url: str = "http://127.0.0.1:8100"
     hub_secret_file: str = "/etc/edge-agent/secrets/agent.secret"   # mode 600, owned by the agent user; never env/argv
     llm_url: str = "http://127.0.0.1:8080"
@@ -40,6 +41,7 @@ def load_config(path: str | None) -> AgentConfig:
             if k not in known:
                 raise ValueError(f"unknown config key: {k}")
             setattr(cfg, k, v)
-    if cfg.host not in ("127.0.0.1", "::1", "localhost"):
-        raise ValueError("the agent API is internal: host must be a loopback address")
+    if cfg.host not in ("127.0.0.1", "::1", "localhost") and not cfg.allow_non_loopback:
+        raise ValueError("the agent API is internal: host must be a loopback address "
+                         "(allow_non_loopback only for a container on a private network that does not publish the port)")
     return cfg

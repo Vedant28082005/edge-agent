@@ -23,6 +23,9 @@ class MqttConfig:
 class HttpConfig:
     host: str = "127.0.0.1"
     port: int = 8100
+    # Host headers the MCP endpoint accepts (DNS-rebinding guard). Empty = loopback names. A container on a private
+    # network adds its service name, e.g. ["device-hub:*", "127.0.0.1:*", "localhost:*"].
+    allowed_hosts: list = field(default_factory=list)
 
 
 @dataclass

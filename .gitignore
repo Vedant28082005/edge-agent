@@ -28,3 +28,4 @@ deploy/mosquitto/passwd
 *.crt
 *.csr
 *.srl
+deploy/e2e-work/

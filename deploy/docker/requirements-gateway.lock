@@ -1,0 +1,27 @@
+# Pinned for linux/aarch64, CPython 3.11 (resolved with pip --only-binary=:all: from services/gateway/requirements.txt, then pip freeze).
+# Regenerate: tools\build-images.ps1 -Relock   (never edit by hand; every entry is a wheel, no compilers needed)
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+argon2-cffi==25.1.0
+argon2-cffi-bindings==26.1.0
+certifi==2026.7.22
+cffi==2.1.1
+click==8.5.0
+cryptography==50.0.2
+fastapi==0.143.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+opentelemetry-api==1.45.1
+pycparser==3.11
+pydantic==2.14.1
+pydantic_core==2.50.1
+PyJWT==2.15.1
+python-multipart==0.0.32
+starlette==1.8.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.54.0
+websockets==17.2

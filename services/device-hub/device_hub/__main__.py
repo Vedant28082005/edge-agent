@@ -66,7 +66,8 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
     from .api import create_app
-    app = create_app(hub, mock_gateway=fake_gw, insecure_no_auth=args.insecure_no_auth)
+    app = create_app(hub, mock_gateway=fake_gw, allowed_hosts=cfg.http.allowed_hosts or None,
+                     insecure_no_auth=args.insecure_no_auth)
     log.info("device-hub listening on http://%s:%d (MCP at /mcp)", cfg.http.host, cfg.http.port)
     try:
         uvicorn.run(app, host=cfg.http.host, port=cfg.http.port, log_config=None, access_log=False)
