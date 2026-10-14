@@ -33,6 +33,6 @@ WebSockets (`/ws`) and SSE (`/chat`) pass through `tailscale serve`. `/ws` authe
 * pi-vision and jetson-yolo stay reachable from the brain for the gateway's vision/yolo upstreams (`pi-vision:8300`, `jetson-yolo:8400`):
   `{"action": "accept", "src": ["tag:edge-brain"], "dst": ["tag:edge-vision:8300", "tag:edge-yolo:8400"]}`.
 * The gateway sees every tailnet client as the container bridge address (the connection comes through the proxy), so its
-  per-IP login limit (20 failures per 15 min) is shared by all users; the per-user+IP limit (5) is not. Fine for a household.
+  per-IP login limit (20 failures per 15 min) is shared by all users; the per-user+IP limit (5) is not. Fine for a household. Known limitation; a future gateway `trusted_proxies` setting (trust the proxy's forwarded client IP) would fix it.
 
 Status: written from the Tailscale CLI documentation; not run on a real tailnet.
