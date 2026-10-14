@@ -94,7 +94,7 @@ function Wait-Until([scriptblock]$cond, [int]$sec, [string]$what) {
 }
 function Start-Sse([string]$token, [string]$text, [string]$session, [int]$maxSec, [string]$out) {
     $bodyFile = "$out.body"; Put $bodyFile (@{ session_id = $session; text = $text } | ConvertTo-Json -Compress)
-    $p = Start-Process -FilePath curl.exe -ArgumentList @('-sN', '--max-time', "$maxSec", '-H', "Authorization: Bearer $token", '-H', 'Content-Type: application/json', '--data-binary', "@$bodyFile", "$base/chat", '-o', $out) -PassThru -WindowStyle Hidden
+    $p = Start-Process -FilePath curl.exe -ArgumentList @('-sN', '--max-time', "$maxSec", '-H', '"Authorization: Bearer '+$token+'"', '-H', '"Content-Type: application/json"', '--data-binary', "@$bodyFile", "$base/chat", '-o', $out, '-D', "$out.hdr", '-S') -RedirectStandardError "$out.err" -PassThru -WindowStyle Hidden
     $script:bg += $p.Id
     $p
 }
@@ -104,7 +104,7 @@ function Sse-Events([string]$file) {
     if (-not $t) { return @() }
     @([regex]::Matches($t, '(?m)^event: (\S+)\r?\ndata: (.*)$') | ForEach-Object { [pscustomobject]@{ Name = $_.Groups[1].Value; Data = $_.Groups[2].Value.Trim() } })
 }
-function Dc { & docker @compose @args }
+function Dc { $p = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; try { & docker @compose @args } finally { $ErrorActionPreference = $p } }
 
 try {
     # ------------------------------------------------------------ generated dev material (git-ignored work dir)
@@ -166,15 +166,15 @@ services:
         $LASTEXITCODE -eq 0
     }
     Step 'stack starts and device-hub, gateway, agent report healthy' {
-        $o = & docker @compose up -d 2>&1
+        $o = Dc up -d 2>&1
         Need ($LASTEXITCODE -eq 0) ($o -join ' ')
         foreach ($svc in 'device-hub', 'gateway', 'agent') {
-            Wait-Until { $id = (& docker @compose ps -q $svc); $id -and ((docker inspect -f '{{.State.Health.Status}}' $id) -eq 'healthy') } 150 "$svc healthy" | Out-Null
+            Wait-Until { $id = (Dc ps -q $svc); $id -and ((docker inspect -f '{{.State.Health.Status}}' $id) -eq 'healthy') } 150 "$svc healthy" | Out-Null
         }
         $true
     }
     Step 'only gateway (loopback) and mosquitto are reachable from the host; 8100/8200/8001 are not' {
-        $ports = @(& docker @compose ps --format json | ForEach-Object { $_ | ConvertFrom-Json } | ForEach-Object { $_.Publishers } | Where-Object { $_.PublishedPort } | ForEach-Object { "$($_.TargetPort)" })
+        $ports = @(Dc ps --format json | ForEach-Object { $_ | ConvertFrom-Json } | ForEach-Object { $_.Publishers } | Where-Object { $_.PublishedPort } | ForEach-Object { "$($_.TargetPort)" })
         Need ((($ports | Sort-Object -Unique) -join ',') -eq '8000,8883') "published targets: $($ports -join ',')"
         foreach ($p in 8100, 8200, 8001) {
             $c = New-Object Net.Sockets.TcpClient; $ar = $c.BeginConnect('127.0.0.1', $p, $null, $null)
@@ -187,6 +187,7 @@ services:
     # ------------------------------------------------------------ admin, login
     $adminPw = (Rand 18) + 'aA1'
     Step 'gateway bootstrap-admin (password via stdin) creates the first admin' {
+        $pp = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         $o = $adminPw | & docker @compose run --rm -T gateway --config /etc/edge-agent/config/gateway.json bootstrap-admin --username admin --password-stdin 2>&1
         Need ($LASTEXITCODE -eq 0 -and ($o -join ' ') -match "admin 'admin' created") ($o -join ' ')
         $true
@@ -206,7 +207,7 @@ services:
     $credDir = Join-Path $work 'creds'; New-Item -ItemType Directory -Force $credDir | Out-Null
     Step 'provision both simulated nodes (hub creates MQTT users through the dynsec API)' {
         foreach ($n in $n1, $n2) {
-            $r = Api POST '/admin/provision-sessions' @{ node_id = $n } $tok
+            $r = Api POST '/admin/provision-sessions' @{ node_id = $n; wifi = @{ ssid = 'e2e-sim'; password = 'e2e-sim-wifi-pw' } } $tok
             Need ($r.Status -eq 201 -and $r.Json.bundle.mqtt.username -eq $n) "$n -> $($r.Status) $($r.Text.Length)"
             Put (Join-Path $credDir "$n.cred") "username=$($r.Json.bundle.mqtt.username)`npassword=$($r.Json.bundle.mqtt.password)`n"
         }
@@ -233,7 +234,7 @@ nodes:
 "@
     $simOut = Join-Path $work 'sim.out.log'; $simErr = Join-Path $work 'sim.err.log'; $stopFile = Join-Path $work 'sim.stop'
     Step 'start the S2c simulator (TLS to the dev broker, real credentials)' {
-        $script:simProc = Start-Process -FilePath $simPy -ArgumentList @((Join-Path $root 'tools\e2e\run_sim.py'), $stopFile, $yaml, '--host', 'localhost', '--port', "$mqPort", '--ca', (Join-Path $mq 'certs\ca.crt'), '--creds-dir', $credDir) -RedirectStandardOutput $simOut -RedirectStandardError $simErr -PassThru -WindowStyle Hidden
+        $script:simProc = Start-Process -FilePath $simPy -ArgumentList @('-u', (Join-Path $root 'tools\e2e\run_sim.py'), $stopFile, $yaml, '--host', 'localhost', '--port', "$mqPort", '--ca', (Join-Path $mq 'certs\ca.crt'), '--creds-dir', $credDir) -RedirectStandardOutput $simOut -RedirectStandardError $simErr -PassThru -WindowStyle Hidden
         Wait-Until { (Test-Path $simOut) -and ((Get-Content $simOut -Raw) -match 'node\(s\) running') } 30 'sim start' | Out-Null
         $true
     }
@@ -276,7 +277,7 @@ nodes:
         $p = Start-Sse $tok 'unlock the front door' 'e2e-2' 120 $out
         $req = Wait-Until { Sse-Events $out | Where-Object { $_.Name -eq 'confirmation_request' } | Select-Object -First 1 } 60 'confirmation_request'
         $rid = ($req.Data | ConvertFrom-Json).request_id
-        Need ($rid) 'no request_id'
+        Need ([bool]$rid) 'no request_id'
         $d0 = (Api GET '/devices' $null $tok).Json | Where-Object { $_.endpoint_id -eq $lockId }
         Need ($d0.state.lock -eq 'locked') "lock moved before approval: $($d0.state.lock)"
         $m = Api POST '/confirmations' @{ request_id = $rid } $tok
@@ -400,7 +401,7 @@ print('RESULT', rc[0] if rc else 'none')
         $true
     }
     Step 'no service secret, token or password appears in any container log' {
-        $logs = (& docker @compose logs --no-color 2>&1) -join "`n"
+        $logs = (Dc logs --no-color 2>&1) -join "`n"
         foreach ($f in 'device-hub.secret', 'gateway.secret', 'agent.secret', 'agent-api.secret', 'hub-mqtt.password') {
             $v = [IO.File]::ReadAllText((Join-Path $sec $f))
             Need ($logs.IndexOf($v, [StringComparison]::Ordinal) -lt 0) "$f value found in logs"
@@ -417,7 +418,11 @@ finally {
     if ($script:results | Where-Object { -not $_.Ok }) { & docker @compose logs --no-color --tail 40 2>&1 | ForEach-Object { Write-Host "  | $_" } }
     & docker @compose down -v --remove-orphans 2>&1 | Out-Null
     foreach ($v in 'EDGE_TAG', 'MOSQUITTO_CONTAINER', 'MOSQUITTO_PUBLISH', 'GATEWAY_PUBLISH', 'EDGE_SUBNET', 'EDGE_GATEWAY_IP', 'MOSQUITTO_STATE_DIR', 'SECRETS_DIR', 'CONFIG_DIR', 'DATA_DIR') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
-    if (-not $Keep) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue } else { Write-Host "kept $work" }
+    if (-not $Keep) {
+        # new-certs.ps1 restricts the key files to the current user; grant ourselves access so the delete cannot be refused
+        icacls $work /grant "${env:USERNAME}:(OI)(CI)F" /T /C 2>&1 | Out-Null
+        Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+    } else { Write-Host "kept $work" }
 }
 $bad = @($script:results | Where-Object { -not $_.Ok })
 Write-Host ''
