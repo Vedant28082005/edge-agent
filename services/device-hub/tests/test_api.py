@@ -271,3 +271,70 @@ def test_cli_insecure_flag_only_with_mock(capsys):
 def test_unknown_routes_are_json_404(api):
     r = api.http.get("/nope")
     assert r.status_code == 404 and r.json()["error"] == "not_found"
+
+
+def test_run_scene_409_body_carries_scene_id_actions_and_hash(api, home):
+    acts = [{"target": {"endpoint_id": home.ids["lock"]}, "capability": "lock", "value": "locked"}]
+    sid = api.http.post("/scenes", json={"name": "L", "actions": acts, "owner": "u"}).json()["scene_id"]
+    r = api.http.post(f"/scenes/{sid}/run", json={"user_id": U})
+    assert r.status_code == 409
+    b = r.json()
+    assert b["scene_id"] == sid and b["executed"] is False and b["status"] == "needs_confirmation"
+    assert b["needs_confirmation"] == [{"endpoint_id": home.ids["lock"], "capability": "lock", "value": "locked"}]
+    assert b["action_hash"] == api.http.get(f"/scenes/{sid}/confirmation").json()["action_hash"]
+
+
+def test_cli_mock_honors_caller_auth_from_config(tmp_path):
+    """Start the real CLI (--mock --config) as a subprocess: auth.verifier_dir from the config must be enforced."""
+    import json as _json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    (tmp_path / "gateway.sha256").write_text(hashlib.sha256(b"gw-secret-value").hexdigest())
+    (tmp_path / "agent.sha256").write_text(hashlib.sha256(b"agent-secret-value").hexdigest())
+    cfg = tmp_path / "hub.json"
+    cfg.write_text(_json.dumps({"db_path": str(tmp_path / "hub.sqlite"), "auth": {"verifier_dir": str(tmp_path)}}))
+    root = Path(__file__).resolve().parents[1]
+    port = free_port()
+    proc = subprocess.Popen([sys.executable, "-m", "device_hub", "--mock", "--config", str(cfg), "--port", str(port)],
+                            cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        url = f"http://127.0.0.1:{port}"
+        for _ in range(150):
+            try:
+                if httpx.get(url + "/health", timeout=1).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                time.sleep(0.1)
+        else:
+            raise AssertionError("CLI did not come up")
+        gw, ag = {"X-Service-Secret": "gw-secret-value"}, {"X-Service-Secret": "agent-secret-value"}
+        assert httpx.get(url + "/admin/nodes").status_code == 401                       # no secret
+        assert httpx.get(url + "/admin/nodes", headers={"X-Service-Secret": "wrong"}).status_code == 401
+        assert httpx.get(url + "/admin/nodes", headers=ag).status_code == 403            # agent scope
+        r = httpx.get(url + "/admin/nodes", headers=gw)
+        assert r.status_code == 200 and len(r.json()) == 2                               # demo nodes seeded
+        mcp = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        assert httpx.post(url + "/mcp", headers={**ag, **mcp}, json=body).status_code == 200
+        assert httpx.get(url + "/mock/mint", headers=gw).status_code in (404, 405)       # route exists only as POST
+        assert httpx.post(url + "/mock/mint", headers=ag, json={}).status_code == 403
+    finally:
+        proc.terminate()                       # only the PID this test started
+        try:
+            proc.wait(10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_cli_mock_without_auth_config_or_flag_exits_nonzero(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    cfg = tmp_path / "hub.json"
+    cfg.write_text('{"auth": {"verifier_dir": "' + str(tmp_path / "nope").replace("\\", "/") + '"}}')
+    p = subprocess.run([sys.executable, "-m", "device_hub", "--mock", "--config", str(cfg), "--port", str(free_port())],
+                       cwd=root, capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0 and "caller authentication" in (p.stdout + p.stderr)
