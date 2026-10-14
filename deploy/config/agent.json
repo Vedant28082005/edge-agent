@@ -1,0 +1,10 @@
+{
+  "host": "0.0.0.0",
+  "allow_non_loopback": true,
+  "port": 8200,
+  "hub_url": "http://device-hub:8100",
+  "hub_secret_file": "/etc/edge-agent/secrets/agent.secret",
+  "llm_url": "http://host.docker.internal:8080",
+  "db_path": "/var/lib/edge-agent/agent.sqlite",
+  "api_verifier_file": "/etc/edge-agent/secrets/agent-verifiers/agent-api.sha256"
+}

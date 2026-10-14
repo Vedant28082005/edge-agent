@@ -1,0 +1,43 @@
+# Native llama.cpp server for the agent (pi-brain). Installed by tools/setup-pi-brain.sh to
+# /etc/systemd/system/llama-server.service; configuration lives in /etc/edge-agent/llama-server.env (template:
+# llama-server.env.template). No model is hardcoded or shipped: LLAMA_MODEL must point at a GGUF you put there.
+[Unit]
+Description=llama-server (edge-agent LLM)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/edge-agent/llama-server.env
+# --parallel 1: ONE slot, so the static prompt prefix stays in that slot's KV cache (the agent sends id_slot 0).
+# --temp 0 is only the default; the agent also sends temperature 0 per request.
+# The bind address comes from the env file. Default is the edge bridge's host address (reachable from the
+# containers, not from the LAN); 127.0.0.1 also works if the agent is run with host networking.
+ExecStartPre=/usr/bin/test -r ${LLAMA_MODEL}
+# ${VAR} = one argument as is; $VAR (LLAMA_EXTRA_ARGS) = split on whitespace, nothing when empty.
+ExecStart=/usr/local/bin/llama-server --model ${LLAMA_MODEL} --host ${LLAMA_HOST} --port ${LLAMA_PORT} --ctx-size ${LLAMA_CTX} --threads ${LLAMA_THREADS} --parallel 1 --temp 0 --cache-prompt $LLAMA_EXTRA_ARGS
+User=edge-llama
+Group=edge-llama
+Restart=on-failure
+RestartSec=5
+# A bind to the bridge address fails until docker has created the network; Restart= retries until it exists.
+StartLimitIntervalSec=0
+
+# Sandboxing: the server needs the model (read) and nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/edge-agent
+
+[Install]
+WantedBy=multi-user.target

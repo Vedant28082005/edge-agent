@@ -1,5 +1,5 @@
 # Dev overlay for the PC (run from deploy/):
-#   docker compose -f compose.yml -f compose.dev.yml up -d
+#   docker compose -f compose.yml -f compose.dev.yml up -d mosquitto     # broker only: the services need secrets (see README)
 # Same broker, but published on localhost only and not auto-restarted.
 services:
   mosquitto:
