@@ -6,26 +6,39 @@ Broker stack for `pi-brain` (Mosquitto 2.x, TLS on 8883, dynamic-security). Run 
 
 ```powershell
 # 1. private CA + broker certificate (SANs: localhost, 127.0.0.1, your LAN IP, tailnet name)
-deploy\mosquitto\new-certs.ps1 -LanIp 192.168.1.10 -TailnetName pi-brain.<tailnet>.ts.net
+deploy\mosquitto\new-certs.ps1 -LanIp 192.168.1.10 -TailnetName pi-brain.<tailnet>.ts.net -ExtraDns mosquitto   # SAN 'mosquitto' = the name the hub container uses; setup-pi-brain.sh refuses a cert without it
 # 2. dynsec config with the hub admin (random password -> deploy\mosquitto\.env, git-ignored)
 deploy\mosquitto\dynsec-bootstrap.ps1
 # 3. start the broker (dev: localhost only)
-cd deploy; docker compose -f compose.yml -f compose.dev.yml up -d
+cd deploy; docker compose -f compose.yml -f compose.dev.yml up -d mosquitto     # broker only
 # 4. prove node isolation
 cd ..; deploy\mosquitto\acl-test.ps1
 ```
 
 All generated material (`certs/`, `data/`, `.env`) is git-ignored. `certs\ca\ca.key` never leaves the PC. On the PC, `new-certs.ps1` restricts the key files to your Windows user.
 
-## One-time Pi setup (secrets and chrony)
+## Stack on pi-brain: images, compose, llama-server
 
-Routine `tools\deploy.ps1 -Target brain` needs **no root** and carries **no secrets**: it copies only `contracts/`, `compose.yml`, `mosquitto.conf`, the role template, the chrony config and `tools/setup-pi-brain.sh`. Secrets reach the Pi once, by hand:
+`compose.yml` runs mosquitto + **device-hub, gateway, agent** from images built by `tools\build-images.ps1` (python:3.11-slim-bookworm, pinned wheels in `docker/requirements-*.lock`, `--only-binary=:all:`, fixed uids 10101/10102/10103, read-only root fs + tmpfs, one data volume each under `/var/lib/edge-agent/<service>`, json-file log rotation, `mem_limit` per service [est]). One private network `edge`; **only the gateway (`127.0.0.1:8000`, fronted by `tailscale serve`, see `tools/tailscale-serve.md`) and mosquitto (8883) publish ports**. device-hub 8100, agent 8200 and the gateway's internal consume listener 8001 are not published. Each service mounts only its own secret files (table below); `tools\compose-test.ps1` enforces both rules.
+
+```powershell
+tools\build-images.ps1 -Tag v1 -Save -Smoke         # buildx arm64 (emulated smoke) + amd64; tarballs in deploy\dist\ (git-ignored)
+tools\deploy.ps1 -Target brain -Images -Tag v1 -Up  # copy non-secret files + tarballs, docker load, compose up (-DryRun previews)
+tools\e2e-smoke.ps1                                # local amd64 end-to-end on a throwaway compose project
+```
+
+The LLM is **not** in compose: `systemd/llama-server.service` runs the native llama-server (one slot, `--temp 0`, context/threads/model from `/etc/edge-agent/llama-server.env`, no model shipped). It binds the edge bridge address (`LLAMA_HOST`, default `172.29.0.1`; containers reach it as `host.docker.internal`, the LAN cannot). First admin, once: `docker compose run --rm -it gateway --config /etc/edge-agent/config/gateway.json bootstrap-admin --username NAME`. Images carry no secret (`python tools/secret_scan.py image ...` scans every layer).
+
+## One-time Pi setup (secrets, users, dirs, config, llama unit, chrony)
+
+Routine `tools\deploy.ps1 -Target brain` needs **no root** and carries **no secrets**: it copies only `contracts/`, `compose.yml`, `mosquitto.conf`, the role template, the chrony config, `deploy/config` (non-secret JSON), `deploy/systemd` (llama unit + env template) and `tools/setup-pi-brain.sh`, plus the image tarballs with `-Images`. Secrets reach the Pi once, by hand:
 
 ```powershell
 tools\deploy.ps1 -Target brain                      # puts setup-pi-brain.sh and the chrony config on the Pi
 ssh pi@pi-brain "mkdir -p -m 700 ~/edge-agent-setup"
 scp deploy\mosquitto\certs\ca.crt deploy\mosquitto\certs\server.crt deploy\mosquitto\certs\server.key deploy\mosquitto\data\dynamic-security.json pi@pi-brain:edge-agent-setup/
-ssh -t pi@pi-brain "LAN_CIDR=192.168.1.0/24 bash ~/edge-agent/tools/setup-pi-brain.sh"   # asks for your sudo password
+# also stage the hub MQTT admin password (HUB_ADMIN_PASSWORD from deploy\mosquitto\.env) as a file named hub-mqtt.password
+ssh -t pi@pi-brain "LAN_IP=192.168.1.10 LAN_CIDR=192.168.1.0/24 bash ~/edge-agent/tools/setup-pi-brain.sh"   # asks for your sudo password
 tools\deploy.ps1 -Target brain -Up                  # starts the broker
 ```
 
@@ -40,6 +53,9 @@ Both internal APIs authenticate callers with `X-Service-Secret` (loopback or uni
 | device-hub | `/etc/edge-agent/secrets/device-hub.secret` (owner `edge-device-hub`) | gateway | `POST /internal/confirmations/consume` only |
 | gateway | `/etc/edge-agent/secrets/gateway.secret` (owner `edge-gateway`) | device-hub | everything (scope `gateway`) |
 | agent | `/etc/edge-agent/secrets/agent.secret` (owner `edge-agent`) | device-hub | the five runtime tools via `POST /mcp` only (scope `agent`) |
+| gateway | `/etc/edge-agent/secrets/agent-api.secret` (owner `edge-gateway`) | agent local API | everything in `agent-internal.yaml`; the agent holds only `agent-verifiers/agent-api.sha256` (owner `edge-agent`) |
+
+The hub's own MQTT account password is `hub-mqtt.password` (owner `edge-device-hub`). Verifier directories: `verifiers/` (gateway), `hub-verifiers/` (device-hub), `agent-verifiers/` (agent); each service mounts only its own.
 
 The agent has **no** secret for the gateway: it cannot mint or consume confirmation tokens.
 
@@ -59,8 +75,11 @@ ew-certs.ps1 -LanIp <pi-brain static LAN IP> -TailnetName <pi-brain>.<tailnet>.t
 
 | File | Purpose |
 |---|---|
-| `compose.yml` | Broker service (production, ARM64-capable image) |
-| `compose.dev.yml` | Overlay: bind to 127.0.0.1, no auto-restart |
+| `compose.yml` | mosquitto + device-hub + gateway + agent (production, ARM64) |
+| `compose.dev.yml` | Overlay: broker on 127.0.0.1, no auto-restart (use `up -d mosquitto`) |
+| `docker/` | Dockerfile per service, pinned `requirements-*.lock`, `healthcheck.py` |
+| `config/` | non-secret service JSON (`device-hub.json.template`, `gateway.json`, `agent.json`) |
+| `systemd/` | `llama-server.service` + `llama-server.env.template` |
 | `mosquitto/mosquitto.conf` | TLS 8883 only, dynsec plugin, anonymous off |
 | `mosquitto/new-certs.ps1` | CA + server cert; SANs from parameters |
 | `mosquitto/dynsec-bootstrap.ps1` | Initial dynsec config, hub admin, default-deny ACL |
@@ -68,7 +87,7 @@ ew-certs.ps1 -LanIp <pi-brain static LAN IP> -TailnetName <pi-brain>.<tailnet>.t
 | `mosquitto/dynsec-node-user.ps1` | Create/remove a node user + role (testing; the hub does this in production) |
 | `mosquitto/acl-test.ps1` | Isolation + revocation proof against a running broker |
 
-Production: `tools\deploy.ps1 -Target brain -Up`.
+Production: `tools\deploy.ps1 -Target brain -Images -Up`. Tests (no hardware): `tools\compose-test.ps1`, `tools\setup-pi-brain-test.ps1`, `tools\deploy-test.ps1`, `tools\e2e-smoke.ps1`.
 ESP32s need the CA cert (delivered in the BLE bundle). Their TLS check needs a valid clock (NTP) and the broker's LAN IP in the SANs.
 
 ## NTP (needed for ESP32 TLS)
