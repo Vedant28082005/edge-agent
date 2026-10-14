@@ -609,6 +609,63 @@ paths:
       responses:
         '204': {description: Deleted}
         '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/scenes/{scene_id}/assignments:
+    parameters:
+      - {name: scene_id, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [admin]
+      operationId: adminGetSceneAssignments
+      x-required-role: admin
+      description: Guest users this scene is assigned to. A guest may run a scene only if it is assigned (ARCHITECTURE 4.7).
+      responses:
+        '200': {description: Assignments, content: {application/json: {schema: {$ref: '#/components/schemas/SceneAssignments'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [admin]
+      operationId: adminSetSceneAssignments
+      x-required-role: admin
+      description: Replaces the whole set of guest users the scene is assigned to. Only users with role `guest` are accepted (400 otherwise); an empty list unassigns everyone. Deleting a scene or a user drops its assignments.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SceneAssignments'}}}
+      responses:
+        '200': {description: Stored assignments, content: {application/json: {schema: {$ref: '#/components/schemas/SceneAssignments'}}}}
+        '400': {description: Unknown user or user is not a guest, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /admin/wifi-profiles:
+    get:
+      tags: [admin]
+      operationId: adminListWifiProfiles
+      x-required-role: admin
+      description: Saved Wi-Fi profiles for provisioning (`wifi_profile` in POST /admin/provision-sessions). The password is write-only and is NEVER returned by any route.
+      responses:
+        '200': {description: Profiles without passwords, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/WifiProfile'}}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [admin]
+      operationId: adminCreateWifiProfile
+      x-required-role: admin
+      description: Creates or replaces (by name) a profile. The password is stored encrypted, never logged, and never returned.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/WifiProfileInput'}}}
+      responses:
+        '201': {description: Stored (no password in the reply), content: {application/json: {schema: {$ref: '#/components/schemas/WifiProfile'}}}}
+        '400': {description: Invalid profile, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/wifi-profiles/{name}:
+    delete:
+      tags: [admin]
+      operationId: adminDeleteWifiProfile
+      x-required-role: admin
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string, maxLength: 64}}
+      responses:
+        '204': {description: Deleted}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
 
 components:
   securitySchemes:
@@ -812,6 +869,27 @@ components:
               capability: {type: string}
               status: {type: string, enum: [done, moving, skipped_offline, skipped_no_capability, failed]}
               detail: {type: string}
+    SceneAssignments:
+      type: object
+      additionalProperties: false
+      required: [user_ids]
+      properties:
+        user_ids: {type: array, maxItems: 64, uniqueItems: true, items: {type: string, maxLength: 64}, description: Guest user ids}
+    WifiProfile:
+      type: object
+      additionalProperties: false
+      required: [name, ssid]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 64}
+        ssid: {type: string, maxLength: 32}
+    WifiProfileInput:
+      type: object
+      additionalProperties: false
+      required: [name, ssid, password]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 64}
+        ssid: {type: string, maxLength: 32}
+        password: {type: string, maxLength: 64, writeOnly: true}
     Memory:
       type: object
       properties:
