@@ -1,0 +1,9 @@
+# Pure Python, or manylinux/aarch64 wheels (argon2-cffi, cryptography, pydantic-core). Python 3.11+.
+fastapi>=0.110,<1
+uvicorn>=0.30,<1
+websockets>=12
+httpx>=0.27,<1
+python-multipart>=0.0.9
+argon2-cffi>=23.1
+PyJWT>=2.8,<3
+cryptography>=42
