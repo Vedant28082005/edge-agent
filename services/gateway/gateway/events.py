@@ -164,17 +164,18 @@ async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Eve
                 out = from_hub(env)
                 if out:
                     bc.publish(out)
+            wait = retry_s                             # clean end of stream: reconnect promptly with Last-Event-ID
         except UpstreamError:
-            pass
+            wait, delay = delay, min(delay * 2, 30.0)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("hub subscriber error")
+            wait, delay = delay, min(delay * 2, 30.0)
         try:
-            await asyncio.wait_for(stop.wait(), delay)
+            await asyncio.wait_for(stop.wait(), wait)
         except asyncio.TimeoutError:
             pass
-        delay = min(delay * 2, 30.0)
 
 
 async def run_agent_subscriber(agent: JsonClient, bc: Broadcaster, stop: asyncio.Event, retry_s: float = 2.0) -> None:

@@ -198,6 +198,10 @@ def create_public_app(ctx: Ctx) -> FastAPI:
     app = FastAPI(title="Edge Agent Gateway", docs_url=None, redoc_url=None, openapi_url=None)
     r = APIRouter()
     cfg = ctx.cfg
+    # Uploads must never touch the disk: keep multipart parts in memory (Starlette spools >1 MiB to a temp file by default).
+    from starlette.formparsers import MultiPartParser
+    MultiPartParser.spool_max_size = max(MultiPartParser.spool_max_size, cfg.max_audio_bytes + cfg.max_image_bytes + (1 << 20))
+    upload_caps = {"/images": cfg.max_image_bytes, "/voice": cfg.max_audio_bytes}
 
     # ---- errors: one shape, and never echo request input back
     @app.exception_handler(ApiError)
@@ -226,6 +230,13 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         # The public listener never serves /internal/* (any method): 404 before routing and before the static mount.
         if request.url.path == "/internal" or request.url.path.startswith("/internal/"):
             return jerr(404, "not_found")
+        cap = upload_caps.get(request.url.path)
+        if cap is not None and request.method == "POST":       # refuse oversized bodies before parsing (and chunked ones)
+            cl = request.headers.get("content-length", "")
+            if not cl.isdigit():
+                return jerr(411, "length_required")
+            if int(cl) > cap + 65536:
+                return jerr(413, "too_large", f"max {cap} bytes")
         resp = await call_next(request)
         if request.url.path.startswith(("/auth", "/admin", "/confirmations")):
             resp.headers.setdefault("Cache-Control", "no-store")

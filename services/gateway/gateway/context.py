@@ -37,9 +37,9 @@ class Ctx:
     tasks: list = field(default_factory=list)
     agent_push: bool = False
 
-    def start(self) -> None:
+    def start(self, retry_s: float = 1.0) -> None:
         self.stop = asyncio.Event()
-        self.tasks = [asyncio.create_task(run_hub_subscriber(self.hub, self.bc, self.stop))]
+        self.tasks = [asyncio.create_task(run_hub_subscriber(self.hub, self.bc, self.stop, retry_s))]
         if self.agent_push:
             self.tasks.append(asyncio.create_task(run_agent_subscriber(self.agent, self.bc, self.stop)))
 

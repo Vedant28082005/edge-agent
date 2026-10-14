@@ -143,7 +143,8 @@ class FakeHub:
 
         @app.get("/events")
         async def events(request: Request):
-            return sse([("hello", {"version": 1, "last_event_seq": 0})] + [(t, e) for t, e in self.events])
+            last = int(request.headers.get("last-event-id") or request.query_params.get("since") or 0)
+            return sse([("hello", {"version": 1, "last_event_seq": 0})] + [(t, e) for t, e in self.events if e["seq"] > last])
 
         @app.get("/devices")
         async def devices(room: str | None = None, type: str | None = None):
