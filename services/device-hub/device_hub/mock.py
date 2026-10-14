@@ -553,15 +553,19 @@ def demo_announces() -> list[dict]:
     ]
 
 
-def build_mock_hub(db_path: str = ":memory:", http_port: int = 8100, seed: bool = True, clock: Clock | None = None):
-    """Hub on an in-memory broker + fake gateway, optionally seeded with two provisioned+approved fake nodes."""
+def build_mock_hub(db_path: str = ":memory:", http_port: int = 8100, seed: bool = True, clock: Clock | None = None,
+                   cfg=None):
+    """Hub on an in-memory broker + fake gateway, optionally seeded with two provisioned+approved fake nodes.
+    `cfg` (the loaded --config) is honoured as is, in particular auth.verifier_dir; only the network-facing parts
+    (broker, gateway, bundle host) are replaced by their mock twins."""
     from .config import HubConfig
     from .hub import Hub
 
-    cfg = HubConfig(db_path=db_path)
-    cfg.provision.broker_host = "192.0.2.10"
+    if cfg is None:
+        cfg = HubConfig(db_path=db_path)
+        cfg.http.port = http_port
+    cfg.provision.broker_host = cfg.provision.broker_host or "192.0.2.10"
     cfg.provision.ca_file = ""
-    cfg.http.port = http_port
     broker = FakeBroker()
     SECRETS.add("mock-hub-password")
     broker.add_user("hub-admin", "mock-hub-password", superuser=True)

@@ -5,7 +5,7 @@ import pytest
 
 from conftest import light_ep, make_announce
 from device_hub.errors import HubError
-from device_hub.util import run_scene_action
+from device_hub.util import action_hash, run_scene_action
 
 U = "user:vedant"
 
@@ -111,8 +111,9 @@ def test_disabled_endpoints_are_excluded_from_selectors(home):
 def test_risky_scene_executes_nothing_without_token(home):
     s = mk(home, "Leave", [fixed(home.ids["light"], "power", False), fixed(home.ids["lock"], "lock", "locked")])
     r = home.hub.scenes.run_scene(s["scene_id"], user_id=U)
-    assert r == {"ok": False, "executed": False, "status": "needs_confirmation",
-                 "needs_confirmation": [{"endpoint_id": home.ids["lock"], "capability": "lock", "value": "locked"}]}
+    risky = [{"endpoint_id": home.ids["lock"], "capability": "lock", "value": "locked"}]
+    assert r == {"ok": False, "executed": False, "status": "needs_confirmation", "scene_id": s["scene_id"],
+                 "needs_confirmation": risky, "action_hash": action_hash(run_scene_action(s["scene_id"], risky))}
     assert home.nodes["esp32-000000000001"].cmds_seen == [] and home.nodes["esp32-000000000002"].cmds_seen == []
 
 

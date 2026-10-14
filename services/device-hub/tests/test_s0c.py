@@ -285,3 +285,36 @@ def test_unknown_room_and_other_codes(home):
     assert ex.read_sensor(home.ids["temp"], "temperature")["error"] == "disabled"
     assert ex.get_state(endpoint_id=home.ids["temp"])["error"] == "unknown_endpoint"
     assert home.hub.scenes.run_scene("nope") == {"ok": False, "executed": False, "error": "unknown_scene"}
+
+
+# ---------------------------------------------------------------------------------------------- S0e
+def test_run_scene_needs_confirmation_carries_scene_id_canonical_actions_and_hash(home):
+    from device_hub.util import action_hash, run_scene_action
+    s = home.hub.scenes.create_scene("Leave", [
+        {"target": {"endpoint_id": home.ids["lock"]}, "capability": "lock", "value": "locked"},
+        {"target": {"type": "lock"}, "capability": "lock", "value": "locked"},          # duplicate of the first, collapses
+        {"target": {"endpoint_id": home.ids["light"]}, "capability": "power", "value": False}], "u", "t")
+    r = home.hub.scenes.run_scene(s["scene_id"], user_id=U)
+    risky = [{"endpoint_id": home.ids["lock"], "capability": "lock", "value": "locked"}]
+    assert r == {"ok": False, "executed": False, "status": "needs_confirmation", "scene_id": s["scene_id"],
+                 "needs_confirmation": risky, "action_hash": action_hash(run_scene_action(s["scene_id"], risky))}
+    # the hash is exactly what the confirmation lookup gives the gateway, and a token minted for it runs the scene
+    assert r["action_hash"] == home.hub.scenes.action_for_scene(s["scene_id"])["action_hash"]
+    by_name = home.hub.scenes.run_scene("Leave", user_id=U)
+    assert by_name["scene_id"] == s["scene_id"]                                           # permanent id even when run by name
+    tok = home.gw.mint(U, r["action_hash"])
+    assert home.hub.scenes.run_scene(s["scene_id"], user_id=U, token=tok)["executed"] is True
+
+
+def test_needs_confirmation_actions_are_sorted_by_endpoint_then_capability(home):
+    from device_hub.util import action_hash
+    home.add_node(make_announce("esp32-00000000000a", [{"local_id": "d2", "type": "lock", "capabilities": [
+        {"id": "lock", "kind": "actuator", "type": "enum", "values": ["locked", "unlocked"], "boot_value": "locked"}]}]),
+        {"d2": ("Back door", "Hall", "confirm")})
+    s = home.hub.scenes.create_scene("Locks", [{"target": {"type": "lock"}, "capability": "lock", "value": "locked"}], "u", "t")
+    r = home.hub.scenes.run_scene(s["scene_id"], user_id=U)
+    ids = [a["endpoint_id"] for a in r["needs_confirmation"]]
+    assert ids == sorted(ids) and len(ids) == 2
+    assert all(set(a) == {"endpoint_id", "capability", "value"} for a in r["needs_confirmation"])
+    assert len(r["action_hash"]) == 64 and r["action_hash"] == action_hash(
+        {"actions": r["needs_confirmation"], "scene_id": s["scene_id"], "type": "run_scene"})
