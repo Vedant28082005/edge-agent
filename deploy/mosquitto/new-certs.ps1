@@ -9,6 +9,8 @@
   Optional additional SANs. localhost and 127.0.0.1 are always included (local testing).
 .PARAMETER ServerDays
   Validity of the server certificate in days (default 1095, about 3 years).
+.PARAMETER OutDir
+  Output directory (default: certs next to this script, git-ignored). The SAN test uses a temp directory.
 .PARAMETER Force
   Regenerate the server certificate even if it exists (the CA is kept unless -NewCa).
 .NOTES
@@ -28,12 +30,13 @@ param(
     [string[]]$ExtraDns = @(),
     [string[]]$ExtraIp = @(),
     [ValidateRange(30, 3650)][int]$ServerDays = 1095,
+    [string]$OutDir = (Join-Path $PSScriptRoot 'certs'),
     [switch]$Force,
     [switch]$NewCa
 )
 $ErrorActionPreference = 'Stop'
 $ssl = (Get-Command openssl -ErrorAction Stop).Source
-$certs = Join-Path $PSScriptRoot 'certs'
+$certs = $OutDir
 $caDir = Join-Path $certs 'ca'
 New-Item -ItemType Directory -Force $caDir | Out-Null
 
@@ -65,9 +68,12 @@ Copy-Item $caCrt (Join-Path $certs 'ca.crt') -Force
 $srvCrt = Join-Path $certs 'server.crt'
 if ($Force -or -not (Test-Path $srvCrt)) {
     Write-Host 'Generating server certificate ...'
-    $dns = @('localhost', $TailnetName) + $ExtraDns | Select-Object -Unique
-    $ips = @('127.0.0.1', $LanIp) + $ExtraIp | Select-Object -Unique
-    $san = (($dns | ForEach-Object { "DNS:$_" }) + ($ips | ForEach-Object { "IP:$_" })) -join ','
+    # @() everywhere: Select-Object/ForEach-Object return a bare string when only one item is left (e.g. TailnetName
+    # 'localhost' and LanIp '127.0.0.1'), and string + string would concatenate into "DNS:localhostIP:127.0.0.1".
+    $dns = @(@('localhost', $TailnetName) + $ExtraDns | Where-Object { $_ } | Select-Object -Unique)
+    $ips = @(@('127.0.0.1', $LanIp) + $ExtraIp | Where-Object { $_ } | Select-Object -Unique)
+    $sanList = @(@($dns | ForEach-Object { "DNS:$_" }) + @($ips | ForEach-Object { "IP:$_" }))
+    $san = $sanList -join ','
     $srvKey = Join-Path $certs 'server.key'
     $csr = Join-Path $certs 'server.csr'
     Invoke-Ssl genrsa -out $srvKey 2048
@@ -80,7 +86,23 @@ if ($Force -or -not (Test-Path $srvCrt)) {
         "subjectAltName=$san")
     Invoke-Ssl x509 -req -in $csr -CA $caCrt -CAkey $caKey -CAcreateserial -out $srvCrt -not_before $notBefore -not_after $srvNotAfter -sha256 -extfile $ext
     Remove-Item $csr, $ext -Force
-    Write-Host "SANs: $san"
+    Write-Host "SANs requested: $san"
+    # Verify what openssl actually put in the certificate. Fails loudly instead of shipping a bad cert.
+    $ErrorActionPreference = 'Continue'
+    $shown = (& $ssl x509 -in $srvCrt -noout -ext subjectAltName 2>&1) | Out-String
+    $sslExit = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($sslExit -ne 0) { throw "openssl x509 -ext subjectAltName failed: $shown" }
+    Write-Host $shown.TrimEnd()
+    $got = @(($shown -split "`n") | Where-Object { $_ -match '(DNS:|IP Address:)' } |
+        ForEach-Object { ($_ -split ',') } | ForEach-Object { $_.Trim() } | Where-Object { $_ } |
+        ForEach-Object { $_ -replace '^IP Address:', 'IP:' })
+    $missing = @($sanList | Where-Object { $got -notcontains $_ })
+    $extra = @($got | Where-Object { $sanList -notcontains $_ })
+    if ($missing.Count -or $extra.Count -or $got.Count -ne $sanList.Count) {
+        throw "SAN check failed. missing: [$($missing -join ' ')] unexpected: [$($extra -join ' ')]"
+    }
+    Write-Host "SAN check ok ($($got.Count) entries)."
 }
 # Restrict private keys to the current Windows user (strip inherited ACEs).
 foreach ($k in @($caKey, (Join-Path $certs 'server.key'))) {

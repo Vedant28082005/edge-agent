@@ -1,0 +1,7 @@
+{
+  "target": {
+    "tag": "night-light"
+  },
+  "capability": "brightness",
+  "value": 20
+}

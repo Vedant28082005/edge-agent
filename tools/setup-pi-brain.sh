@@ -14,11 +14,16 @@
 #      (the mosquitto container user): server.key and dynamic-security.json mode 600, certs 644
 #   3. writes MOSQUITTO_STATE_DIR into ~/edge-agent/deploy/.env so docker compose uses that dir
 #   4. installs chrony (apt) and the edge-agent config (serve the LAN, free-run if offline)
-#   5. creates one service-secret file per calling service (today: device-hub only; the agent gets none),
-#      mode 600 and owned by that service's user, plus a SHA-256 verifier owned by the gateway user
+#   5. creates one service-secret file per calling service, mode 600 and owned by that service's user, plus a
+#      SHA-256 verifier that only the CALLED service can read (hub reads only verifiers, never the secrets):
+#        device-hub.secret -> calls the gateway internal API; verifier in verifiers/ owned by the gateway user
+#        gateway.secret    -> calls device-hub (scope: everything); verifier in hub-verifiers/ owned by the hub user
+#        agent.secret      -> calls device-hub (scope: the five runtime tools via /mcp only); verifier in hub-verifiers/
+#      (the agent has no secret for the gateway)
 #   6. securely deletes the staged secret files
 #
-# Service users (system users, created if missing): HUB_USER (default edge-device-hub), GATEWAY_USER (default edge-gateway).
+# Service users (system users, created if missing): HUB_USER (default edge-device-hub), GATEWAY_USER (default edge-gateway),
+# AGENT_USER (default edge-agent).
 # Containers for those services must run as these users' uids. ROTATE_SECRETS=1 regenerates the secrets.
 #
 # Environment overrides: STAGE_DIR, STATE_DIR, EDGE_DIR, LAN_CIDR (default 192.168.1.0/24), SKIP_CHRONY=1
@@ -30,6 +35,7 @@ EDGE_DIR="${EDGE_DIR:-$HOME/edge-agent}"
 LAN_CIDR="${LAN_CIDR:-192.168.1.0/24}"
 HUB_USER="${HUB_USER:-edge-device-hub}"
 GATEWAY_USER="${GATEWAY_USER:-edge-gateway}"
+AGENT_USER="${AGENT_USER:-edge-agent}"
 SECRETS_DIR="${SECRETS_DIR:-/etc/edge-agent/secrets}"
 MQ_UID=1883
 
@@ -54,28 +60,34 @@ $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 600 "$STAGE_DIR/server.key" "$STATE_D
 $SUDO install -o "$MQ_UID" -g "$MQ_UID" -m 600 "$STAGE_DIR/dynamic-security.json" "$STATE_DIR/data/dynamic-security.json"
 
 echo "== service secrets ($SECRETS_DIR)"
-for u in "$HUB_USER" "$GATEWAY_USER"; do
+for u in "$HUB_USER" "$GATEWAY_USER" "$AGENT_USER"; do
   id -u "$u" >/dev/null 2>&1 || $SUDO useradd --system --no-create-home --shell /usr/sbin/nologin "$u"
 done
 # Directories are traverse-only (711): names are not listable, files are protected by their own mode/owner.
 $SUDO install -d -o root -g root -m 711 "$SECRETS_DIR"
+# verifiers/     : read by the gateway (checks device-hub's secret)
+# hub-verifiers/ : read by device-hub (checks the gateway's and the agent's secrets)
 $SUDO install -d -o "$GATEWAY_USER" -g "$GATEWAY_USER" -m 700 "$SECRETS_DIR/verifiers"
-make_secret() {  # $1 = service name, $2 = owning user
-  local f="$SECRETS_DIR/$1.secret" v="$SECRETS_DIR/verifiers/$1.sha256"
+$SUDO install -d -o "$HUB_USER" -g "$HUB_USER" -m 700 "$SECRETS_DIR/hub-verifiers"
+make_secret() {  # $1 = service name, $2 = owning user, $3 = verifier dir name, $4 = verifier owner (the verifying service's user)
+  local f="$SECRETS_DIR/$1.secret" v="$SECRETS_DIR/$3/$1.sha256"
   if [ "${ROTATE_SECRETS:-0}" = "1" ] || ! $SUDO test -f "$f"; then
     openssl rand -base64 32 | tr -d '
 ' | $SUDO tee "$f" >/dev/null
     $SUDO chown "$2:$2" "$f"; $SUDO chmod 600 "$f"
-    # verifier for the gateway: SHA-256 of the secret; the gateway can verify but cannot impersonate the service
+    # verifier for the called service: SHA-256 of the secret; it can verify but cannot impersonate the caller
     $SUDO cat "$f" | openssl dgst -sha256 -r | cut -d' ' -f1 | $SUDO tee "$v" >/dev/null
-    $SUDO chown "$GATEWAY_USER:$GATEWAY_USER" "$v"; $SUDO chmod 600 "$v"
-    echo "created $f (owner $2, mode 600) and verifier $v (owner $GATEWAY_USER, mode 600)"
+    $SUDO chown "$4:$4" "$v"; $SUDO chmod 600 "$v"
+    echo "created $f (owner $2, mode 600) and verifier $v (owner $4, mode 600)"
   else
     echo "keeping existing $f"
   fi
 }
-make_secret device-hub "$HUB_USER"
-# Deliberately no secret for the agent: it has no internal access and cannot mint or consume confirmation tokens.
+make_secret device-hub "$HUB_USER"     verifiers     "$GATEWAY_USER"
+make_secret gateway    "$GATEWAY_USER" hub-verifiers "$HUB_USER"
+make_secret agent      "$AGENT_USER"   hub-verifiers "$HUB_USER"
+# Deliberately no agent secret for the gateway: the agent has no internal gateway access and cannot mint or consume
+# confirmation tokens. Its agent.secret opens device-hub's /mcp (the five runtime tools) and nothing else.
 
 echo "== writing $EDGE_DIR/deploy/.env"
 mkdir -p "$EDGE_DIR/deploy"

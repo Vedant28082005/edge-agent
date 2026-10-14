@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://edge-agent.local/contracts/announce.schema.json",
   "title": "Node announce, schema 2",
-  "description": "Self-description a node publishes (retained, QoS 1) to home/v1/nodes/{node_id}/announce on every boot. Names, rooms and aliases are NOT part of the announce; they are admin-set in the registry. Cross-field rules not expressible here (min<=max, boot_value within range, unique local_id and capability ids, node_id equals the topic id) are enforced by the hub. See capabilities.md.",
+  "description": "Self-description a node publishes (retained, QoS 1) to home/v1/nodes/{node_id}/announce on every boot. Names, rooms and aliases are NOT part of the announce; they are admin-set in the registry. Change within schema 2 (no nodes deployed yet, so no version bump): actuator capabilities may carry optional settle_s (number, 1..120), the worst-case seconds a motion takes to reach its target; it is REQUIRED when id is position. Cross-field rules not expressible here (min<=max, boot_value within range, unique local_id and capability ids, node_id equals the topic id) are enforced by the hub. See capabilities.md.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -178,6 +178,12 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 86400
+        },
+        "settle_s": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 120,
+          "description": "Actuators only. Worst-case seconds for the motion to reach a commanded target. Required for position. The ack means accepted and started; state reports progress; the hub verifies convergence within settle_s."
         }
       },
       "allOf": [
@@ -308,7 +314,10 @@
                 "minimum": 0,
                 "maximum": 100
               }
-            }
+            },
+            "required": [
+              "settle_s"
+            ]
           }
         },
         {
@@ -628,6 +637,11 @@
                 {
                   "required": [
                     "max_on_s"
+                  ]
+                },
+                {
+                  "required": [
+                    "settle_s"
                   ]
                 }
               ]

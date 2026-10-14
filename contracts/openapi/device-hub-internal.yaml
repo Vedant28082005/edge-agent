@@ -1,0 +1,762 @@
+openapi: 3.1.0
+info:
+  title: Edge Agent device-hub Internal API
+  version: 1.3.0
+  description: |
+    SERVICE-TO-SERVICE ONLY. How the gateway and the agent reach device-hub (pi-brain, loopback). Promoted from the
+    S1 proposal (`services/device-hub/INTERNAL_API.md`, branch s1-device-hub). Never exposed through
+    `tailscale serve`, never reachable by clients, apps or the LLM. Changing this file requires bumping info.version.
+
+    **Caller authentication is MANDATORY.** Every operation except `GET /health` needs `X-Service-Secret`.
+    There are two callers, each with its own secret and scope:
+    * `gatewaySecret` (scope `gateway`): everything in this file, including `/mcp`.
+    * `agentSecret` (scope `agent`): exactly two operations. `POST /mcp` (the five runtime tools `list_devices`,
+      `get_state`, `set_state`, `run_scene`, `read_sensor`) and the read-only `GET /events` restricted to a
+      SERVER-SIDE allowlist of event types (see `x-agent-event-allowlist` on that operation). The agent scope has no
+      admin operation, no `/admin/*`, no scenes CRUD, no audit, no provisioning event and no unfiltered stream.
+      `tools\contract_test.py` enforces this.
+
+    The gateway secret allows everything, so a compromised gateway equals a compromised hub; a compromised agent
+    can only do what the five tools allow (and `risk: confirm` still needs a gateway-minted token) and observe the
+    allowlisted events, none of which carries credential material.
+    Secrets: one per calling service, files `/etc/edge-agent/secrets/<service>.secret` (mode 600, owned by that
+    service's user, read from the file, never from env/argv, never logged). The hub holds only SHA-256 verifiers
+    (`/etc/edge-agent/secrets/hub-verifiers/<service>.sha256`, hex, mode 600, owned by the hub user) and compares in
+    constant time, so it can authenticate callers without being able to impersonate them. See `deploy/README.md`.
+    An unknown, missing or out-of-scope secret returns 401 (missing/unknown) or 403 (valid secret, wrong scope).
+
+    **No-auth dev mode.** The hub refuses to start without a verifier directory unless the explicit dev flag
+    `--insecure-no-auth` is given, and that flag is accepted **only together with `--mock`**. In that mode every
+    caller is treated as scope `gateway` and a warning is logged on every start. Never use it on the Pi.
+
+    **Role checks stay in the gateway.** The hub does no user or role checks; the gateway has already authorised the
+    caller by role before it calls here. `X-Actor` is only an audit label. The agent's `user_id` for confirmation
+    tokens travels in MCP `_meta.user_id` and is never trusted by the hub (see `mcp-tools.md`).
+
+    Common rules: JSON in and out, UTF-8, bodies max 64 KiB (413). Errors: `{"error": "<code>", "message": "<text>"}`;
+    400 bad request, 404 unknown id, 409 conflict / needs confirmation, 413 too large, 502/503/504 MQTT or dynsec
+    failure, 500 internal (no details leaked). Confirmation tokens and Wi-Fi passwords travel only in bodies, never in
+    URLs; the hub never logs bodies or tokens.
+servers:
+  - url: http://127.0.0.1:8100
+    description: Loopback only
+security:
+  - gatewaySecret: []
+tags:
+  - name: runtime
+    description: The five runtime tools (MCP). Scopes gateway and agent.
+  - name: admin
+    description: Device management. Scope gateway only.
+  - name: devices
+    description: Gateway user-facing routes backed by the hub. Scope gateway only.
+  - name: scenes
+    description: Scene CRUD and run. Scope gateway only.
+  - name: events
+    description: Registry change stream and health. `/events` is gateway (all types) and agent (allowlist only); health is open.
+paths:
+  /mcp:
+    post:
+      tags: [runtime]
+      operationId: mcp
+      x-scopes: [gateway, agent]
+      x-mcp-tools: [list_devices, get_state, set_state, run_scene, read_sensor]
+      security:
+        - gatewaySecret: []
+        - agentSecret: []
+      description: |
+        MCP over streamable HTTP (stateless, JSON responses); `python -m device_hub --mcp-stdio` is the stdio twin.
+        Exposes exactly the five tools of `mcp-tools.md` and nothing else. The executor attaches
+        `_meta: {"confirmation_token": "...", "user_id": "...", "call_id": "..."}` out of band (`call_id` optional,
+        a correlation label echoed on the settle events, never trusted; see `mcp-tools.md`). DNS-rebinding
+        protection: Host header limited to loopback. With `GET /events` this is one of the TWO operations the agent
+        scope may call.
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {type: object, additionalProperties: true, description: A JSON-RPC 2.0 MCP message}}
+      responses:
+        '200': {description: JSON-RPC response, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /health:
+    get:
+      tags: [events]
+      operationId: health
+      x-scopes: [open]
+      security: []
+      description: Liveness and counters only; no secrets, no device details. The only unauthenticated operation.
+      responses:
+        '200': {description: Health, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+  /registry/version:
+    get:
+      tags: [events]
+      operationId: registryVersion
+      x-scopes: [gateway]
+      responses:
+        '200': {description: Version, content: {application/json: {schema: {type: object, properties: {version: {type: integer}, last_event_seq: {type: integer}}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /events:
+    get:
+      tags: [events]
+      operationId: eventStream
+      x-scopes: [gateway, agent]
+      security:
+        - gatewaySecret: []
+        - agentSecret: []
+      x-agent-event-allowlist: [registry_changed, node_status, state, action_settled, action_settle_timeout]
+      x-gateway-only-event-types: [scenes_changed, pending_node]
+      description: |
+        Read-only SSE stream. A `hello` event comes first (`{version, last_event_seq}`). `Last-Event-ID` (or
+        `?since=`) replays from a 1000-event ring buffer; after a stale id compare `GET /registry/version` and reload
+        the device list. Each frame is `id: <seq>`, `event: <type>`, `data: <Envelope JSON>` (schema `EventEnvelope`:
+        `{seq, type, ts, data}`; the payload is in `data.data`). Keepalive comment every 5 s.
+
+        **Scope `gateway`**: every type in `types`. Default (no `types`): every type except `state`. Types:
+        `registry_changed`, `scenes_changed`, `node_status`, `pending_node`, `state` (opt-in), `action_settled`,
+        `action_settle_timeout`.
+
+        **Scope `agent`: SERVER-SIDE ALLOWLIST** (`x-agent-event-allowlist`): `registry_changed`, `node_status`,
+        `state` (opt-in), `action_settled`, `action_settle_timeout`. The filter is applied by the hub per connection
+        from the caller's scope, to live delivery AND to replay (`since`/`Last-Event-ID`); the client cannot widen it.
+        Default for the agent: the allowlist minus `state`. Asking `types` for any known type outside the allowlist
+        is 403 `forbidden_event_type` (nothing is streamed); an unknown type is 400 as for the gateway.
+        Provisioning, admin and any event that can carry credential material (provisioning sessions, bundles, MQTT
+        or Wi-Fi secrets, confirmation tokens) are NEVER delivered to the agent; there is no such event on this
+        stream today, and a type added later is gateway-only until this list names it (contract change + version bump).
+        `scenes_changed` and `pending_node` are gateway-only too (`x-gateway-only-event-types`).
+
+        **How the agent learns registry changes:** it subscribes with the agent secret and, on `registry_changed`,
+        reloads `list_devices` and rebuilds its prompt device list and constrained-decoding schema. On reconnect it
+        sends `Last-Event-ID`; if the id is stale or `hello.version` differs from its own it reloads anyway.
+
+        Event payloads (`data.data`):
+        * `registry_changed` `{version: int, reason: approve|patch|rebind|forget|unprovision|announce_changed,
+          endpoint_ids: [ep_...]}`. `version` is the new registry version.
+        * `node_status` `{node_id, online: bool}`. Emitted when a node's retained status goes `online`/`offline`.
+        * `state` `{endpoint_id, values: {<cap>: <value>}, ts: <unix s>}`. Only endpoints whose values changed.
+        * `action_settled` `{endpoint_id, capability, value, observed, elapsed_ms, call_id?}`: a motion (capability
+          with `settle_s`) reached its target within tolerance. `value` is the target, `observed` the last state
+          value. `elapsed_ms` is measured from the ack.
+        * `action_settle_timeout` `{endpoint_id, capability, value, observed, settle_s, call_id?}`: it did not.
+          `observed` is `null` if no state arrived. `settle_s` is the announced window.
+        `call_id` (string, max 64 chars) is present only when the originating MCP call carried `_meta.call_id`. A
+        newer command on the same endpoint+capability supersedes the older watcher, which then emits nothing.
+        The hub does not trust or interpret `call_id`; it is only echoed.
+      parameters:
+        - {name: types, in: query, schema: {type: string}, description: 'Comma-separated event types; for scope agent only allowlisted ones'}
+        - {name: since, in: query, schema: {type: integer}}
+        - {name: Last-Event-ID, in: header, schema: {type: integer}}
+      responses:
+        '200': {description: SSE stream, content: {text/event-stream: {schema: {type: string}}}}
+        '400': {description: Unknown event type, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: 'Wrong scope, or (scope agent) a requested type is outside the allowlist (error `forbidden_event_type`)', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /rooms:
+    get:
+      tags: [devices]
+      operationId: listRooms
+      x-scopes: [gateway]
+      responses:
+        '200': {description: Rooms, content: {application/json: {schema: {type: array, items: {type: string}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+
+  # ---------------------------------------------------------------- admin (scope gateway only)
+  /admin/provision-sessions:
+    post:
+      tags: [admin]
+      operationId: hubCreateProvisionSession
+      x-scopes: [gateway]
+      parameters: [{$ref: '#/components/parameters/Actor'}]
+      description: |
+        Creates the node's MQTT user and role through the dynsec MQTT API (idempotent: existing client gets a new
+        password and its role ensured) and returns the BLE bundle. The gateway resolves `wifi_profile` before calling;
+        the hub takes inline `wifi` only. Replaces any earlier session for that node (credentials rotate). 409
+        `node_online` if the node is connected. The bundle is returned once; MQTT and Wi-Fi passwords are not stored.
+        TTL 10 min.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [node_id, wifi]
+              properties:
+                node_id: {$ref: '#/components/schemas/NodeId'}
+                wifi:
+                  type: object
+                  required: [ssid, password]
+                  properties:
+                    ssid: {type: string, maxLength: 32}
+                    password: {type: string, maxLength: 64, writeOnly: true}
+      responses:
+        '201': {description: Session with bundle (see gateway.yaml ProvisionSession), content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+    get:
+      tags: [admin]
+      operationId: hubListProvisionSessions
+      x-scopes: [gateway]
+      parameters:
+        - {name: active, in: query, schema: {type: integer, enum: [0, 1]}}
+      description: No secrets in the response. state is pending, connected, expired or cancelled.
+      responses:
+        '200': {description: Sessions, content: {application/json: {schema: {type: array, items: {type: object, properties: {session_id: {type: string}, node_id: {type: string}, state: {type: string, enum: [pending, connected, expired, cancelled]}, created: {type: integer}, expires_at: {type: integer}}}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /admin/nodes:
+    get:
+      tags: [admin]
+      operationId: hubListNodes
+      x-scopes: [gateway]
+      responses:
+        '200': {description: Nodes, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Node'}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /admin/nodes/{node_id}:
+    parameters:
+      - {$ref: '#/components/parameters/NodeId'}
+    get:
+      tags: [admin]
+      operationId: hubGetNode
+      x-scopes: [gateway]
+      responses:
+        '200': {description: Node, content: {application/json: {schema: {$ref: '#/components/schemas/Node'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+    delete:
+      tags: [admin]
+      operationId: hubForgetNode
+      x-scopes: [gateway]
+      parameters:
+        - {$ref: '#/components/parameters/Actor'}
+        - {name: confirm, in: query, schema: {type: boolean, default: false}}
+        - {name: force, in: query, schema: {type: boolean, default: false}}
+      description: |
+        Without `confirm`: 409 with the usage list. With `confirm=true`: delete the MQTT user and role (dynsec),
+        clear retained topics, soft-delete registry rows, flag dependent scenes broken. `force=true`: if the
+        broker/dynsec is unreachable still soft-delete, and retry the revocation every 15 s until it succeeds. Without
+        `force` a dynsec failure aborts and changes nothing (502/503/504).
+      responses:
+        '204': {description: Forgotten}
+        '409': {description: Usage, content: {application/json: {schema: {$ref: '#/components/schemas/ForgetUsage'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /admin/nodes/{node_id}/approve:
+    post:
+      tags: [admin]
+      operationId: hubApproveNode
+      x-scopes: [gateway]
+      parameters:
+        - {$ref: '#/components/parameters/NodeId'}
+        - {$ref: '#/components/parameters/Actor'}
+      description: Assigns `ep_<8 hex>`. All-or-nothing; names are unique per room (409 `name_conflict`). May be called again for endpoints a node adds later.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoints]
+              properties:
+                endpoints:
+                  type: array
+                  items:
+                    type: object
+                    required: [local_id, name, room]
+                    properties:
+                      local_id: {type: string}
+                      name: {type: string, maxLength: 48}
+                      room: {type: string, maxLength: 48}
+                      aliases: {type: array, maxItems: 8, items: {type: string, maxLength: 48}}
+                      tags: {$ref: '#/components/schemas/Tags'}
+                      risk: {$ref: '#/components/schemas/Risk'}
+      responses:
+        '200': {description: Approved endpoints, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Endpoint'}}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /admin/nodes/{node_id}/identify:
+    post:
+      tags: [admin]
+      operationId: hubIdentifyNode
+      x-scopes: [gateway]
+      parameters:
+        - {$ref: '#/components/parameters/NodeId'}
+        - {$ref: '#/components/parameters/Actor'}
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {duration_s: {type: integer, minimum: 1, maximum: 60}}}
+      responses:
+        '202': {description: Sent, content: {application/json: {schema: {$ref: '#/components/schemas/SentAcked'}}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /admin/nodes/{node_id}/unprovision:
+    post:
+      tags: [admin]
+      operationId: hubUnprovisionNode
+      x-scopes: [gateway]
+      parameters:
+        - {$ref: '#/components/parameters/NodeId'}
+        - {$ref: '#/components/parameters/Actor'}
+        - {name: force, in: query, schema: {type: boolean, default: false}}
+      description: |
+        Sends `cmd: unprovision`, then deletes the node's MQTT user and role. Registry rows stay (ids survive a re-provision). Offline node 409 unless `force=true` (then only the credentials are revoked).
+      responses:
+        '202': {description: Sent, content: {application/json: {schema: {$ref: '#/components/schemas/SentAcked'}}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /admin/endpoints/{endpoint_id}:
+    patch:
+      tags: [admin]
+      operationId: hubPatchEndpoint
+      x-scopes: [gateway]
+      parameters:
+        - {$ref: '#/components/parameters/EndpointId'}
+        - {$ref: '#/components/parameters/Actor'}
+      description: Same body as the gateway `adminPatchEndpoint`; unknown fields 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                name: {type: string, maxLength: 48}
+                room: {type: string, maxLength: 48}
+                aliases: {type: array, maxItems: 8, items: {type: string, maxLength: 48}}
+                tags: {$ref: '#/components/schemas/Tags'}
+                risk: {$ref: '#/components/schemas/Risk'}
+                enabled: {type: boolean}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/Endpoint'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /admin/endpoints/{endpoint_id}/rebind:
+    post:
+      tags: [admin]
+      operationId: hubRebindEndpoint
+      x-scopes: [gateway]
+      parameters:
+        - {$ref: '#/components/parameters/EndpointId'}
+        - {$ref: '#/components/parameters/Actor'}
+      description: Same `type` required (409 `type_mismatch`); target must not be bound (409 `already_bound`). The id never changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [node_id, local_id]
+              properties:
+                node_id: {$ref: '#/components/schemas/NodeId'}
+                local_id: {type: string}
+      responses:
+        '200': {description: Rebound, content: {application/json: {schema: {$ref: '#/components/schemas/Endpoint'}}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /admin/audit:
+    get:
+      tags: [admin]
+      operationId: hubAudit
+      x-scopes: [gateway]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000}}
+        - {name: action, in: query, schema: {type: string}}
+      description: '`detail` never contains secrets.'
+      responses:
+        '200': {description: Audit rows, content: {application/json: {schema: {type: array, items: {type: object, properties: {id: {type: integer}, ts: {type: integer}, actor: {type: string}, action: {type: string}, target: {type: string}, detail: {type: object, additionalProperties: true}, result: {type: string}}}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /admin/rejections:
+    get:
+      tags: [admin]
+      operationId: hubRejections
+      x-scopes: [gateway]
+      description: Last 100 rejected announces (also logged).
+      responses:
+        '200': {description: Rejections, content: {application/json: {schema: {type: array, items: {type: object, properties: {node_id: {type: string}, reason: {type: string}, ts: {type: integer}}}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+
+  # ---------------------------------------------------------------- devices and scenes (scope gateway only)
+  /devices:
+    get:
+      tags: [devices]
+      operationId: hubListDevices
+      x-scopes: [gateway]
+      parameters:
+        - {name: room, in: query, schema: {type: string}}
+        - {name: type, in: query, schema: {$ref: '#/components/schemas/EndpointType'}}
+      description: All approved endpoints including disabled ones (`enabled`), with state, risk, online. The gateway filters by role and room.
+      responses:
+        '200': {description: Endpoints, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Endpoint'}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /devices/{endpoint_id}:
+    get:
+      tags: [devices]
+      operationId: hubGetDevice
+      x-scopes: [gateway]
+      parameters: [{$ref: '#/components/parameters/EndpointId'}]
+      responses:
+        '200': {description: Endpoint, content: {application/json: {schema: {$ref: '#/components/schemas/Endpoint'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /devices/{endpoint_id}/set:
+    post:
+      tags: [devices]
+      operationId: hubSetDevice
+      x-scopes: [gateway]
+      parameters:
+        - {$ref: '#/components/parameters/EndpointId'}
+        - {$ref: '#/components/parameters/Actor'}
+      description: |
+        Same code path as MCP `set_state`. HTTP 200 even for `ok: false`; 404 for an unknown endpoint. The token is
+        consumed through the gateway's internal endpoint with `user_id` as the gateway supplied it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability, value]
+              properties:
+                capability: {type: string}
+                value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+                user_id: {type: string}
+                confirmation_token: {type: string, writeOnly: true}
+      responses:
+        '200': {description: Result, content: {application/json: {schema: {$ref: '#/components/schemas/SetResult'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /devices/{endpoint_id}/action:
+    post:
+      tags: [devices]
+      operationId: hubDeviceAction
+      x-scopes: [gateway]
+      parameters: [{$ref: '#/components/parameters/EndpointId'}]
+      description: Returns the canonical `set_state` action and its hash, so the gateway mints for exactly what the hub will consume.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [capability, value], properties: {capability: {type: string}, value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}}}
+      responses:
+        '200': {description: Action, content: {application/json: {schema: {type: object, required: [action, action_hash, risk], properties: {action: {type: object, additionalProperties: true}, action_hash: {type: string, pattern: '^[0-9a-f]{64}$'}, risk: {$ref: '#/components/schemas/Risk'}}}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /scenes:
+    get:
+      tags: [scenes]
+      operationId: hubListScenes
+      x-scopes: [gateway]
+      description: Scene = gateway `Scene` plus `broken_reasons` and `rooms` (rooms touched; `*` = selector without room, for member room checks).
+      responses:
+        '200': {description: Scenes, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Scene'}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+    post:
+      tags: [scenes]
+      operationId: hubCreateScene
+      x-scopes: [gateway]
+      parameters: [{$ref: '#/components/parameters/Actor'}]
+      description: Validated (targets, capability, value, tag format). 409 `name_conflict`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, actions, owner]
+              properties:
+                name: {type: string, maxLength: 48}
+                actions: {type: array, minItems: 1, maxItems: 50, items: {type: object, additionalProperties: true}}
+                owner: {type: string}
+      responses:
+        '201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/Scene'}}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /scenes/{scene_id}:
+    parameters:
+      - {name: scene_id, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [scenes]
+      operationId: hubGetScene
+      x-scopes: [gateway]
+      responses:
+        '200': {description: Scene, content: {application/json: {schema: {$ref: '#/components/schemas/Scene'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+    put:
+      tags: [scenes]
+      operationId: hubUpdateScene
+      x-scopes: [gateway]
+      parameters: [{$ref: '#/components/parameters/Actor'}]
+      description: Re-validated; clears `broken` if repaired.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                name: {type: string, maxLength: 48}
+                actions: {type: array, minItems: 1, maxItems: 50, items: {type: object, additionalProperties: true}}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/Scene'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+    delete:
+      tags: [scenes]
+      operationId: hubDeleteScene
+      x-scopes: [gateway]
+      parameters: [{$ref: '#/components/parameters/Actor'}]
+      description: Soft delete.
+      responses:
+        '204': {description: Deleted}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /scenes/{scene_id}/run:
+    post:
+      tags: [scenes]
+      operationId: hubRunScene
+      x-scopes: [gateway]
+      parameters:
+        - {name: scene_id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/Actor'}
+      description: |
+        Same code path as MCP `run_scene`. 200 run result; 409 with `executed: false` for `needs_confirmation` or
+        `scene_broken`; 404 `unknown_scene`. A `needs_confirmation` 409 also carries `scene_id`, the canonical list of
+        `risk: confirm` actions in `needs_confirmation` (the exact objects that are hashed) and the canonical
+        `action_hash` (`mcp-tools.md`).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_id: {type: string}
+                confirmation_token: {type: string, writeOnly: true}
+      responses:
+        '200': {description: Run result, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: Nothing executed (needs_confirmation or scene_broken), content: {application/json: {schema: {$ref: '#/components/schemas/SceneRunNotExecuted'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+  /scenes/{scene_id}/confirmation:
+    get:
+      tags: [scenes]
+      operationId: hubSceneConfirmation
+      x-scopes: [gateway]
+      parameters:
+        - {name: scene_id, in: path, required: true, schema: {type: string}}
+      description: The risky actions as resolved NOW and the `run_scene` hash. The gateway uses this to mint a scene token; it must not compute scene hashes from its own scene copy.
+      responses:
+        '200': {description: Action, content: {application/json: {schema: {type: object, required: [action, action_hash, needs_confirmation], properties: {action: {type: object, additionalProperties: true}, action_hash: {type: string, pattern: '^[0-9a-f]{64}$'}, needs_confirmation: {type: array, items: {type: object, additionalProperties: true}}}}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+
+  # ---------------------------------------------------------------- mock only
+  /mock/mint:
+    post:
+      tags: [admin]
+      operationId: hubMockMint
+      x-scopes: [gateway]
+      x-mock-only: true
+      description: Exists only when started with `--mock`; stands in for the gateway's `POST /confirmations`. 404 otherwise.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [user_id, action], properties: {user_id: {type: string}, action: {type: object, additionalProperties: true}}}
+      responses:
+        '200': {description: Token, content: {application/json: {schema: {type: object, required: [confirmation_token, action_hash], properties: {confirmation_token: {type: string}, action_hash: {type: string}}}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/ForbiddenScope'}
+
+components:
+  securitySchemes:
+    gatewaySecret:
+      type: apiKey
+      in: header
+      name: X-Service-Secret
+      description: |
+        The gateway's secret (`/etc/edge-agent/secrets/gateway.secret`, owner = gateway user). Scope `gateway`:
+        every operation in this file.
+    agentSecret:
+      type: apiKey
+      in: header
+      name: X-Service-Secret
+      description: |
+        The agent's secret (`/etc/edge-agent/secrets/agent.secret`, owner = agent user). Scope `agent`: `POST /mcp`
+        (the five runtime tools) and `GET /events` (allowlisted event types only). No admin operation, no scenes
+        CRUD, no audit, no provisioning or admin event.
+  parameters:
+    Actor:
+      name: X-Actor
+      in: header
+      required: false
+      schema: {type: string, maxLength: 64, default: gateway}
+      description: Audit label (user id). Not authentication; the gateway has already authorised the caller by role.
+    EndpointId: {name: endpoint_id, in: path, required: true, schema: {$ref: '#/components/schemas/EndpointId'}}
+    NodeId: {name: node_id, in: path, required: true, schema: {$ref: '#/components/schemas/NodeId'}}
+  responses:
+    Unauthorized: {description: Missing or unknown X-Service-Secret, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    ForbiddenScope: {description: Valid secret but not scoped to this operation, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: Not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Conflict: {description: 'Conflict; the code is in error, such as node_online or name_conflict', content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    SceneRunNotExecuted:
+      type: object
+      description: |
+        Body of the `POST /scenes/{scene_id}/run` 409: nothing was executed. `status` is `needs_confirmation` (a
+        `risk: confirm` action lacks a valid token) or `scene_broken`. For `needs_confirmation` it also carries `scene_id`,
+        the canonical `needs_confirmation` action list (the exact objects that are hashed, sorted by `endpoint_id` then
+        `capability`) and the canonical `action_hash` (`mcp-tools.md`).
+      required: [executed, status]
+      properties:
+        ok: {const: false}
+        executed: {const: false}
+        status: {type: string, enum: [needs_confirmation, scene_broken]}
+        error: {type: string, description: Error code, for example scene_broken}
+        scene_id: {type: string, minLength: 1, maxLength: 64}
+        needs_confirmation:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [endpoint_id, capability, value]
+            properties:
+              endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+              capability: {type: string, minLength: 1, maxLength: 64}
+              value: {}
+        action_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+      if: {properties: {status: {const: needs_confirmation}}}
+      then: {required: [scene_id, needs_confirmation, action_hash]}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+        message: {type: string}
+    NodeId: {type: string, pattern: '^esp32-[0-9a-f]{12}$'}
+    EndpointId: {type: string, pattern: '^ep_[0-9a-f]{8}$'}
+    EndpointType: {type: string, enum: [light, fan, outlet, lock, cover, thermostat, sensor, generic]}
+    Risk: {type: string, enum: [normal, confirm]}
+    Tag: {type: string, minLength: 1, maxLength: 24, pattern: '^[a-z0-9_-]+$'}
+    Tags:
+      type: array
+      maxItems: 8
+      uniqueItems: true
+      items: {$ref: '#/components/schemas/Tag'}
+    Endpoint:
+      type: object
+      description: Same shape as the gateway `Endpoint` schema.
+      required: [endpoint_id, name, room, type, online, enabled]
+      properties:
+        endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+        node_id: {$ref: '#/components/schemas/NodeId'}
+        local_id: {type: string}
+        name: {type: string}
+        room: {type: string}
+        aliases: {type: array, items: {type: string}}
+        tags: {$ref: '#/components/schemas/Tags'}
+        type: {$ref: '#/components/schemas/EndpointType'}
+        risk: {$ref: '#/components/schemas/Risk'}
+        online: {type: boolean}
+        enabled: {type: boolean}
+        capabilities: {type: array, items: {type: object, additionalProperties: true}}
+        state: {type: object, additionalProperties: true}
+    EventEnvelope:
+      type: object
+      required: [seq, type, ts, data]
+      properties:
+        seq: {type: integer, description: Monotonic per hub run; also the SSE `id`}
+        type: {type: string, enum: [registry_changed, scenes_changed, node_status, pending_node, state, action_settled, action_settle_timeout]}
+        ts: {type: integer, description: Unix seconds the hub published the event}
+        data: {type: object, additionalProperties: true, description: Payload per type, documented on GET /events}
+    Node:
+      type: object
+      required: [node_id, status]
+      properties:
+        node_id: {$ref: '#/components/schemas/NodeId'}
+        hw: {type: string}
+        fw: {type: string}
+        status: {type: string, enum: [pending, online, offline]}
+        online: {type: boolean}
+        provisioned: {type: boolean}
+        first_seen: {type: integer}
+        last_seen: {type: integer}
+        endpoints: {type: array, items: {$ref: '#/components/schemas/Endpoint'}}
+        pending_endpoints: {type: array, description: Announced but not approved, with capabilities, items: {type: object, additionalProperties: true}}
+    Scene:
+      type: object
+      required: [scene_id, name, actions]
+      properties:
+        scene_id: {type: string}
+        name: {type: string}
+        owner: {type: string}
+        actions: {type: array, items: {type: object, additionalProperties: true}}
+        broken: {type: boolean}
+        broken_reasons: {type: array, items: {type: string}}
+        rooms: {type: array, items: {type: string}}
+    SetResult:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+        status: {type: string, enum: [done, moving]}
+        verified: {type: boolean}
+        endpoint_id: {type: string}
+        capability: {type: string}
+        value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+        error: {type: string}
+        detail: {type: string}
+    SentAcked:
+      type: object
+      properties:
+        sent: {type: boolean}
+        acked: {type: boolean}
+    ForgetUsage:
+      type: object
+      properties:
+        error: {const: confirmation_required}
+        scenes: {type: integer}
+        automations: {type: integer}
+        scene_list: {type: array, items: {type: object, properties: {scene_id: {type: string}, name: {type: string}}}}
+        message: {type: string}
+    Health:
+      type: object
+      properties:
+        ok: {type: boolean}
+        mqtt_connected: {type: boolean}
+        registry_version: {type: integer}
+        nodes: {type: integer}
+        nodes_online: {type: integer}
+        pending_nodes: {type: integer}
+        pending_acks: {type: integer}
+        announce_rejected: {type: integer}

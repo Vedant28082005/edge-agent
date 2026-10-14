@@ -1,6 +1,6 @@
 # Capability vocabulary (v1, fixed)
 
-Contract version: **1** (paired with announce schema 2). New capabilities or endpoint types are added **only** by a contract change (edit this file, `announce.schema.json`, samples, bump versions). A device can never invent one.
+Contract version: **2** (v2: note that endpoint `tags` are not part of the announce) (paired with announce schema 2). New capabilities or endpoint types are added **only** by a contract change (edit this file, `announce.schema.json`, samples, bump versions). A device can never invent one.
 
 ## Capabilities
 
@@ -10,7 +10,7 @@ Contract version: **1** (paired with announce schema 2). New capabilities or end
 | `brightness` | actuator | int | 0-100 (announce min/max must lie within) | % | |
 | `color_temp` | actuator | int | min/max from announce | K | |
 | `speed` | actuator | int | **min/max required** in announce | step | |
-| `position` | actuator | int | 0-100 | % | covers/blinds |
+| `position` | actuator | int | 0-100 | % | covers/blinds; **`settle_s` required** |
 | `lock` | actuator | enum | `locked`, `unlocked` (fixed) | | |
 | `target_temp` | actuator | float | min/max from announce | C | |
 | `mode` | actuator | enum | **`values` required** in announce | | values are `[a-z0-9_]{1,24}`, 2-16 items |
@@ -35,8 +35,13 @@ Contract version: **1** (paired with announce schema 2). New capabilities or end
 - **Sensors:** `interval_s` (1-86400 s) required; `boot_value`, `failsafe_value`, `max_on_s` not allowed.
 - `min`/`max` only on `int`/`float`; `values` only on `enum`.
 - `unit` optional, from a fixed set: `C % lux W A V K step`.
+- `settle_s` (number, 1-120 s): optional on actuators, not allowed on sensors, **required when `id` is `position`**. Worst-case time for the motion to reach a commanded target. For a capability with `settle_s` the ack means "accepted, motion started" and `state` reports actual progress; the hub verifies convergence within `settle_s` (see `mcp-tools.md`). Added within announce schema 2 (no nodes deployed yet).
 - `max_on_s` = continuous on-time limit in seconds, 0 = unlimited (firmware-enforced).
 - Node-level optional `failsafe_after_s` (default 60, 0 = keep last values).
+
+## Not in the announce
+
+Names, rooms, aliases and **`tags`** are admin-set registry labels, never announced by a device (an announce containing them is rejected by the schema). Tags: max 8 per endpoint, each 1..24 chars of `[a-z0-9_-]`; used by scene selectors (`mcp-tools.md`).
 
 ## Hub-enforced rules (not expressible in JSON Schema)
 

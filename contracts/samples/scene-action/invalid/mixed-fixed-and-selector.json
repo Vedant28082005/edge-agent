@@ -1,0 +1,8 @@
+{
+  "target": {
+    "endpoint_id": "ep_0a1b2c3d",
+    "room": "bedroom"
+  },
+  "capability": "on",
+  "value": true
+}

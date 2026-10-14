@@ -1,0 +1,17 @@
+{
+  "name": "edge-esp32-core",
+  "version": "0.1.0",
+  "description": "Edge agentic IoT framework: ESP32 node firmware core (declarative endpoints, TLS MQTT, announce schema 2, safety timers)",
+  "keywords": "esp32, mqtt, iot, smart-home",
+  "license": "UNLICENSED",
+  "frameworks": ["arduino", "*"],
+  "platforms": ["espressif32", "native"],
+  "dependencies": [
+    {"name": "ArduinoJson", "owner": "bblanchon", "version": "^7.2.0"},
+    {"name": "DHT sensor library", "owner": "adafruit", "version": "1.4.6", "platforms": "espressif32"},
+    {"name": "Adafruit Unified Sensor", "owner": "adafruit", "version": "1.1.14", "platforms": "espressif32"}
+  ],
+  "build": {
+    "flags": ["-Isrc"]
+  }
+}

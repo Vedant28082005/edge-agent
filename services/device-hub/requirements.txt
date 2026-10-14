@@ -1,0 +1,7 @@
+# All pure Python, or with manylinux aarch64 wheels (pydantic-core, rpds-py). No GPU, no C toolchain needed on the Pi.
+paho-mqtt>=2.1,<3
+jsonschema>=4.21
+httpx>=0.27
+starlette>=0.37
+uvicorn>=0.30
+mcp>=1.9,<2

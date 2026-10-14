@@ -1,4 +1,4 @@
-# Edge Agentic IoT Framework: Architecture and Build Plan (v2)
+# Edge Agentic IoT Framework: Architecture and Build Plan (v6)
 
 Minor project: LLM-based multimodal agentic AI framework for intelligent IoT systems (PDEU).
 
@@ -97,7 +97,7 @@ Whisper runs on a different Pi from the 7B, so STT and LLM can overlap. Whisper 
 | `brightness` | actuator | int 0-100 | % |
 | `color_temp` | actuator | int | K |
 | `speed` | actuator | int, min/max from announce | step |
-| `position` | actuator | int 0-100 | % |
+| `position` | actuator | int 0-100 | % (motion capability: the announce must carry `settle_s`, 1..120 s) |
 | `lock` | actuator | enum `locked`/`unlocked` | |
 | `target_temp` | actuator | float | °C |
 | `mode` | actuator | enum (values from announce) | |
@@ -113,7 +113,7 @@ Endpoint types: `light`, `fan`, `outlet`, `lock`, `cover`, `thermostat`, `sensor
 
 ### 4.2 MQTT (broker on pi-brain, TLS on 8883)
 
-Prefix `home/v1/`. Payloads JSON, UTF-8. Client id = `node_id`. Each node has its own MQTT user, created at provisioning time through Mosquitto's dynamic-security plugin, with a role that allows publish/subscribe only on `home/v1/nodes/<its node_id>/#`. The hub has a privileged account. Anonymous access is off.
+Prefix `home/v1/`. Payloads JSON, UTF-8. MQTT `client_id` == MQTT `username` == `node_id`, clean session (cmd is never retained, so no queued old commands). Each node has its own MQTT user, created at provisioning time through Mosquitto's dynamic-security plugin, with a role that allows publish/subscribe only on `home/v1/nodes/<its node_id>/#`. User creation by services is idempotent: if the client exists, set its password and ensure its role. The hub has a privileged account. Anonymous access is off.
 
 | Topic | Dir | QoS / retain | Purpose |
 |---|---|---|---|
@@ -164,9 +164,9 @@ Prefix `home/v1/`. Payloads JSON, UTF-8. Client id = `node_id`. Each node has it
 
 **cmd**: `{"cmd_id": "uuid", "endpoint": "ch1", "set": {"power": true, "speed": 3}, "by": "user:vedant"}`
 
-Commands are **desired-state, never toggles**, so retries are safe. Nodes also accept `{"cmd_id": ..., "cmd": "identify", "duration_s": 10}` and `{"cmd_id": ..., "cmd": "unprovision"}` (wipe stored config, return to provisioning mode).
+Commands are **desired-state, never toggles**, so retries are safe. Nodes keep the last 16 `cmd_id`s (count-based, no TTL, not persisted across reboot) and replay the cached ack for a repeat; the hub never reuses a `cmd_id` (UUIDv4). Nodes also accept `{"cmd_id": ..., "cmd": "identify", "duration_s": 10}` and `{"cmd_id": ..., "cmd": "unprovision"}` (wipe stored config, return to provisioning mode).
 
-**ack**: `{"cmd_id": "uuid", "ok": true, "endpoint": "ch1", "values": {...}, "error": null}`
+**ack**: `{"cmd_id": "uuid", "ok": true, "endpoint": "ch1", "values": {...}, "error": null}`. The ack means "accepted, motion started"; `values` echo the accepted target and `state` reports actual progress. Capabilities that announce `settle_s` (required for `position`, 1..120 s) are verified by the hub: `set_state` returns `moving`, then state must converge (+/-2 for position) within `settle_s`, else an `action_settle_timeout` event. Capabilities without `settle_s` return `done`. The ack timeout stays 3 s. Nodes do not queue publishes while disconnected; an ack lost in an outage is covered by the ack timeout.
 
 **perception event**: `{"ts": ..., "node": "jetson-yolo", "source_id": "cam0", "kind": "detection_change", "detections": [{"label": "person", "conf": 0.81, "bbox": [x,y,w,h]}], "summary": "person appeared"}`
 
@@ -177,14 +177,17 @@ BOOT → LOAD_CONFIG
   ├─ no config, or BOOT button held 3 s → PROVISIONING (BLE, 5 min window, LED pattern)
   │     ├─ success → save to NVS → reboot
   │     └─ timeout → idle (no BLE) until the button is pressed or power-cycled
-  └─ config present → apply boot_value → WIFI → NTP (valid only if ≥ firmware build timestamp; retry, no TLS before) → MQTT_TLS (LWT=offline)
-        → ANNOUNCE (retained) → subscribe cmd → publish state → RUN
+  └─ config present → apply boot_value → WIFI → NTP (valid only if ≥ firmware build timestamp; retry, no TLS before) → MQTT_TLS (client_id = username = node_id, clean session, LWT=offline)
+        → status online → ANNOUNCE (retained) → subscribe cmd → publish state → RUN
+        (this exact sequence repeats on every reconnect, not only at boot; an identical announce is a no-op for the hub)
 RUN: handle cmd (dedup cmd_id, validate vs own ranges, apply, publish state, ack)
      publish state on change + heartbeat; sensors on interval
-     link lost → reconnect with backoff in its own task; after failsafe_after_s apply failsafe_value
+     link lost (= MQTT session to the broker down) → reconnect with backoff in its own task; after failsafe_after_s apply failsafe_value
+     a physical press cancels that capability's pending failsafe until the hub next sends a cmd for it; max_on_s is always enforced
      local buttons keep working offline
 ```
 
+- **Firmware safety rules** (normative text in `contracts/mqtt.md`): (1) a **physical press wins over failsafe**: it cancels the pending failsafe for that capability until the hub next sends a command for it; (2) **`max_on_s` is always enforced**, whatever turned the output on (hub, press, boot value or failsafe value), and re-asserting "on" does not restart the timer; (3) **failsafe liveness in v1 is broker-level** (the node's MQTT session is down), so a dead device-hub behind a live broker does not trigger failsafe; a retained hub heartbeat the nodes watch is a possible future option, not part of v1; (4) the firmware **build timestamp** (`FW_BUILD_TS`) comes from the build host and the build **aborts if it is earlier than 2026-10-01**.
 - Core library (option A, [decision]): one declarative call per capability (e.g. `addBool("power", setRelay)`, `addInt("speed", 1, 5, setSpeed)`, `addSensorFloat("temperature", 30, readDht)`). The library does Wi-Fi, NTP, TLS, MQTT, announce JSON, acks, dedup, safety timers, BLE provisioning, `identify`, `unprovision`.
 - FreeRTOS tasks: network/MQTT, provisioning, sensor sampling, actuator control. Pin-level code stays in the user's callbacks.
 - TLS needs a valid clock, so NTP sync happens before the MQTT connect. Time earlier than the firmware build timestamp is never accepted: the board keeps retrying NTP (LAN chrony on `pi-brain` first, `pool.ntp.org` fallback) and does not connect over TLS until the time is plausible. The Pi 5 keeps time across power cuts with an RTC backup battery (`deploy/README.md`). Open item: verify behavior when there is no internet (section 11).
@@ -209,13 +212,13 @@ Notes and limits:
 
 ### 4.5 Registry (SQLite WAL, owned by device-hub)
 
-Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, aliases, risk, enabled), `capabilities`, `rooms`, `scenes`, `scene_actions`, `users`, `user_rooms`, `sources`, `provision_sessions`, `audit_log`. A registry change emits an event so the agent rebuilds (a) the prompt's device list and (b) the constrained-decoding schema.
+Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, aliases, tags, risk, enabled), `capabilities`, `rooms`, `scenes`, `scene_actions`, `users`, `user_rooms`, `sources`, `provision_sessions`, `audit_log`. `tags` are admin-set labels (max 8 per endpoint, each 1..24 chars of `[a-z0-9_-]`), edited with `PATCH /admin/endpoints/{id}`; they are **not part of the announce** and a device cannot set them. A registry change emits an event so the agent rebuilds (a) the prompt's device list and (b) the constrained-decoding schema.
 
 ### 4.6 Management (admin) vs runtime control
 
 **Admin REST (gateway `/admin/*`, role `admin` only; both clients use the same endpoints)**
 
-`POST /admin/provision-sessions`, `GET /admin/nodes`, `POST /admin/nodes/{id}/approve` (name and place each endpoint), `PATCH /admin/endpoints/{id}` (rename, room, aliases, risk, enable/disable), `POST /admin/endpoints/{id}/rebind`, `POST /admin/nodes/{id}/identify`, `POST /admin/nodes/{id}/unprovision`, `DELETE /admin/nodes/{id}` (forget).
+`POST /admin/provision-sessions`, `GET /admin/nodes`, `POST /admin/nodes/{id}/approve` (name and place each endpoint), `PATCH /admin/endpoints/{id}` (rename, room, aliases, tags, risk, enable/disable), `POST /admin/endpoints/{id}/rebind`, `POST /admin/nodes/{id}/identify`, `POST /admin/nodes/{id}/unprovision`, `DELETE /admin/nodes/{id}` (forget).
 
 - **Forget:** the hub shows what uses it ("2 scenes, 1 automation"). On confirmation it deletes the board's MQTT user and role (**real revocation**), clears retained topics, soft-deletes registry rows, and marks dependent scenes/automations as broken (not silently deleted).
 - Every admin action is audit-logged.
@@ -226,20 +229,20 @@ Tables: `nodes`, `endpoints` (endpoint_id, node_id, local_id, type, name, room, 
 |---|---|---|
 | `list_devices` | `room?`, `type?` | Endpoints with room, type, online status |
 | `get_state` | `endpoint_id` or `room` | Current values |
-| `set_state` | `endpoint_id`, `capability`, `value` | Validated against the registry; waits for ack (3 s timeout); `risk: confirm` endpoints need a `confirmation_token` (see below) |
-| `run_scene` | `scene` | See 4.7. Same `confirmation_token` rule; if any action needs confirmation and has no valid token, **nothing runs** |
+| `set_state` | `endpoint_id`, `capability`, `value` | Validated against the registry; waits for ack (3 s timeout, unchanged); returns status `done`, or `moving` for capabilities with `settle_s`, after which the hub verifies convergence within `settle_s` (exact for bool/enum, +/-2 for int percentages) and emits `action_settled` or `action_settle_timeout`; `risk: confirm` endpoints need a `confirmation_token` (see below) |
+| `run_scene` | `scene` | See 4.7. Per-action results use the same statuses (`done`, `moving`, skipped, failed). Same `confirmation_token` rule; if any action needs confirmation and has no valid token, **nothing runs** |
 | `read_sensor` | `endpoint_id`, `capability` | Last value, timestamp, staleness flag |
 
 The LLM can **propose** a scene or automation as JSON, but it is saved only after a user approves it in the UI.
 
-**Confirmation tokens.** `risk: confirm` actions need a `confirmation_token`: opaque, single-use, bound to the user and the exact action, 60 s TTL, minted by the gateway (`POST /confirmations`) only when the user approves in the UI. It is **not** in any tool schema the LLM sees; the agent executor attaches it out-of-band (MCP `_meta`), and device-hub validates and consumes it through the gateway. Without a valid token the tool returns `confirmation_required` / `needs_confirmation` and the agent emits a `confirmation_request` event. A decline or timeout produces `confirmation_declined` / `confirmation_expired`; there is **no automatic re-prompt**, the UI offers a **Retry** that creates a brand-new request. Proactive and automation-triggered actions never prompt: for `risk: confirm` endpoints they only notify. Details in `contracts/mcp-tools.md` and `contracts/agent-events.md`.
+**Confirmation tokens.** `risk: confirm` actions need a `confirmation_token`: opaque, single-use, bound to the user and the exact action, 60 s TTL, minted by the gateway (`POST /confirmations`) only when the user approves in the UI. It is **not** in any tool schema the LLM sees; the agent executor attaches it out-of-band (MCP `_meta`, together with `user_id`, which device-hub forwards but never trusts; the gateway checks the token is bound to that user), and device-hub validates and consumes it through the gateway. device-hub's own API is authenticated per caller with scoped secrets (`contracts/openapi/device-hub-internal.yaml`): the agent's secret reaches only the five runtime tools (`POST /mcp`) and a read-only `GET /events` filtered server-side to an allowlist (registry changes, node online/offline, state, settle events; never provisioning or admin events), which is how the agent learns registry changes and motion outcomes. Without a valid token the tool returns `confirmation_required` / `needs_confirmation` and the agent emits a `confirmation_request` event. A decline or timeout produces `confirmation_declined` / `confirmation_expired`; there is **no automatic re-prompt**, the UI offers a **Retry** that creates a brand-new request. Proactive and automation-triggered actions never prompt: for `risk: confirm` endpoints they only notify. Details in `contracts/mcp-tools.md` and `contracts/agent-events.md`.
 
 ### 4.7 Scenes (v1)
 
-- A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time, so a new light added to the bedroom automatically joins "good night".
+- A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time (`tag` matches the endpoint's admin-set `tags`, section 4.5; fields combine with AND), so a new light added to the bedroom automatically joins "good night".
 - Run semantics: validate each action, run through the same executor as everything else (range checks, `risk`, verify). **Endpoints that are offline, or lack the capability, are skipped and reported** ("fan offline, skipped"); commands are never queued, so a stale "unlock" cannot fire later. Results are per action (partial failure is visible).
 - `risk: confirm` endpoints in a scene need a `confirmation_token` from the user running it. If any action targets such an endpoint without a valid token, **the scene executes nothing** (not even its non-risky actions) and returns `needs_confirmation` listing those endpoints; the token is bound to the scene and to the exact risky actions it resolved to.
-- Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only. Automations (later) never execute actions on `risk: confirm` endpoints, with **no admin opt-in**, and never prompt: they notify instead, and the user can then act through the normal confirmation flow. A future **standing approval** (a user pre-approving a specific `risk: confirm` action for an automation, with limits and expiry) is an idea explicitly **out of scope** for this project.
+- Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only; they can read state in their assigned rooms but cannot call `POST /devices/{id}/set`. A member's scene selector must name a room the member can access (a room-less selector is admin-only), and this is **re-checked at run time**, not only when the scene is saved, so a member who loses a room cannot keep acting there through an old scene. Automations (later) never execute actions on `risk: confirm` endpoints, with **no admin opt-in**, and never prompt: they notify instead, and the user can then act through the normal confirmation flow. A future **standing approval** (a user pre-approving a specific `risk: confirm` action for an automation, with limits and expiry) is an idea explicitly **out of scope** for this project.
 - The registry re-validates all scenes and automations on every registry change and flags the broken ones.
 
 ### 4.8 Perception APIs
@@ -263,13 +266,13 @@ A source is `{source_id, type, location, node, online}`. Types: `upload` (always
 
 ### 4.10 Agent API (internal)
 
-`POST /v1/chat` `{user_id, session_id, text?, audio_ref?, image_refs?}` → SSE stream: `status` ("checking the camera"), `tool_call`, `tool_result`, `token`, `final`, `async_result` (late vision answer). The agent never blocks on vision.
+Spec: `contracts/openapi/agent-internal.yaml` (listens on 127.0.0.1:8200, gateway-only, mandatory auth). `POST /v1/chat` `{user_id, role, session_id, text?, images?: [{ref, media_type, data_b64}]}` (voice is already a transcript in `text`; images are inline, max 4 at 5 MiB each; `role` is set by the gateway only) → SSE stream: `status` ("checking the camera"), `tool_call`, `tool_result`, `token`, `final`, `async_result` (late vision answer). The agent never blocks on vision.
 
 ### 4.11 Gateway API (user-facing)
 
 REST: `/auth/login`, `/auth/refresh`, `/users` (admin), `/devices` (list; read-only for non-admins), `/devices/{endpoint_id}/set`, `/scenes` (CRUD per permissions) and `/scenes/{id}/run`, `/chat` (SSE), `/voice`, `/images`, `/memory` (the caller's own), `/system/health`, plus `/admin/*` (4.6). WebSocket `/ws`: live state, perception events, notifications, async results.
 
-Auth: JWT (access + refresh), argon2 password hashes, roles `admin` | `member` | `guest` (guest: assigned scenes and limited rooms, no `risk: confirm`). Per-user conversations and memory. Tailnet-only exposure plus Tailscale ACLs. Audit log for admin and device actions.
+Auth: JWT (access + refresh), argon2 password hashes, roles `admin` | `member` | `guest` (guest: reads state in assigned rooms and runs assigned scenes; cannot call `POST /devices/{id}/set` and never obtains a `risk: confirm` confirmation). Per-user conversations and memory. Tailnet-only exposure plus Tailscale ACLs. Audit log for admin and device actions.
 
 ---
 
