@@ -1,4 +1,4 @@
-# Edge Agentic IoT Framework: Architecture and Build Plan (v4)
+# Edge Agentic IoT Framework: Architecture and Build Plan (v6)
 
 Minor project: LLM-based multimodal agentic AI framework for intelligent IoT systems (PDEU).
 
@@ -242,7 +242,7 @@ The LLM can **propose** a scene or automation as JSON, but it is saved only afte
 - A scene is a list of actions `{target, capability, value}`. `target` is either a fixed `endpoint_id` or a **selector** `{room?, type?, tag?}` resolved at run time (`tag` matches the endpoint's admin-set `tags`, section 4.5; fields combine with AND), so a new light added to the bedroom automatically joins "good night".
 - Run semantics: validate each action, run through the same executor as everything else (range checks, `risk`, verify). **Endpoints that are offline, or lack the capability, are skipped and reported** ("fan offline, skipped"); commands are never queued, so a stale "unlock" cannot fire later. Results are per action (partial failure is visible).
 - `risk: confirm` endpoints in a scene need a `confirmation_token` from the user running it. If any action targets such an endpoint without a valid token, **the scene executes nothing** (not even its non-risky actions) and returns `needs_confirmation` listing those endpoints; the token is bound to the scene and to the exact risky actions it resolved to.
-- Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only. Automations (later) never execute actions on `risk: confirm` endpoints, with **no admin opt-in**, and never prompt: they notify instead, and the user can then act through the normal confirmation flow. A future **standing approval** (a user pre-approving a specific `risk: confirm` action for an automation, with limits and expiry) is an idea explicitly **out of scope** for this project.
+- Permissions: admins create, edit and delete all scenes. Members create and edit their own scenes for rooms they can access. Guests can run assigned scenes only; they can read state in their assigned rooms but cannot call `POST /devices/{id}/set`. A member's scene selector must name a room the member can access (a room-less selector is admin-only), and this is **re-checked at run time**, not only when the scene is saved, so a member who loses a room cannot keep acting there through an old scene. Automations (later) never execute actions on `risk: confirm` endpoints, with **no admin opt-in**, and never prompt: they notify instead, and the user can then act through the normal confirmation flow. A future **standing approval** (a user pre-approving a specific `risk: confirm` action for an automation, with limits and expiry) is an idea explicitly **out of scope** for this project.
 - The registry re-validates all scenes and automations on every registry change and flags the broken ones.
 
 ### 4.8 Perception APIs
@@ -266,13 +266,13 @@ A source is `{source_id, type, location, node, online}`. Types: `upload` (always
 
 ### 4.10 Agent API (internal)
 
-`POST /v1/chat` `{user_id, session_id, text?, audio_ref?, image_refs?}` → SSE stream: `status` ("checking the camera"), `tool_call`, `tool_result`, `token`, `final`, `async_result` (late vision answer). The agent never blocks on vision.
+Spec: `contracts/openapi/agent-internal.yaml` (listens on 127.0.0.1:8200, gateway-only, mandatory auth). `POST /v1/chat` `{user_id, role, session_id, text?, images?: [{ref, media_type, data_b64}]}` (voice is already a transcript in `text`; images are inline, max 4 at 5 MiB each; `role` is set by the gateway only) → SSE stream: `status` ("checking the camera"), `tool_call`, `tool_result`, `token`, `final`, `async_result` (late vision answer). The agent never blocks on vision.
 
 ### 4.11 Gateway API (user-facing)
 
 REST: `/auth/login`, `/auth/refresh`, `/users` (admin), `/devices` (list; read-only for non-admins), `/devices/{endpoint_id}/set`, `/scenes` (CRUD per permissions) and `/scenes/{id}/run`, `/chat` (SSE), `/voice`, `/images`, `/memory` (the caller's own), `/system/health`, plus `/admin/*` (4.6). WebSocket `/ws`: live state, perception events, notifications, async results.
 
-Auth: JWT (access + refresh), argon2 password hashes, roles `admin` | `member` | `guest` (guest: assigned scenes and limited rooms, no `risk: confirm`). Per-user conversations and memory. Tailnet-only exposure plus Tailscale ACLs. Audit log for admin and device actions.
+Auth: JWT (access + refresh), argon2 password hashes, roles `admin` | `member` | `guest` (guest: reads state in assigned rooms and runs assigned scenes; cannot call `POST /devices/{id}/set` and never obtains a `risk: confirm` confirmation). Per-user conversations and memory. Tailnet-only exposure plus Tailscale ACLs. Audit log for admin and device actions.
 
 ---
 

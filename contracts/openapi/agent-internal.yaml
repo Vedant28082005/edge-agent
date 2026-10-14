@@ -1,0 +1,239 @@
+openapi: 3.1.0
+info:
+  title: Edge Agent Internal API (agent)
+  version: 1.1.0
+  description: |
+    The agent's local API. Listens on 127.0.0.1:8200 only (never on a public or tailnet interface); the only
+    caller is the gateway. Changing this file requires bumping info.version.
+
+    **Auth is MANDATORY on every operation, including /v1/health.** The gateway sends its secret in
+    `X-Service-Secret`. The secret is a file `/etc/edge-agent/secrets/agent-api.secret` (mode 600, owned by the
+    gateway user, 256-bit random, base64); the agent cannot read it and holds only a SHA-256 verifier
+    (`/etc/edge-agent/secrets/verifiers/agent-api.sha256`, readable by the agent user) and compares in constant
+    time. It is a DIFFERENT secret from the agent's hub secret (`agent.secret`, used for device-hub, see
+    `device-hub-internal.yaml`): neither authorizes anything on the other API. Secrets are read from files, never
+    from env or argv, and never logged. No auth is possible only with `--mock` AND `--insecure-no-auth`; the agent
+    refuses `--insecure-no-auth` without `--mock`.
+
+    `role` (`admin|member|guest`) in `POST /v1/chat` and `POST /v1/confirmations/{request_id}` is set only by the
+    gateway, from its own DB, and the agent trusts it only because the call is authenticated as the gateway. The
+    agent never infers a role from a user id, a username or anything in a prompt, and uses it only to scope what it
+    offers (for example guests get no `risk: confirm` prompts and no memory).
+
+    `user_id` in bodies is trusted only because the caller is the authenticated gateway. Device- and user-supplied
+    strings are untrusted (CLAUDE.md rule 6).
+servers:
+  - url: http://127.0.0.1:8200
+security:
+  - agentApiSecret: []
+tags:
+  - name: chat
+  - name: confirmations
+  - name: events
+  - name: memory
+  - name: system
+paths:
+  /v1/chat:
+    post:
+      tags: [chat]
+      operationId: agentChat
+      description: |
+        Starts a turn. Response is `text/event-stream`; events, fields and ordering are defined in `agent-events.md`.
+        The gateway proxies it as `/chat`. Voice is already a transcript (`text`) when it gets here. Images arrive
+        inline in `images`; the agent never fetches anything by reference.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChatRequest'}
+      responses:
+        '200': {description: SSE stream, content: {text/event-stream: {schema: {type: string}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429':
+          description: Agent busy (`llm_busy`) or budget exceeded; sets Retry-After
+          headers:
+            Retry-After: {schema: {type: integer}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  /v1/confirmations/{request_id}:
+    post:
+      tags: [confirmations]
+      operationId: agentConfirmationDecision
+      description: |
+        Hand-off of the user's decision on a pending `confirmation_request` (sequence in `agent-events.md`).
+        Sent by the gateway only, after it has checked the user and, on approval, minted the token.
+
+        * `approved`: the body carries the full `action`, its `action_hash` and the `confirmation_token`. The agent
+          recomputes the canonical action hash (`mcp-tools.md`, vectors in `samples/confirmation/hash-vectors.json`)
+          from `action` and MUST refuse to execute (409 `action_hash_mismatch`, nothing executed) if it differs from
+          `action_hash`. Otherwise it executes the action with the token attached out-of-band and answers 202; the
+          outcome continues on the `GET /v1/events` stream.
+        * `declined` / `expired`: no token. The agent clears its pending state for `request_id`, tells the user
+          briefly and does not retry. Answers 202.
+
+        The agent NEVER logs or persists the token (not in logs, events, tool payloads, memory or any DB); it lives
+        only in memory for the single call and is dropped after it. An unknown `request_id` is 404; a repeat of an
+        already handled decision is 202 and does nothing.
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string, maxLength: 64}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfirmationDecision'}
+      responses:
+        '202': {description: Accepted; the result continues on the event stream}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: Unknown request_id for this user, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409': {description: "`action_hash_mismatch`: the recomputed hash differs from action_hash; nothing executed", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /v1/events:
+    get:
+      tags: [events]
+      operationId: agentEvents
+      description: |
+        SSE of agent-originated events for the gateway: `async_result`, `action_settled`, `action_settle_timeout`,
+        `notification`, `confirmation_request`. Each event's data carries `user_id` (the owner of the request) or
+        `"household"` for events with no single owner (the gateway decides who sees them). Framing per event:
+        `id: <seq>`, `event: <name>`, `data: {"user_id": "...", ...payload as in agent-events.md}`.
+        Replay: the gateway reconnects with `Last-Event-ID`; the agent re-sends buffered events with a greater id
+        (bounded in-memory ring, at least the last 200 events or 10 minutes). If the id is older than the buffer, the
+        agent first sends `event: reset` and the gateway treats missed events as lost.
+      parameters:
+        - {name: Last-Event-ID, in: header, required: false, schema: {type: string}}
+      responses:
+        '200': {description: SSE stream, content: {text/event-stream: {schema: {type: string}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/memory:
+    get:
+      tags: [memory]
+      operationId: agentListMemories
+      description: One user's memories. `user_id` is required; there is no cross-user listing.
+      parameters:
+        - {name: user_id, in: query, required: true, schema: {type: string, minLength: 1, maxLength: 64}}
+      responses:
+        '200': {description: Memories, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Memory'}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/memory/{id}:
+    delete:
+      tags: [memory]
+      operationId: agentDeleteMemory
+      description: Deletes one memory, only if it belongs to `user_id` (otherwise 404).
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, maxLength: 64}}
+        - {name: user_id, in: query, required: true, schema: {type: string, minLength: 1, maxLength: 64}}
+      responses:
+        '204': {description: Deleted}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: No such memory for this user, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /v1/health:
+    get:
+      tags: [system]
+      operationId: agentHealth
+      description: Authenticated liveness and readiness (LLM, hub reachability). No secrets or prompts in the answer.
+      responses:
+        '200': {description: Health, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+components:
+  securitySchemes:
+    agentApiSecret:
+      type: apiKey
+      in: header
+      name: X-Service-Secret
+      description: |
+        gateway-to-agent secret (file /etc/edge-agent/secrets/agent-api.secret, mode 600, owned by the gateway user;
+        the agent holds a SHA-256 verifier). Different from the agent's hub secret.
+  responses:
+    Unauthorized: {description: Missing or wrong X-Service-Secret, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    BadRequest: {description: Malformed body or limits exceeded, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+        message: {type: string}
+    ChatRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id, role, session_id]
+      properties:
+        user_id: {type: string, minLength: 1, maxLength: 64}
+        role: {$ref: '#/components/schemas/Role'}
+        session_id: {type: string, maxLength: 64}
+        text: {type: string, maxLength: 4000}
+        images:
+          type: array
+          maxItems: 4
+          items: {$ref: '#/components/schemas/InlineImage'}
+    InlineImage:
+      type: object
+      additionalProperties: false
+      required: [ref, media_type, data_b64]
+      properties:
+        ref: {type: string, maxLength: 64}
+        media_type: {type: string, enum: [image/jpeg, image/png, image/webp]}
+        data_b64: {type: string, contentEncoding: base64, description: "At most 5 MiB of decoded image bytes (about 7 MiB of base64)"}
+    ConfirmAction:
+      description: The exact object that is hashed (mcp-tools.md "Canonical action hash"), not a summary.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, endpoint_id, capability, value]
+          properties:
+            type: {const: set_state}
+            endpoint_id: {type: string, pattern: '^ep_[0-9a-f]{8}$'}
+            capability: {type: string, maxLength: 64}
+            value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+        - type: object
+          additionalProperties: false
+          required: [type, scene_id, actions]
+          properties:
+            type: {const: run_scene}
+            scene_id: {type: string, maxLength: 64}
+            actions:
+              type: array
+              maxItems: 50
+              description: "The risk-confirm actions as resolved by the gateway, sorted by endpoint_id then capability (see Canonical action hash in mcp-tools.md)."
+              items:
+                type: object
+                additionalProperties: false
+                required: [endpoint_id, capability, value]
+                properties:
+                  endpoint_id: {type: string, pattern: '^ep_[0-9a-f]{8}$'}
+                  capability: {type: string, maxLength: 64}
+                  value: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+    ConfirmationDecision:
+      type: object
+      additionalProperties: false
+      required: [decision, user_id, role, action, action_hash]
+      properties:
+        decision: {type: string, enum: [approved, declined, expired]}
+        user_id: {type: string, minLength: 1, maxLength: 64}
+        role: {$ref: '#/components/schemas/Role'}
+        action: {$ref: '#/components/schemas/ConfirmAction'}
+        action_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        confirmation_token:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          writeOnly: true
+          description: Only when `decision` is `approved`; forbidden otherwise. Never logged or persisted by the agent.
+      allOf:
+        - if: {properties: {decision: {const: approved}}}
+          then: {required: [confirmation_token]}
+          else: {not: {required: [confirmation_token]}}
+    Role: {type: string, enum: [admin, member, guest], description: Set only by the gateway; never inferred by the agent}
+    Memory:
+      type: object
+      required: [memory_id, text]
+      properties:
+        memory_id: {type: string}
+        text: {type: string, maxLength: 500}
+        updated_at: {type: integer}
+    Health:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+        llm: {type: string, enum: [up, down, mock]}
+        hub: {type: string, enum: [up, down, mock]}
