@@ -16,6 +16,8 @@ from .llm import LlmBusy, LlmError
 from .planner import Plan, Planner
 from .prompt import PromptBudgetError, PromptBuilder, render_result
 from .reqctx import ReqCtx
+from .sched.scheduler import Scheduler
+from .sched.trace import TurnTrace
 from .store import Store
 from .util import clean_label, clean_user_text
 
@@ -38,6 +40,17 @@ ERROR_TEXT = {
 def _name(reg: DeviceRegistry, ep: object) -> str:
     d = reg.devices.get(ep) if isinstance(ep, str) else None
     return d.name if d else "that device"
+
+
+def outcome_of(outs: list) -> str:
+    if not outs:
+        return "ok"
+    bad = [o for o in outs if not o.ok]
+    if not bad:
+        return "ok"
+    if any(o.state in ("declined", "expired", "blocked", "denied") for o in bad):
+        return "needs_confirmation" if any(o.state in ("declined", "expired", "blocked") for o in bad) else "denied"
+    return "partial" if len(bad) < len(outs) else "failed"
 
 
 def compose_final(say: str, outs: list[CallOutcome], reg: DeviceRegistry) -> str:
@@ -77,8 +90,10 @@ def compose_final(say: str, outs: list[CallOutcome], reg: DeviceRegistry) -> str
 
 class ChatService:
     def __init__(self, registry: DeviceRegistry, builder: PromptBuilder, planner: Planner, executor: Executor,
-                 store: Store, metrics: Metrics, settle_wait_s: float = 150.0, max_queued_turns: int = 2) -> None:
+                 store: Store, metrics: Metrics, settle_wait_s: float = 150.0, max_queued_turns: int = 2,
+                 sched: Scheduler | None = None) -> None:
         self.registry, self.builder, self.planner, self.executor = registry, builder, planner, executor
+        self.sched = sched
         self.store, self.metrics, self.settle_wait_s = store, metrics, settle_wait_s
         self._active = 0
         self._max_active = 1 + max_queued_turns
@@ -117,49 +132,78 @@ class ChatService:
             self._active -= 1
 
     async def _turn(self, ctx: ReqCtx, text: str, t0: float) -> None:
+        trace = self.sched.new_trace(ctx) if self.sched else None
+        try:
+            await self._turn_traced(ctx, text, t0, trace)
+        finally:
+            if self.sched and trace is not None:
+                self.sched.emit(ctx, trace)
+
+    async def _turn_traced(self, ctx: ReqCtx, text: str, t0: float, trace: TurnTrace | None) -> None:
         user, sess, guest = ctx.user_id, ctx.session_id, ctx.role == "guest"
-        history = self.store.recent(user, sess, 4, guest)
-        summary = self.store.summary(user, sess, guest)
-        memories = [m["text"] for m in self.store.list_memories(user, guest)[:5]]
-        await ctx.emit("status", {"text": "thinking"})
+        routed = await self.sched.route(ctx, text, trace) if self.sched else None
         outs: list[CallOutcome] = []
-        extra_tail: list[dict] = []
-        tool_results = ""
-        say = ""
-        while True:
-            if not ctx.budget.take_step():
-                if not outs:
-                    await ctx.emit("error", {"code": "budget_exceeded", "message": "request budget exceeded"})
-                    return
-                say = "I stopped here because I reached this request's limit."
-                break
-            try:
-                prompt = self.builder.build(text, history, summary, memories, extra_tail, tool_results)
-            except PromptBudgetError:
-                log.exception("prompt over budget")
-                await ctx.emit("error", {"code": "bad_request", "message": "request too large"})
-                return
-            try:
-                plan: Plan = await self.planner.plan(prompt.messages)
-            except LlmBusy:
-                await ctx.emit("error", {"code": "llm_busy", "message": "the assistant is busy, try again shortly"})
-                return
-            except LlmError as e:
-                log.warning("llm error: %s", e)
-                await ctx.emit("error", {"code": "llm_busy", "message": "the language model is unavailable"})
-                return
-            say = plan.say
-            if not plan.calls:
-                break
+        route = "llm"
+        final: str | None = None
+        if routed is not None:
+            outs, route = routed.outs, routed.sse_route
             await ctx.emit("status", {"text": "working on it"})
-            new = await self.executor.run_calls(ctx, plan.calls)
-            outs += new
-            reads = [o for o in new if o.tool in READ_TOOLS and o.ok]
-            if not reads:
-                break
-            extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
-            tool_results = "\n".join(render_result(o.tool, o.args, o.result, self.registry) for o in new if o.ok)
-        final = compose_final(say, outs, self.registry)
+            final = routed.text if routed.text is not None else compose_final(routed.say, outs, self.registry)
+        else:
+            if self.sched:
+                win = self.sched.memory.load(user, sess, guest)
+                history, summary = win.history, win.summary
+            else:
+                history, summary = self.store.recent(user, sess, 4, guest), self.store.summary(user, sess, guest)
+            memories = [m["text"] for m in self.store.list_memories(user, guest)[:5]]
+            await ctx.emit("status", {"text": "thinking"})
+            extra_tail: list[dict] = []
+            tool_results = ""
+            say = ""
+            while True:
+                if not ctx.budget.take_step():
+                    if not outs:
+                        await ctx.emit("error", {"code": "budget_exceeded", "message": "request budget exceeded"})
+                        if trace:
+                            trace.outcome = "error:budget_exceeded"
+                        return
+                    say = "I stopped here because I reached this request's limit."
+                    break
+                try:
+                    prompt = self.builder.build(text, history, summary, memories, extra_tail, tool_results)
+                except PromptBudgetError:
+                    log.exception("prompt over budget")
+                    await ctx.emit("error", {"code": "bad_request", "message": "request too large"})
+                    if trace:
+                        trace.outcome = "error:prompt_budget"
+                    return
+                try:
+                    plan: Plan = await self.planner.plan(prompt.messages)
+                except LlmBusy:
+                    await ctx.emit("error", {"code": "llm_busy", "message": "the assistant is busy, try again shortly"})
+                    if trace:
+                        trace.outcome = "error:llm_busy"
+                    return
+                except LlmError as e:
+                    log.warning("llm error: %s", e)
+                    await ctx.emit("error", {"code": "llm_busy", "message": "the language model is unavailable"})
+                    if trace:
+                        trace.outcome = "error:llm_unavailable"
+                    return
+                if self.sched and trace is not None:
+                    self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained))
+                say = plan.say
+                if not plan.calls:
+                    break
+                await ctx.emit("status", {"text": "working on it"})
+                new = await self.executor.run_calls(ctx, plan.calls)
+                outs += new
+                reads = [o for o in new if o.tool in READ_TOOLS and o.ok]
+                if not reads:
+                    break
+                extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
+                tool_results = "\n".join(render_result(o.tool, o.args, o.result, self.registry) for o in new if o.ok)
+            final = compose_final(say, outs, self.registry)
         if ctx.images:
             final += " (I can't analyse images yet.)"
         words = final.split(" ")
@@ -167,7 +211,17 @@ class ChatService:
             await ctx.emit("token", {"text": " ".join(words[i:i + 3]) + (" " if i + 3 < len(words) else "")})
         self.store.add_message(user, sess, "user", text, guest)
         self.store.add_message(user, sess, "assistant", final, guest)
-        self.store.roll_summary(user, sess, guest=guest)
-        await ctx.emit("final", {"text": final, "route": "llm", "latency_ms": int((time.monotonic() - t0) * 1000)})
+        if self.sched:
+            self.sched.memory.fold(user, sess, guest=guest)
+        else:
+            self.store.roll_summary(user, sess, guest=guest)
+        if trace is not None:
+            if trace.outcome == "ok":
+                trace.outcome = outcome_of(outs)
+            if routed is None:
+                trace.route, trace.sse_route, trace.source = "llm", "llm", "llm"
+        await ctx.emit("final", {"text": final, "route": route, "latency_ms": int((time.monotonic() - t0) * 1000)})
+        if self.sched and trace is not None:
+            self.sched.emit(ctx, trace)                  # before the settle wait, so latency_ms is the synchronous reply
         if ctx.pending_settles:
             await ctx.wait_settles(self.settle_wait_s)

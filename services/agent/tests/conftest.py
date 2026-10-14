@@ -61,6 +61,7 @@ def one(events, name):
 async def make_env(tmp_path, **cfg_kw):
     secret_file = tmp_path / "agent.secret"
     secret_file.write_text(SECRET)
+    cfg_kw.setdefault("sched", {"fast_path": False, "router": False})   # the v1 tests exercise the LLM path; sched tests opt in
     fake = FakeHub(SECRET, settle_delay=cfg_kw.pop("settle_delay", 0.2))
     server = LocalServer(fake.app())
     url = await server.start()

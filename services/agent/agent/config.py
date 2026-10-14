@@ -30,6 +30,7 @@ class AgentConfig:
     max_queued_turns: int = 2
     scene_names: list[str] = field(default_factory=list)   # no tool lists scenes; optional admin-provided names
     include_state_events: bool = False
+    sched: dict = field(default_factory=dict)   # scheduler: see sched/config.py (flags, thresholds, cost table)
 
 
 def load_config(path: str | None) -> AgentConfig:
@@ -41,6 +42,8 @@ def load_config(path: str | None) -> AgentConfig:
             if k not in known:
                 raise ValueError(f"unknown config key: {k}")
             setattr(cfg, k, v)
+    from .sched.config import SchedConfig
+    SchedConfig.from_dict(cfg.sched)                  # fail at startup on an unknown or malformed scheduler key
     if cfg.host not in ("127.0.0.1", "::1", "localhost") and not cfg.allow_non_loopback:
         raise ValueError("the agent API is internal: host must be a loopback address "
                          "(allow_non_loopback only for a container on a private network that does not publish the port)")

@@ -22,7 +22,9 @@ from .planner import Planner
 from .policy import Trigger
 from .prompt import PromptBuilder
 from .reqctx import Budget, ReqCtx
-from .schema import build_plan_schema
+from .sched.config import SchedConfig
+from .sched.grammar import make_backend
+from .sched.scheduler import Scheduler
 from .util import action_hash
 from .settle import SettleTable
 from .store import Store
@@ -44,19 +46,23 @@ class Agent:
         self.registry = DeviceRegistry()
         self.bus = EventBus()
         self.llm = llm
-        self.llm.constrained = cfg.constrained
+        self.sched_cfg = SchedConfig.from_dict(cfg.sched)
+        self.sched_cfg.constrained_decoding = self.sched_cfg.constrained_decoding and cfg.constrained
+        self.llm.constrained = self.sched_cfg.constrained_decoding
+        self.llm.constraint = make_backend(self.sched_cfg.constraint_backend)
+        self.llm.prefix_cache, self.llm.id_slot = self.sched_cfg.prefix_cache, self.sched_cfg.id_slot
         self.hub = hub
         self.builder = PromptBuilder(self.registry)
-        self._schema_gen = -1
-        self._schema: dict = {}
         self.loader = RegistryLoader(hub, self.registry, self._on_registry_changed) if hub else None
         self.confirmations = ConfirmationManager(cfg.confirmation_ttl_s)
         self.settles = SettleTable(self.notifier, cfg.settle_wait_s)
         self.executor = Executor(hub, self.registry, self.store, self.confirmations, self.settles, self.notifier,
                                  self.metrics, tuple(cfg.scene_names)) if hub else None
         self.planner = Planner(llm, self.plan_schema, self.metrics)
+        self.sched = Scheduler(self.sched_cfg, self.registry, self.executor, self.store, self.bus,
+                               lambda: tuple(cfg.scene_names))
         self.chat = ChatService(self.registry, self.builder, self.planner, self.executor, self.store, self.metrics,
-                                cfg.settle_wait_s, cfg.max_queued_turns) if self.executor else None
+                                cfg.settle_wait_s, cfg.max_queued_turns, self.sched) if self.executor else None
         self.rules = RulesEngine(self.store, self._run_rule_action)
         self.stream = stream
         self._wire_bus()
@@ -82,11 +88,16 @@ class Agent:
 
     # ------------------------------------------------------------------------------------------ schema / prefix
     def plan_schema(self) -> dict:
-        """Constrained-decoding schema, rebuilt from the live registry whenever the registry cache was reloaded."""
-        if self._schema_gen != self.registry.generation:
-            self._schema = build_plan_schema(self.registry, tuple(self.cfg.scene_names))
-            self._schema_gen = self.registry.generation
-        return self._schema
+        """Constrained-decoding schema (+ GBNF), rebuilt only when the registry's decoding-relevant content changed."""
+        return self.sched.schema()
+
+    def set_flags(self, **flags: bool) -> None:
+        """Runtime ablation switches (S10): fast_path, router, constrained_decoding, prefix_cache."""
+        if "constrained" in flags:                       # v1 name of constrained_decoding
+            flags["constrained_decoding"] = flags.pop("constrained")
+        self.sched.set_flags(**flags)
+        self.llm.constrained = self.sched_cfg.constrained_decoding
+        self.llm.prefix_cache = self.sched_cfg.prefix_cache
 
     def _on_registry_changed(self) -> None:
         self.builder.rebuild_prefix()
@@ -221,7 +232,7 @@ class Agent:
         return out
 
     def stats(self) -> dict:
-        return {"constrained": self.llm.constrained, "prefix_hash": self.builder.prefix_hash,
+        return {"constrained": self.llm.constrained, "sched": self.sched.stats(), "prefix_hash": self.builder.prefix_hash,
                 "prefix_version": self.builder.prefix_version, "devices": len(self.registry.devices),
                 "registry_version": self.registry.version, "metrics": self.metrics.as_dict(),
                 "pending_settles": len(self.settles),

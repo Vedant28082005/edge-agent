@@ -74,6 +74,23 @@ class Store:
                        (user_id, session_id, n))
         return [(r["role"], r["text"]) for r in reversed(rows)]
 
+    def recent_rows(self, user_id: str, session_id: str, n: int = 16, guest: bool = False) -> list[tuple[int, str, str]]:
+        """(id, role, text) of this user's last n messages, oldest first. Guests: in-process history, synthetic ids."""
+        if guest:
+            return [(i, r, t) for i, (r, t) in enumerate(list(self._guest.get((user_id, session_id), []))[-n:])]
+        rows = self._q("SELECT id,role,text FROM messages WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT ?",
+                       (user_id, session_id, n))
+        return [(r["id"], r["role"], r["text"]) for r in reversed(rows)]
+
+    def summary_upto(self, user_id: str, session_id: str) -> int:
+        rows = self._q("SELECT upto_id FROM summaries WHERE user_id=? AND session_id=?", (user_id, session_id))
+        return rows[0]["upto_id"] if rows else 0
+
+    def put_summary(self, user_id: str, session_id: str, text: str, upto_id: int) -> None:
+        self._q("INSERT INTO summaries(user_id,session_id,text,upto_id,ts) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(user_id,session_id) DO UPDATE SET text=excluded.text, upto_id=excluded.upto_id, ts=excluded.ts",
+                (user_id, session_id, text, upto_id, time.time()))
+
     def summary(self, user_id: str, session_id: str, guest: bool = False) -> str:
         if guest:
             return ""
