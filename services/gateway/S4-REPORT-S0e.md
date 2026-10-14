@@ -1,4 +1,13 @@
-# S4 gateway: report after contracts S0e (branch s4-gateway)
+# S4 gateway: report (S0e + S0f)
+
+## Update after contracts S0f (commit `27886ba`)
+- Adapted to gateway 2.10.0, agent-internal 1.2.0, device-hub 1.3.0: `PUT /memory/{memory_id}` forwards `PUT /v1/memory/{memory_id}` exactly per agent-internal; `scenes_changed {scene_id, change}` is sent only to users who can see the scene (judged at delivery; a deleted scene by its last known content); close code 4429 for connect and inbound-message floods; 413 for an upload with unknown Content-Length; the hub's 409 body validates against `SceneRunNotExecuted`. `contracts/` untouched.
+- **Windows, Python 3.12 [measured]:** 191 passed, 1 skipped (the unix-socket test needs Linux), including the real-hub integration.
+- **Python 3.11.17, emulated linux/arm64 bookworm container [measured]** (`tools\gateway-arm64-test.ps1`, `pip --only-binary=:all:`, sqlite 3.40.1, run on `27886ba`): **192 passed, 0 skipped, 7m57s**. That includes the unix-socket consume test and the real-hub integration (S1 hub in its own arm64 venv). Emulated, not real hardware: timings are not representative and nothing ran on a Pi.
+- The memory-PUT gap and the `scenes_changed` / 4429 / 411 decisions listed further down are resolved by S0f.
+
+---
+
 
 **Built (all 10 items):** merged `main`, then adapted `services/gateway` to gateway.yaml 2.9.0 and agent-internal.yaml 1.1.0. `contracts/` untouched.
 1. Scene targets are validated strictly (fixed xor selector, no unknown keys); the `anyOf` workaround is gone and the contract's `samples/scene-action/{valid,invalid}` are loaded by a test.
