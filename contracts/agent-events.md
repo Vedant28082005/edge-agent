@@ -1,7 +1,7 @@
 # Agent SSE events (v1)
 
 `POST /v1/chat` (agent, internal; the gateway proxies it as `/chat`) request:
-`{"user_id": "...", "session_id": "...", "text?": "...", "audio_ref?": "...", "image_refs?": ["..."]}`
+`{"user_id": "...", "session_id": "...", "text?": "...", "images?": [{"ref", "media_type", "data_b64"}]}` (see `openapi/agent-internal.yaml`). Voice is already a transcript in `text`; images are inline (max 4, 5 MiB each, `image/jpeg|png|webp`); the agent receives no audio and no refs to fetch.
 Response: `text/event-stream`. Each event: `event: <name>` + `data: <one-line JSON>`. Every event carries `seq` (monotonic per request) and `req_id`.
 
 | Event | Data | Meaning |

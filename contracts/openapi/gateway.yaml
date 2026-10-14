@@ -221,7 +221,16 @@ paths:
     post:
       tags: [chat]
       operationId: chat
-      description: Proxies the agent /v1/chat. Response is an SSE stream; events are defined in agent-events.md.
+      description: |
+        Proxies the agent `/v1/chat` (`agent-internal.yaml`). Response is an SSE stream; events are defined in agent-events.md.
+        Media rules:
+        * **Voice becomes a transcript before chat.** `audio_ref` (from `POST /voice`) is resolved by the gateway to the
+          stored transcript, which is used as `text`; the agent never receives audio and never sees `audio_ref`.
+          If both `text` and `audio_ref` are sent, the transcript is appended to `text` (total still at most 4000 chars).
+        * **Images go to the agent inline.** Each `image_refs` entry (from `POST /images`) is resolved by the gateway and
+          sent as `images: [{ref, media_type, data_b64}]` in the agent chat body. Refs are single use, owned by the caller,
+          and expire (see `/images`). An unknown, expired, used or foreign ref is a 400 `bad_media_ref`.
+        Limits: `text` 4000 chars, at most 4 images per turn, 5 MiB per image (see `/images`).
       requestBody:
         required: true
         content:
@@ -229,17 +238,25 @@ paths:
             schema:
               type: object
               properties:
-                session_id: {type: string}
+                session_id: {type: string, maxLength: 64}
                 text: {type: string, maxLength: 4000}
-                audio_ref: {type: string}
-                image_refs: {type: array, maxItems: 4, items: {type: string}}
+                audio_ref: {type: string, maxLength: 64}
+                image_refs: {type: array, maxItems: 4, items: {type: string, maxLength: 64}}
       responses:
         '200': {description: SSE stream, content: {text/event-stream: {schema: {type: string}}}}
+        '400': {description: "Malformed body or `bad_media_ref`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /voice:
     post:
       tags: [chat]
       operationId: uploadVoice
-      description: Audio proxied to vision-node /transcribe. Returns an audio_ref for /chat and the transcript.
+      description: |
+        Audio is proxied to vision-node `/transcribe` (multipart field `audio`). The audio is dropped after transcription;
+        only the transcript is kept, under the returned `audio_ref`, for use in `/chat` (single use, 120 s TTL).
+        Limits: 10 MiB, container `wav`, `webm`, `m4a` or `aac` (sniffed, not trusted from the Content-Type); other types are 415.
       requestBody:
         required: true
         content:
@@ -250,11 +267,20 @@ paths:
               properties:
                 audio: {type: string, format: binary}
       responses:
-        '200': {description: Transcript, content: {application/json: {schema: {type: object, properties: {audio_ref: {type: string}, text: {type: string}}}}}}
+        '200': {description: Transcript, content: {application/json: {schema: {type: object, required: [audio_ref, text], properties: {audio_ref: {type: string}, text: {type: string}}}}}}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '502': {$ref: '#/components/responses/BadGateway'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
   /images:
     post:
       tags: [chat]
       operationId: uploadImage
+      description: |
+        Image upload for the next chat turn(s). Held in memory only (never written to disk), single use, TTL 120 s.
+        Limits: 5 MiB per image, `jpeg`, `png` or `webp` (sniffed); other types are 415. At most 8 held images per user and
+        32 MiB held in total; beyond that 429 `too_many_uploads`.
       requestBody:
         required: true
         content:
@@ -266,6 +292,9 @@ paths:
                 image: {type: string, format: binary}
       responses:
         '200': {description: Reference, content: {application/json: {schema: {type: object, required: [image_ref], properties: {image_ref: {type: string}}}}}}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
   /memory:
     get:
       tags: [chat]
@@ -602,6 +631,15 @@ components:
     Unauthorized: {description: Missing or invalid token, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     Forbidden: {description: Role not allowed, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     NotFound: {description: Not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    TooLarge: {description: "Body or upload over the limit (`too_large`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    UnsupportedMedia: {description: "Media type not accepted (`unsupported_media_type`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    TooManyRequests:
+      description: Rate or quota limit (`rate_limited`, `too_many_uploads`). Always sets Retry-After (seconds).
+      headers:
+        Retry-After: {schema: {type: integer, minimum: 1}, description: Seconds to wait before retrying}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    BadGateway: {description: "An upstream (device-hub, agent, vision-node) answered with an error or an unusable reply (`upstream_error`, `vision_unavailable`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    GatewayTimeout: {description: "An upstream did not answer in time (`upstream_timeout`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   schemas:
     Error:
       type: object
