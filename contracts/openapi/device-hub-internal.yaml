@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent device-hub Internal API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     SERVICE-TO-SERVICE ONLY. How the gateway and the agent reach device-hub (pi-brain, loopback). Promoted from the
     S1 proposal (`services/device-hub/INTERNAL_API.md`, branch s1-device-hub). Never exposed through
@@ -547,7 +547,9 @@ paths:
         - {$ref: '#/components/parameters/Actor'}
       description: |
         Same code path as MCP `run_scene`. 200 run result; 409 with `executed: false` for `needs_confirmation` or
-        `scene_broken`; 404 `unknown_scene`.
+        `scene_broken`; 404 `unknown_scene`. A `needs_confirmation` 409 also carries `scene_id`, the canonical list of
+        `risk: confirm` actions in `needs_confirmation` (the exact objects that are hashed) and the canonical
+        `action_hash` (`mcp-tools.md`).
       requestBody:
         content:
           application/json:
