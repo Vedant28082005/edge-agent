@@ -67,7 +67,7 @@ Known limitation: behind `tailscale serve` the gateway sees every client as the 
 `compose.vision.yml` runs only **vision-node** (`edge-agent/vision-node`, uid 10104, read-only fs, no volume, host network, listens on `VISION_BIND` = the node's Tailscale address, port 8300). The **VLM** (`llama-server` + Qwen3-VL-2B GGUF + mmproj) and **whisper.cpp** (`whisper-server`, base.en) are native systemd units (`systemd/vision-llama-server.service`, `systemd/vision-whisper-server.service`, env templates next to them), both bound to `127.0.0.1` and reached by vision-node only. Nothing is downloaded by the repo; models are placed by hand in `/var/lib/edge-agent/models/`.
 
 ```powershell
-toolsuild-images.ps1 -Platform arm64 -Tag v1 -Save        # includes vision-node
+tools\build-images.ps1 -Platform arm64 -Tag v1 -Save        # includes vision-node
 tools\deploy.ps1 -Target vision -Images -Tag v1 -Up         # code/config/units/compose + image; no secrets
 ```
 
