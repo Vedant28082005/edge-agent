@@ -751,8 +751,10 @@ components:
         message: {type: string}
     ListDevicesResult:
       description: |
-        Structured result of the `list_devices` tool (mcp-tools.md). `registry_version` equals `registry_changed.version`
-        and `GET /registry/version`, so the agent can tell whether its cached list is current without another call.
+        Structured result of the `list_devices` tool (mcp-tools.md). `registry_version` is a content hash of the
+        registry (endpoints and scenes). It changes on any registry or scene change and is not the same number as
+        `registry_changed.version` or `GET /registry/version`, which are a separate counter. The agent uses it as a
+        cache key to tell whether its cached list is current without another call.
         `scenes` is a READ-ONLY listing (id and display name, no actions) so the agent can offer `run_scene` ids;
         it is not affected by the `room` / `type` filters and adds no tool. The hub applies no role filtering: the
         agent filters by `allowed_scenes` (agent-internal.yaml).
