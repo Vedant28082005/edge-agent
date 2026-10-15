@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { Endpoint, ForgetUsage, Node, Role, User } from "../api/types";
+import type { ActionLogEntry, ActionLogPage, ActionStatus, Endpoint, ForgetUsage, Node, Role, User } from "../api/types";
 import { explain } from "../errors";
 
 const csv = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
@@ -186,12 +186,94 @@ function Users() {
   );
 }
 
+const STATUSES: ActionStatus[] = ["done", "moving", "settled", "settle_timeout", "failed", "blocked", "confirmation_required", "declined", "expired", "denied"];
+const EMPTY_FILTERS = { node_id: "", endpoint_id: "", user_id: "", status: "", from: "", to: "" };
+
+// datetime-local value (browser local time) -> unix seconds
+const toUnix = (v: string) => String(Math.floor(new Date(v).getTime() / 1000));
+
+function logQuery(f: typeof EMPTY_FILTERS, cursor?: string): string {
+  const q = new URLSearchParams();
+  if (f.node_id.trim()) q.set("node_id", f.node_id.trim());
+  if (f.endpoint_id.trim()) q.set("endpoint_id", f.endpoint_id.trim());
+  if (f.user_id.trim()) q.set("user_id", f.user_id.trim());
+  if (f.status) q.set("status", f.status);
+  if (f.from) q.set("from", toUnix(f.from));
+  if (f.to) q.set("to", toUnix(f.to));
+  if (cursor) q.set("cursor", cursor);
+  const qs = q.toString();
+  return `/admin/action-log${qs ? `?${qs}` : ""}`;
+}
+
+function ActionLog() {
+  const [draft, setDraft] = useState(EMPTY_FILTERS);
+  const [applied, setApplied] = useState(EMPTY_FILTERS);
+  const [rows, setRows] = useState<ActionLogEntry[]>([]);
+  const [next, setNext] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async (f: typeof EMPTY_FILTERS, cursor?: string) => {
+    setBusy(true);
+    try {
+      const page = await api<ActionLogPage>("GET", logQuery(f, cursor));
+      setRows((r) => (cursor ? [...r, ...page.items] : page.items));
+      setNext(page.next_cursor);
+      setErr(null);
+    } catch (e) { setErr(explain(e)); } finally { setBusy(false); setLoaded(true); }
+  }, []);
+  useEffect(() => { void load(applied); }, [applied, load]);
+
+  const set = (k: keyof typeof EMPTY_FILTERS, v: string) => setDraft((d) => ({ ...d, [k]: v }));
+  const apply = (ev: React.FormEvent) => { ev.preventDefault(); setApplied(draft); };
+
+  return (
+    <div>
+      <h3>Action log</h3>
+      <form onSubmit={apply} className="row wrap" aria-label="Action log filters">
+        <input aria-label="Filter node" placeholder="node id" value={draft.node_id} onChange={(e) => set("node_id", e.target.value)} />
+        <input aria-label="Filter endpoint" placeholder="endpoint id" value={draft.endpoint_id} onChange={(e) => set("endpoint_id", e.target.value)} />
+        <input aria-label="Filter user" placeholder="user id" maxLength={64} value={draft.user_id} onChange={(e) => set("user_id", e.target.value)} />
+        <select aria-label="Filter status" value={draft.status} onChange={(e) => set("status", e.target.value)}>
+          <option value="">any status</option>
+          {STATUSES.map((st) => <option key={st} value={st}>{st}</option>)}
+        </select>
+        <label>From <input type="datetime-local" aria-label="Filter from" value={draft.from} onChange={(e) => set("from", e.target.value)} /></label>
+        <label>To <input type="datetime-local" aria-label="Filter to" value={draft.to} onChange={(e) => set("to", e.target.value)} /></label>
+        <button className="primary">Apply</button>
+        <button type="button" onClick={() => { setDraft(EMPTY_FILTERS); setApplied(EMPTY_FILTERS); }}>Clear</button>
+      </form>
+      {err && <p className="err" role="alert">{err}</p>}
+      <table className="table" aria-label="Action log">
+        <thead><tr><th>Time</th><th>User</th><th>Source</th><th>Action</th><th>Status</th><th>Error</th><th>Took</th></tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id}>
+              <td><time>{new Date(r.ts * 1000).toLocaleString()}</time></td>
+              <td>{r.user_id}</td>
+              <td>{r.source}</td>
+              <td>{r.kind === "run_scene" ? `run_scene ${r.scene_id ?? ""}` : `set ${r.endpoint_id ?? ""} ${r.capability ?? ""}=${r.value == null ? "" : String(r.value)}`}</td>
+              <td><span className="badge">{r.status}</span></td>
+              <td>{r.error ?? ""}</td>
+              <td>{r.elapsed_ms == null ? "" : `${(r.elapsed_ms / 1000).toFixed(1)}s`}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {loaded && !err && rows.length === 0 && <p className="muted">No matching actions.</p>}
+      {next && <button disabled={busy} onClick={() => load(applied, next)}>Load more</button>}
+    </div>
+  );
+}
+
 export function Admin() {
   return (
     <section>
       <h2>Admin</h2>
       <Nodes />
       <Users />
+      <ActionLog />
     </section>
   );
 }

@@ -1,14 +1,17 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
 import { api } from "./api/client";
-import type { ConfirmationRequest, WsMessage } from "./api/events";
+import type { EventAction, WsMessage } from "./api/events";
 import type { Endpoint } from "./api/types";
 import { connectWs, type WsStatus } from "./api/ws";
 
 export type SettlePhase = "accepted" | "settling" | "settled" | "settle_timeout";
-export type Settle = { phases: SettlePhase[]; observed?: unknown; elapsed_ms?: number; settle_s?: number };
+// `deadline` (ms epoch) is when the capability's announced settle_s runs out; absent for capabilities without one.
+export type Settle = { phases: SettlePhase[]; observed?: unknown; elapsed_ms?: number; settle_s?: number; deadline?: number };
 
 export type ConfStatus = "pending" | "approving" | "approved" | "declined" | "expired" | "error";
-export type Conf = { req: ConfirmationRequest; status: ConfStatus; error?: string; retriedAs?: string };
+// Only what the card shows: the server summary and action. The action_hash is never kept or displayed.
+export type ConfReq = { request_id: string; summary: string; action?: EventAction };
+export type Conf = { req: ConfReq; status: ConfStatus; error?: string; retriedAs?: string };
 
 export type FeedItem = { id: number; at: number; msg: WsMessage };
 
@@ -26,9 +29,9 @@ type A =
   | { t: "loadError"; v: string }
   | { t: "ws"; v: WsStatus }
   | { t: "msg"; m: WsMessage }
-  | { t: "settle"; key: string; phase: SettlePhase }
+  | { t: "settle"; key: string; phase: SettlePhase; settle_s?: number; now: number }
   | { t: "conf"; id: string; patch: Partial<Conf> }
-  | { t: "confAdd"; req: ConfirmationRequest };
+  | { t: "confAdd"; req: ConfReq };
 
 export const settleKey = (ep: string, cap: string) => `${ep}:${cap}`;
 let feedSeq = 0;
@@ -41,7 +44,8 @@ function reduce(s: S, a: A): S {
     case "settle": {
       const cur = s.settle[a.key]?.phases ?? [];
       const phases = a.phase === "accepted" ? ["accepted" as const] : [...cur, a.phase];
-      return { ...s, settle: { ...s.settle, [a.key]: { ...s.settle[a.key], phases } } };
+      const deadline = a.phase === "settling" && a.settle_s ? a.now + a.settle_s * 1000 : a.phase === "accepted" ? undefined : s.settle[a.key]?.deadline;
+      return { ...s, settle: { ...s.settle, [a.key]: { ...s.settle[a.key], phases, settle_s: a.settle_s ?? s.settle[a.key]?.settle_s, deadline } } };
     }
     case "confAdd":
       return { ...s, confs: { ...s.confs, [a.req.request_id]: { req: a.req, status: "pending" } } };
@@ -73,13 +77,13 @@ function reduce(s: S, a: A): S {
           },
         };
       } else if (m.type === "confirmation_request") {
-        next = { ...next, confs: { ...next.confs, [m.request_id]: { req: m, status: "pending" } } };
+        next = { ...next, confs: { ...next.confs, [m.request_id]: { req: { request_id: m.request_id, summary: m.summary, action: m.action }, status: "pending" } } };
       } else if (m.type === "confirmation_declined" || m.type === "confirmation_expired") {
         const c = next.confs[m.request_id];
         const status: ConfStatus = m.type === "confirmation_declined" ? "declined" : "expired";
         next = {
           ...next,
-          confs: { ...next.confs, [m.request_id]: c ? { ...c, status } : { req: { request_id: m.request_id, summary: m.summary, action: { type: "unknown" }, expires_in_s: 0 }, status } },
+          confs: { ...next.confs, [m.request_id]: c ? { ...c, status } : { req: { request_id: m.request_id, summary: m.summary }, status } },
         };
       }
       return next;
@@ -90,9 +94,9 @@ function reduce(s: S, a: A): S {
 type Ctx = S & {
   dispatch: (m: WsMessage) => void;
   reload: () => Promise<void>;
-  noteSettle: (ep: string, cap: string, phase: SettlePhase) => void;
+  noteSettle: (ep: string, cap: string, phase: SettlePhase, settle_s?: number) => void;
   patchConf: (id: string, patch: Partial<Conf>) => void;
-  addConf: (req: ConfirmationRequest) => void;
+  addConf: (req: ConfReq) => void;
 };
 
 const LiveCtx = createContext<Ctx | null>(null);
@@ -133,7 +137,7 @@ export function LiveProvider({ children, onClosed }: { children: ReactNode; onCl
     ...s,
     dispatch: (m) => d({ t: "msg", m }),
     reload,
-    noteSettle: (ep, cap, phase) => d({ t: "settle", key: settleKey(ep, cap), phase }),
+    noteSettle: (ep, cap, phase, settle_s) => d({ t: "settle", key: settleKey(ep, cap), phase, settle_s, now: Date.now() }),
     patchConf: (id, patch) => d({ t: "conf", id, patch }),
     addConf: (req) => d({ t: "confAdd", req }),
   }), [s, reload]);

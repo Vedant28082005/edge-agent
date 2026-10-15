@@ -51,7 +51,7 @@ export function ConfirmationCard({ id }: { id: string }) {
     <div className={`conf conf-${c.status}`} role="group" aria-label="Confirmation required">
       <div className="conf-summary">{c.req.summary}</div>
       <dl className="conf-action">
-        {Object.entries(c.req.action).map(([k, v]) => (
+        {Object.entries(c.req.action ?? {}).map(([k, v]) => (
           <div key={k}><dt>{k}</dt><dd>{typeof v === "string" ? v : JSON.stringify(v)}</dd></div>
         ))}
       </dl>

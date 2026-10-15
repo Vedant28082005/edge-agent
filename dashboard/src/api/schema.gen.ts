@@ -334,7 +334,8 @@ export interface paths {
          *       visible to them, evaluated at delivery time; for `deleted`, by visibility just before deletion); everyone else gets nothing.
          *       The message carries no scene content: the client refetches `GET /scenes`.
          *     * `notification` `{level, text}` is for everything else (e.g. `level: action_blocked`).
-         *     Payloads match `agent-events.md`.
+         *     Payloads match `agent-events.md`. Every message is exactly one member of the `WsMessage` schema (discriminator `type`),
+         *     so clients can generate types from it; `state` is `{type, endpoint_id, values, ts}`.
          *
          *     **Auth: the JWT is NEVER sent in the URL (no `?token=`, no path segment): URLs end up in proxy and access logs.**
          *     Obtain a ticket with `POST /ws/ticket` (single use, 30 s TTL, bound to the user) and pass it on connect, in the `Sec-WebSocket-Protocol` header as
@@ -640,6 +641,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/action-log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * @description Paginated log of device actions (who asked for what, through which path, and how it ended), newest first.
+         *     Rows are one per action and are updated in place as it settles (`moving` -> `settled` / `settle_timeout`).
+         *     It holds NO agent turn traces, prompts, chat text, tool arguments, tokens or secrets; traces are a different
+         *     store that this route never reads. Filters combine with AND. Pagination is by opaque `cursor` (stable under
+         *     inserts); `limit` default 50, max 200. Reading the log is itself audit-logged.
+         */
+        get: operations["adminActionLog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -674,6 +698,8 @@ export interface components {
             max?: number;
             values?: string[];
             unit?: string;
+            /** @description Motion capabilities only (e.g. `position`): worst-case seconds to reach a target, as announced. A set on it answers `status: moving` and the result arrives as `action_settled` / `action_settle_timeout`; the dashboard shows a moving state for up to this long. Absent for instant capabilities and sensors. */
+            settle_s?: number;
         };
         Endpoint: {
             endpoint_id: components["schemas"]["EndpointId"];
@@ -726,6 +752,247 @@ export interface components {
             owner?: string;
             broken?: boolean;
         };
+        Scalar: boolean | number | string;
+        /** @enum {string} */
+        ActionStatus: "done" | "moving" | "settled" | "settle_timeout" | "failed" | "blocked" | "confirmation_required" | "declined" | "expired" | "denied";
+        ActionLogEntry: {
+            id: number;
+            /** @description Unix seconds the action was requested */
+            ts: number;
+            /** @description Requesting user id; `household` for non-user triggers (automations, perception) */
+            user_id: string;
+            /** @enum {string} */
+            source: "direct" | "agent" | "scene" | "automation" | "admin";
+            /** @enum {string} */
+            kind: "set_state" | "run_scene";
+            node_id?: components["schemas"]["NodeId"] | null;
+            endpoint_id?: components["schemas"]["EndpointId"] | null;
+            scene_id?: string | null;
+            capability?: string | null;
+            value?: components["schemas"]["Scalar"] | null;
+            status: components["schemas"]["ActionStatus"];
+            /** @description Error code from mcp-tools.md */
+            error?: string | null;
+            call_id?: string | null;
+            elapsed_ms?: number | null;
+        };
+        ActionLogPage: {
+            items: components["schemas"]["ActionLogEntry"][];
+            /** @description null on the last page */
+            next_cursor: string | null;
+        };
+        ConfirmationRequired: {
+            /** @constant */
+            error: "confirmation_required";
+            /** @description Server-built from registry labels (admin-set, sanitized), e.g. `Unlock Front door?`. Clients display it as is. */
+            summary: string;
+            action: components["schemas"]["ConfirmAction"];
+            action_hash: string;
+            /** @description TTL a token minted now would have */
+            expires_in_s?: number;
+        };
+        /** @description The hashed action as carried by `confirmation_request` (agent-events.md); `run_scene` uses `scene_id` + canonical `actions`. */
+        EventAction: {
+            /** @constant */
+            type: "set_state";
+            endpoint_id: components["schemas"]["EndpointId"];
+            capability: string;
+            value: components["schemas"]["Scalar"];
+        } | {
+            /** @constant */
+            type: "run_scene";
+            scene_id: string;
+            actions: {
+                endpoint_id: components["schemas"]["EndpointId"];
+                capability: string;
+                value: components["schemas"]["Scalar"];
+            }[];
+        };
+        SettledFields: {
+            call_id: string;
+            endpoint_id: components["schemas"]["EndpointId"];
+            capability: string;
+            value: components["schemas"]["Scalar"];
+            observed: components["schemas"]["Scalar"];
+            elapsed_ms: number;
+        };
+        SettleTimeoutFields: {
+            call_id: string;
+            endpoint_id: components["schemas"]["EndpointId"];
+            capability: string;
+            value: components["schemas"]["Scalar"];
+            observed: components["schemas"]["Scalar"] | null;
+            settle_s: number;
+        };
+        ConfirmationRequestFields: {
+            request_id: string;
+            summary: string;
+            action: components["schemas"]["EventAction"];
+            action_hash: string;
+            expires_in_s: number;
+        };
+        ConfirmationDeclinedFields: {
+            request_id: string;
+            summary: string;
+        };
+        ConfirmationExpiredFields: {
+            request_id: string;
+            summary: string;
+            /** @enum {string} */
+            reason: "no_response" | "token_expired";
+        };
+        AsyncResultFields: {
+            ref: string;
+            /** @enum {string} */
+            kind: "vision";
+            text: string;
+            latency_ms: number;
+        };
+        /**
+         * @description Scheduler route that produced a reply (ARCHITECTURE 5). `fast` rule/grammar path, `llm` tool-calling loop,
+         *     `sensor` direct `read_sensor`, `yolo` person/object presence, `vlm` VLM question, `vision` legacy umbrella for
+         *     a vision answer that does not say which model (kept for compatibility; new code emits `yolo` / `vlm`).
+         *     Clients MUST treat an unknown value as an opaque label, so a later route is not breaking.
+         * @enum {string}
+         */
+        Route: "fast" | "llm" | "vision" | "sensor" | "yolo" | "vlm";
+        /** @description One WebSocket message. Discriminator `type`. Messages are exactly these shapes (no extra properties); adding a type or field is a contract change. */
+        WsMessage: {
+            /** @constant */
+            type: "state";
+            endpoint_id: components["schemas"]["EndpointId"];
+            values: {
+                [key: string]: components["schemas"]["Scalar"];
+            };
+            ts: number;
+        } | {
+            /** @constant */
+            type: "perception";
+            /** @description A perception event (perception-event.schema.json) */
+            event: {
+                [key: string]: unknown;
+            };
+        } | {
+            /** @constant */
+            type: "scenes_changed";
+            scene_id: string;
+            /** @enum {string} */
+            change: "created" | "updated" | "deleted";
+        } | {
+            /** @constant */
+            type: "registry_changed";
+            version: number;
+            endpoint_ids: components["schemas"]["EndpointId"][];
+        } | {
+            /** @constant */
+            type: "notification";
+            /** @description Open vocabulary, e.g. `info`, `action_blocked`; unknown levels display as info */
+            level: string;
+            text: string;
+        } | (components["schemas"]["AsyncResultFields"] & {
+            /** @constant */
+            type: "async_result";
+        }) | (components["schemas"]["ConfirmationRequestFields"] & {
+            /** @constant */
+            type: "confirmation_request";
+        }) | (components["schemas"]["ConfirmationDeclinedFields"] & {
+            /** @constant */
+            type: "confirmation_declined";
+        }) | (components["schemas"]["ConfirmationExpiredFields"] & {
+            /** @constant */
+            type: "confirmation_expired";
+        }) | (components["schemas"]["SettledFields"] & {
+            /** @constant */
+            type: "action_settled";
+        }) | (components["schemas"]["SettleTimeoutFields"] & {
+            /** @constant */
+            type: "action_settle_timeout";
+        });
+        SseEnvelope: {
+            /** @description Monotonic per request */
+            seq: number;
+            req_id: string;
+        };
+        /**
+         * @description A `/chat` SSE frame as parsed by the client: `{event, data}` (`event:` line + parsed `data:` JSON). `data` always
+         *     carries `seq` and `req_id`. The confirmation token never appears in any event.
+         */
+        SseEvent: {
+            /** @constant */
+            event: "status";
+            data: components["schemas"]["SseEnvelope"] & {
+                text: string;
+            };
+        } | {
+            /** @constant */
+            event: "tool_call";
+            data: components["schemas"]["SseEnvelope"] & {
+                call_id: string;
+                /** @enum {string} */
+                tool: "list_devices" | "get_state" | "set_state" | "run_scene" | "read_sensor";
+                args: {
+                    [key: string]: unknown;
+                };
+            };
+        } | {
+            /** @constant */
+            event: "tool_result";
+            data: components["schemas"]["SseEnvelope"] & {
+                call_id: string;
+                /** @enum {string} */
+                tool: "list_devices" | "get_state" | "set_state" | "run_scene" | "read_sensor";
+                result: {
+                    [key: string]: unknown;
+                };
+                ok: boolean;
+            };
+        } | {
+            /** @constant */
+            event: "token";
+            data: components["schemas"]["SseEnvelope"] & {
+                text: string;
+            };
+        } | {
+            /** @constant */
+            event: "final";
+            data: components["schemas"]["SseEnvelope"] & {
+                text: string;
+                route: components["schemas"]["Route"];
+                latency_ms: number;
+            };
+        } | {
+            /** @constant */
+            event: "error";
+            data: components["schemas"]["SseEnvelope"] & {
+                /** @enum {string} */
+                code: "llm_busy" | "vision_unavailable" | "budget_exceeded" | "bad_request";
+                message: string;
+            };
+        } | {
+            /** @constant */
+            event: "async_result";
+            data: components["schemas"]["SseEnvelope"] & components["schemas"]["AsyncResultFields"];
+        } | {
+            /** @constant */
+            event: "confirmation_request";
+            data: components["schemas"]["SseEnvelope"] & components["schemas"]["ConfirmationRequestFields"];
+        } | {
+            /** @constant */
+            event: "confirmation_declined";
+            data: components["schemas"]["SseEnvelope"] & components["schemas"]["ConfirmationDeclinedFields"];
+        } | {
+            /** @constant */
+            event: "confirmation_expired";
+            data: components["schemas"]["SseEnvelope"] & components["schemas"]["ConfirmationExpiredFields"];
+        } | {
+            /** @constant */
+            event: "action_settled";
+            data: components["schemas"]["SseEnvelope"] & components["schemas"]["SettledFields"];
+        } | {
+            /** @constant */
+            event: "action_settle_timeout";
+            data: components["schemas"]["SseEnvelope"] & components["schemas"]["SettleTimeoutFields"];
+        };
         ConsumeRequest: {
             /** @description 256-bit random */
             token: string;
@@ -766,6 +1033,10 @@ export interface components {
             /** @description Permanent scene id */
             scene?: string;
             scene_name?: string;
+            /** @description With `status: needs_confirmation`: server-built prompt text, shown verbatim (same rule as `ConfirmationRequired`) */
+            summary?: string;
+            /** @description With `status: needs_confirmation`: canonical hash of `{actions: needs_confirmation, scene_id, type: run_scene}` */
+            action_hash?: string;
             /** @enum {string} */
             error?: "unknown_scene" | "scene_broken";
             /** @enum {string} */
@@ -1065,13 +1336,18 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description Nothing executed: `confirmation_required` (risk:confirm without a valid token) or `endpoint_offline` */
+            /**
+             * @description Nothing executed: `confirmation_required` (risk:confirm without a valid token) or `endpoint_offline`.
+             *     For `confirmation_required` the body is a `ConfirmationRequired`: a server-built `summary` (clients show it
+             *     verbatim, no client wording), the exact `action` to send to `POST /confirmations` (direct flow) and its
+             *     `action_hash`. Other 409s keep the plain `Error` shape.
+             */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Error"];
+                    "application/json": components["schemas"]["ConfirmationRequired"] | components["schemas"]["Error"];
                 };
             };
             502: components["responses"]["BadGateway"];
@@ -1323,7 +1599,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description SSE stream */
+            /** @description SSE stream. Each frame's `event:` name and JSON `data:` are described by `SseEvent` (`{event, data}` as parsed by the client). */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2065,6 +2341,49 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    adminActionLog: {
+        parameters: {
+            query?: {
+                node_id?: components["schemas"]["NodeId"];
+                endpoint_id?: components["schemas"]["EndpointId"];
+                user_id?: string;
+                status?: components["schemas"]["ActionStatus"];
+                /** @description Unix seconds, inclusive */
+                from?: number;
+                /** @description Unix seconds, exclusive */
+                to?: number;
+                limit?: number;
+                /** @description `next_cursor` of the previous page */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionLogPage"];
+                };
+            };
+            /** @description Bad filter, `from` after `to`, or bad `cursor` (`bad_request`) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
 }

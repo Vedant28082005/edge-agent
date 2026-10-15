@@ -13,8 +13,9 @@ export function createSseParser(emit: (e: SseEvent) => void) {
       const line = buf.slice(0, i);
       buf = buf.slice(i + (buf[i] === "\r" ? 2 : 1));
       if (line === "") {
+        // unknown event names fall through the consumer's switch
         if (data.length) {
-          try { emit({ event, data: JSON.parse(data.join("\n")) }); } catch { /* malformed event dropped */ }
+          try { emit({ event, data: JSON.parse(data.join("\n")) } as SseEvent); } catch { /* malformed event dropped */ }
         }
         event = "message"; data = [];
       } else if (line.startsWith("event:")) event = line.slice(6).trim();

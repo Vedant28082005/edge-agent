@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
+import type { ConfirmationRequired } from "../api/events";
 import type { Capability, Endpoint, SetResult } from "../api/types";
 import { explain } from "../errors";
 import { settleKey, useLive, type Settle } from "../live";
@@ -8,12 +9,25 @@ type Value = boolean | number | string;
 
 const PHASE_LABEL = { accepted: "accepted", settling: "settling", settled: "settled", settle_timeout: "settle timeout" } as const;
 
+// While settling, the indicator runs for at most the capability's announced settle_s. If the result message never
+// arrives (lost socket), it stops claiming motion once that time is up.
 export function SettleTrail({ s }: { s?: Settle }) {
-  if (!s || !s.phases.length) return null;
-  const last = s.phases[s.phases.length - 1];
+  const last = s?.phases[s.phases.length - 1];
+  const deadline = last === "settling" ? s?.deadline : undefined;
+  const [lapsed, setLapsed] = useState(false);
+  useEffect(() => {
+    setLapsed(false);
+    if (deadline === undefined) return;
+    const left = deadline - Date.now();
+    if (left <= 0) { setLapsed(true); return; }
+    const t = setTimeout(() => setLapsed(true), left);
+    return () => clearTimeout(t);
+  }, [deadline]);
+  if (!s || !last) return null;
   return (
     <span className={`settle settle-${last}`} role="status" aria-label="motion progress">
       {s.phases.map((p) => PHASE_LABEL[p]).join(" → ")}
+      {last === "settling" && s.settle_s != null ? (lapsed ? ` (no result after ${s.settle_s}s)` : ` (up to ${s.settle_s}s)`) : ""}
       {last === "settled" && s.elapsed_ms != null ? ` (${(s.elapsed_ms / 1000).toFixed(1)}s)` : ""}
       {last === "settle_timeout" ? ` (did not reach target in ${s.settle_s ?? "?"}s, observed ${s.observed == null ? "none" : String(s.observed)})` : ""}
     </span>
@@ -25,7 +39,8 @@ function CapControl({ ep, cap }: { ep: Endpoint; cap: Capability }) {
   const cur = ep.state?.[cap.id];
   const [draft, setDraft] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [pendingValue, setPendingValue] = useState<Value | null>(null);
+  // The server's own prompt (summary) and the exact action to mint for; the client writes no confirm text of its own.
+  const [pending, setPending] = useState<{ value: Value; summary: string; action: ConfirmationRequired["action"] } | null>(null);
   const [busy, setBusy] = useState(false);
   const disabled = !ep.online || !ep.enabled || busy;
 
@@ -36,27 +51,26 @@ function CapControl({ ep, cap }: { ep: Endpoint; cap: Capability }) {
       const r = await api<SetResult>("POST", `/devices/${ep.endpoint_id}/set`, { capability: cap.id, value, ...(token ? { confirmation_token: token } : {}) });
       if (!r.ok) { setErr(explain(r.error ?? "failed")); return; }
       noteSettle(ep.endpoint_id, cap.id, "accepted");
-      if (r.status === "moving") noteSettle(ep.endpoint_id, cap.id, "settling");
+      if (r.status === "moving") noteSettle(ep.endpoint_id, cap.id, "settling", cap.settle_s);
     } catch (e) {
       const code = (e as { code?: string }).code;
-      if (code === "confirmation_required") setPendingValue(value);
+      const body = (e as { body?: Partial<ConfirmationRequired> }).body;
+      if (code === "confirmation_required" && body?.summary && body.action) setPending({ value, summary: body.summary, action: body.action });
       else setErr(explain(e));
     } finally { setBusy(false); setDraft(null); }
   };
 
   // Direct flow for risk:confirm: the gateway mints the token on POST /confirmations {action}; we only pass it along.
   const confirmDirect = async () => {
-    if (pendingValue === null) return;
+    if (pending === null) return;
     setBusy(true); setErr(null);
     try {
-      const m = await api<{ confirmation_token?: string }>("POST", "/confirmations", {
-        action: { type: "set_state", endpoint_id: ep.endpoint_id, capability: cap.id, value: pendingValue },
-      });
-      const v = pendingValue;
-      setPendingValue(null);
+      const m = await api<{ confirmation_token?: string }>("POST", "/confirmations", { action: pending.action });
+      const v = pending.value;
+      setPending(null);
       setBusy(false);
       await send(v, m.confirmation_token);
-    } catch (e) { setErr(explain(e)); setPendingValue(null); } finally { setBusy(false); }
+    } catch (e) { setErr(explain(e)); setPending(null); } finally { setBusy(false); }
   };
 
   const unit = cap.unit ? ` ${cap.unit}` : "";
@@ -97,10 +111,10 @@ function CapControl({ ep, cap }: { ep: Endpoint; cap: Capability }) {
       <span className="cap-name">{cap.id}</span>
       {control}
       <SettleTrail s={settle[settleKey(ep.endpoint_id, cap.id)]} />
-      {pendingValue !== null && (
+      {pending !== null && (
         <div className="conf" role="group" aria-label="Confirmation required">
-          <p>Confirm: set {ep.name} {cap.id} to {String(pendingValue)}?</p>
-          <div className="row"><button className="primary" onClick={confirmDirect} disabled={busy}>Confirm</button><button onClick={() => setPendingValue(null)}>Cancel</button></div>
+          <p>{pending.summary}</p>
+          <div className="row"><button className="primary" onClick={confirmDirect} disabled={busy}>Confirm</button><button onClick={() => setPending(null)}>Cancel</button></div>
         </div>
       )}
       {err && <span className="err" role="alert">{err}</span>}

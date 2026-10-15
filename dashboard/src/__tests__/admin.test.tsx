@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { server } from "../test/server";
 import { route } from "../test/contract";
 import { baseRoutes } from "../test/fixtures";
-import type { Node, User } from "../api/types";
+import type { ActionLogEntry, Node, User } from "../api/types";
 import { openApp } from "./helpers";
 
 const pending: Node = {
@@ -13,6 +13,11 @@ const users: User[] = [
   { user_id: "u1", username: "alice", role: "member", rooms: ["bedroom"] },
   { user_id: "u2", username: "guest1", role: "guest", rooms: ["hall"] },
 ];
+
+const entry = (id: number, over: Partial<ActionLogEntry> = {}): ActionLogEntry => ({
+  id, ts: 1_700_000_000 + id, user_id: "u1", source: "direct", kind: "set_state", endpoint_id: "ep_00000001",
+  capability: "power", value: true, status: "done", elapsed_ms: 120, ...over,
+});
 
 describe("admin", () => {
   it("hides the Admin tab for non-admins and never calls /admin/*", async () => {
@@ -93,5 +98,58 @@ describe("admin", () => {
     await user.type(screen.getByLabelText("New rooms"), "living, hall");
     await user.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(body).toEqual({ username: "visitor", password: "long-enough-pw", role: "guest", rooms: ["living", "hall"] }));
+  });
+
+  it("action log: filters go to the query, cursor pages append, errors are explained", async () => {
+    const urls: URL[] = [];
+    server.use(
+      route("get", "/admin/nodes", () => ({ json: [] })),
+      route("get", "/admin/users", () => ({ json: users })),
+      route("get", "/admin/action-log", ({ request }) => {
+        const u = new URL(request.url);
+        urls.push(u);
+        if (u.searchParams.get("user_id") === "bad") return { status: 400, json: { error: "bad_request" } };
+        if (u.searchParams.get("cursor") === "c1") return { json: { items: [entry(1, { status: "settled" })], next_cursor: null } };
+        if (u.searchParams.get("status") === "denied") return { json: { items: [entry(9, { status: "denied", error: "forbidden" })], next_cursor: null } };
+        return { json: { items: [entry(3), entry(2, { source: "agent", kind: "run_scene", scene_id: "movie", endpoint_id: null, capability: null, value: null, status: "blocked", error: "confirmation_required" })], next_cursor: "c1" } };
+      }),
+      ...baseRoutes("admin"),
+    );
+    const { user } = await openApp("admin");
+    await user.click(screen.getByRole("button", { name: "admin" }));
+    const table = await screen.findByRole("table", { name: "Action log" });
+    await waitFor(() => expect(within(table).getAllByRole("row")).toHaveLength(3)); // header + 2
+    expect(within(table).getByText("run_scene movie")).toBeInTheDocument();
+    expect(urls[0].search).toBe("");
+
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(within(table).getAllByRole("row")).toHaveLength(4));
+    expect(urls[1].searchParams.get("cursor")).toBe("c1");
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument(); // next_cursor null
+
+    await user.selectOptions(screen.getByLabelText("Filter status"), "denied");
+    await user.type(screen.getByLabelText("Filter endpoint"), "ep_00000003");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(within(table).getAllByRole("row")).toHaveLength(2)); // replaced, not appended
+    const last = urls[urls.length - 1];
+    expect(last.searchParams.get("status")).toBe("denied");
+    expect(last.searchParams.get("endpoint_id")).toBe("ep_00000003");
+    expect(last.searchParams.has("cursor")).toBe(false);
+
+    await user.type(screen.getByLabelText("Filter user"), "bad");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(await screen.findByText("The request was not valid.")).toBeInTheDocument();
+  });
+
+  it("action log: 403 is reported", async () => {
+    server.use(
+      route("get", "/admin/nodes", () => ({ json: [] })),
+      route("get", "/admin/users", () => ({ json: users })),
+      route("get", "/admin/action-log", () => ({ status: 403, json: { error: "forbidden" } })),
+      ...baseRoutes("admin"),
+    );
+    const { user } = await openApp("admin");
+    await user.click(screen.getByRole("button", { name: "admin" }));
+    expect((await screen.findAllByRole("alert")).some((a) => a.textContent === "You are not allowed to do that.")).toBe(true);
   });
 });

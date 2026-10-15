@@ -13,3 +13,6 @@ export type TokenPair = S["TokenPair"];
 export type ForgetUsage = S["ForgetUsage"];
 export type ApiErrorBody = S["Error"];
 export type Risk = S["Risk"];
+export type ActionStatus = S["ActionStatus"];
+export type ActionLogEntry = S["ActionLogEntry"];
+export type ActionLogPage = S["ActionLogPage"];
