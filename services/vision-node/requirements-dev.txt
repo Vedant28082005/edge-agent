@@ -1,0 +1,10 @@
+# Dev PC (no onnxruntime needed: the ONNX backend is exercised on synthetic tensors only)
+starlette>=0.37
+uvicorn>=0.30
+httpx>=0.27
+jsonschema>=4.21
+pyyaml
+pillow>=10.3
+numpy>=1.26
+pytest
+pytest-timeout

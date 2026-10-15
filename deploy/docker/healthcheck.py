@@ -1,4 +1,4 @@
-"""Container HEALTHCHECK helper (stdlib only). Usage: healthcheck.py PORT PATH [200|alive]
+"""Container HEALTHCHECK helper (stdlib only). Usage: healthcheck.py PORT PATH [200|alive] [HOST]
 
 200    -> the path must answer HTTP 200 (device-hub /health is open).
 alive  -> any HTTP answer below 500 counts, including 401: the gateway and the agent authenticate every route, and
@@ -7,9 +7,10 @@ import http.client
 import sys
 
 port, path = int(sys.argv[1]), sys.argv[2]
+host = sys.argv[4] if len(sys.argv) > 4 else "127.0.0.1"   # vision-node listens on its Tailscale address only
 mode = sys.argv[3] if len(sys.argv) > 3 else "200"
 try:
-    c = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
+    c = http.client.HTTPConnection(host, port, timeout=4)
     c.request("GET", path)
     status = c.getresponse().status
 except Exception as e:  # noqa: BLE001

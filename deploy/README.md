@@ -62,6 +62,19 @@ Known limitation: behind `tailscale serve` the gateway sees every client as the 
 
 `setup-pi-brain.sh` creates the system users, generates each secret (256-bit, `openssl rand`), and writes a SHA-256 **verifier** that only the called service can read: `verifiers/device-hub.sha256` (owned by the gateway user) and `hub-verifiers/gateway.sha256`, `hub-verifiers/agent.sha256` (owned by the device-hub user), all mode 600 under `/etc/edge-agent/secrets/`. The called service checks `X-Service-Secret` against the verifier in constant time, so it can authenticate callers without being able to impersonate them (device-hub reads only verifiers, never a secret), and a compromised service leaks only its own scope. Services read their own secret from its file at start-up (never from env vars or argv) and never log it. Containers for device-hub, the gateway and the agent must run as the matching uid. Rotate with `ROTATE_SECRETS=1` and restart the affected services (and the broker, for the hub password). The secrets are generated on the Pi and are never copied from or to the PC or git.
 
+## pi-vision: vision-node, VLM, whisper (UNTESTED on a real Pi)
+
+`compose.vision.yml` runs only **vision-node** (`edge-agent/vision-node`, uid 10104, read-only fs, no volume, host network, listens on `VISION_BIND` = the node's Tailscale address, port 8300). The **VLM** (`llama-server` + Qwen3-VL-2B GGUF + mmproj) and **whisper.cpp** (`whisper-server`, base.en) are native systemd units (`systemd/vision-llama-server.service`, `systemd/vision-whisper-server.service`, env templates next to them), both bound to `127.0.0.1` and reached by vision-node only. Nothing is downloaded by the repo; models are placed by hand in `/var/lib/edge-agent/models/`.
+
+```powershell
+toolsuild-images.ps1 -Platform arm64 -Tag v1 -Save        # includes vision-node
+tools\deploy.ps1 -Target vision -Images -Tag v1 -Up         # code/config/units/compose + image; no secrets
+```
+
+One-time on pi-vision (by hand, root): create user `edge-vision` (the units; uid free) and dirs; copy `systemd/vision-*.service` to `/etc/systemd/system/`, the `*.env.template` files to `/etc/edge-agent/vision-llama.env` and `vision-whisper.env` (edit model paths); copy `config/vision-node.json` to `/etc/edge-agent/config/`; put `VISION_BIND=<tailscale ip>` in `deploy/.env`; `systemctl enable --now vision-llama-server vision-whisper-server`.
+
+Secret: the agent's `vision-node-api.secret` (`/etc/edge-agent/secrets/vision-node-api.secret` on **pi-brain**, mode 600, owned by the agent user, 256-bit random base64) is NOT created by `setup-pi-brain.sh` yet. Generate it on pi-brain, compute its SHA-256 there (`sha256sum`, hex only) and write **only the hex digest** to `/etc/edge-agent/secrets/verifiers/agent.sha256` on pi-vision (mode 600, owner uid 10104). pi-vision never sees the secret; it is different from the hub and yolo-node secrets. Tailnet ACL: only `pi-brain` may reach `pi-vision:8300`.
+
 ## Certificate lifecycle
 
 - **CA**: 10 years (3650 days). **Server certificate** (SANs: `mosquitto`, the Pi's LAN IP, its Tailscale/LAN names, `localhost`): 3 years by default (`-ServerDays`), always issued by the same CA. Both certificates are generated with `notBefore` one day in the past so a slightly slow clock on the Pi or a board does not make them "not yet valid" (needs OpenSSL 3.4+; Git for Windows 2.50+ has it).
@@ -76,6 +89,7 @@ Known limitation: behind `tailscale serve` the gateway sees every client as the 
 | File | Purpose |
 |---|---|
 | `compose.yml` | mosquitto + device-hub + gateway + agent (production, ARM64) |
+| `compose.vision.yml` | pi-vision: vision-node (VLM and whisper are native systemd units, `systemd/vision-*`) |
 | `compose.dev.yml` | Overlay: broker on 127.0.0.1, no auto-restart (use `up -d mosquitto`) |
 | `docker/` | Dockerfile per service, pinned `requirements-*.lock`, `healthcheck.py` |
 | `config/` | non-secret service JSON (`device-hub.json.template`, `gateway.json`, `agent.json`) |

@@ -1,0 +1,34 @@
+# vision-node image (pi-vision). Build context = repo root:
+#   docker buildx build -f deploy/docker/Dockerfile.vision-node --platform linux/arm64 .
+# Wheels only (--only-binary=:all:, pinned lock file). ffmpeg (Debian package, audio -> 16 kHz mono) is the one apt package;
+# the final image has no compiler, pip or build tools. Runs as fixed uid 10104 with a read-only root filesystem and
+# NO writable volume: the node never persists anything (compose adds a 16 MiB tmpfs on /tmp that the service does not use).
+# llama-server and whisper.cpp are NOT in this image: they run natively under systemd and are reached over loopback.
+FROM python:3.11-slim-bookworm AS build
+COPY deploy/docker/requirements-vision-node.lock /tmp/requirements.lock
+# TODO(relock): once requirements-vision-node.lock is regenerated with tools\build-images.ps1 -Relock it pins onnxruntime
+# and the second install line below goes away.
+RUN python -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir --only-binary=:all: -r /tmp/requirements.lock \
+ && (grep -q '^onnxruntime==' /tmp/requirements.lock || /opt/venv/bin/pip install --no-cache-dir --only-binary=:all: 'onnxruntime>=1.18') \
+ && /opt/venv/bin/pip uninstall -y pip >/dev/null
+
+FROM python:3.11-slim-bookworm
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PATH=/opt/venv/bin:$PATH
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 10104 edge \
+ && useradd --system --uid 10104 --gid 10104 --no-create-home --shell /usr/sbin/nologin edge \
+ && pip uninstall -y pip setuptools wheel >/dev/null 2>&1 || true
+COPY --from=build /opt/venv /opt/venv
+COPY services/vision-node/vision_node /app/vision_node
+COPY contracts /app/contracts
+COPY deploy/docker/healthcheck.py /app/healthcheck.py
+WORKDIR /app
+USER 10104:10104
+EXPOSE 8300
+# VISION_BIND (compose) is the Tailscale address the node listens on; the mock/smoke run listens on 127.0.0.1.
+HEALTHCHECK --interval=30s --timeout=6s --start-period=40s --retries=3 CMD python /app/healthcheck.py 8300 /health 200 "${VISION_BIND:-127.0.0.1}"
+ENTRYPOINT ["python", "-m", "vision_node"]
+CMD ["--config", "/etc/edge-agent/config/vision-node.json"]

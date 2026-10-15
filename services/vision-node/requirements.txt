@@ -1,0 +1,10 @@
+# Pure Python, or manylinux aarch64 wheels (pillow, numpy, onnxruntime, PyYAML, rpds-py). No GPU, no C toolchain on the Pi.
+starlette>=0.37
+uvicorn>=0.30
+httpx>=0.27
+jsonschema>=4.21
+pyyaml
+pillow>=10.3
+# YOLOv8n fallback (CPU, ONNX Runtime)
+numpy>=1.26
+onnxruntime>=1.18
