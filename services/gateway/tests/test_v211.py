@@ -504,7 +504,9 @@ def test_declined_and_expired_confirmations_are_logged(gw):
 # ------------------------------------------------------------------ regression: the real agent differs from the mock
 # e2e-smoke failed 5 steps because the deployed agent (< 1.3.0) has a closed ChatRequest and answered 400 "invalid body" to
 # allowed_rooms / allowed_scenes, while the mock agent had been taught the new fields.
-def test_gateway_survives_an_agent_without_scope_support(gw):
+# The fallback (retry without the scope fields) is opt-in: agent_scope_fallback defaults to False (fail closed).
+def test_gateway_survives_an_agent_without_scope_support_when_fallback_is_enabled(gw):
+    gw.ctx.cfg.agent_scope_fallback = True                                                  # explicit opt-in
     gw.m.agent.scope_support = False
     r = gw.pub.post("/chat", json={"text": "hello"}, headers=gw.h("member"))
     assert r.status_code == 200 and "event: final" in r.text
@@ -516,6 +518,13 @@ def test_gateway_survives_an_agent_without_scope_support(gw):
 
 def test_scope_fallback_can_be_switched_off_to_fail_closed(gw):
     gw.ctx.cfg.agent_scope_fallback = False
+    gw.m.agent.scope_support = False
+    r = gw.pub.post("/chat", json={"text": "hello"}, headers=gw.h("member"))
+    assert r.status_code == 400 and gw.m.agent.requests == []
+
+
+def test_scope_fallback_is_off_by_default(gw):
+    # no agent_scope_fallback assignment here on purpose: this checks the default config
     gw.m.agent.scope_support = False
     r = gw.pub.post("/chat", json={"text": "hello"}, headers=gw.h("member"))
     assert r.status_code == 400 and gw.m.agent.requests == []
