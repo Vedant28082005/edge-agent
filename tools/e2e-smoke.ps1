@@ -6,7 +6,7 @@
   Everything runs under a unique compose project (s11-<random>) on ephemeral loopback ports and a private subnet; all
   generated material (dev CA, secrets, data) lives in the git-ignored deploy\e2e-work\<project>\ and is deleted at the
   end (-Keep to inspect). Only what this script started is torn down: the sim by its PID, the stack by its project name.
-  Scenario: bootstrap-admin, login, provision the simulated nodes, approve + name endpoints, "turn on the bedroom fan"
+  Scenario: bootstrap-admin, login, provision the simulated nodes (+ a third node over fake BLE: wrong PoP refused, correct PoP -> announce -> pending), approve + name endpoints, "turn on the bedroom fan"
   through POST /chat (cmd -> ack -> state -> final SSE), a risk:confirm action through the full token flow, a
   room-restricted guest being refused, a WebSocket ticket connect, a forget that revokes the node's MQTT access.
   Prints PASS/FAIL per step; exit code 1 on any failure, 2 if a precondition is missing.
@@ -21,6 +21,7 @@ $project = "s11-$suffix"
 $work = Join-Path $root "deploy\e2e-work\$project"
 $script:results = @()
 $script:simProc = $null
+$script:bleProc = $null
 $script:bg = @()
 
 function Step([string]$name, [scriptblock]$body) {
@@ -188,7 +189,9 @@ services:
     $adminPw = (Rand 18) + 'aA1'
     Step 'gateway bootstrap-admin (password via stdin) creates the first admin' {
         $pp = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        $o = $adminPw | & docker @compose run --rm -T gateway --config /etc/edge-agent/config/gateway.json bootstrap-admin --username admin --password-stdin 2>&1
+        # PS 5.1 pipes a string to a native exe with a CRLF/encoding that made the gateway reject the login; feed stdin from a UTF-8 (no BOM) LF file instead
+        $pwf = Join-Path $work 'admin.pw.txt'; [IO.File]::WriteAllText($pwf, $adminPw + "`n", (New-Object Text.UTF8Encoding($false)))
+        $o = cmd.exe /c ('docker ' + (($compose | ForEach-Object { '"' + $_ + '"' }) -join ' ') + ' run --rm -T gateway --config /etc/edge-agent/config/gateway.json bootstrap-admin --username admin --password-stdin < "' + $pwf + '" 2>&1')
         Need ($LASTEXITCODE -eq 0 -and ($o -join ' ') -match "admin 'admin' created") ($o -join ' ')
         $true
     }
@@ -386,6 +389,75 @@ print('RESULT', rc[0] if rc else 'none')
         @($x.Json | Where-Object { $_.endpoint_id -eq $lockId -and $_.online }).Count -eq 1
     }
 
+    # ------------------------------------------------------------ BLE provisioning (S2b), no radio: fake GATT peer
+    # A third simulated node boots WITHOUT credentials, opens its BLE window (loopback fake GATT peer) and only joins the
+    # broker after the reference client (tools\sim-esp32 simesp32.provclient = what the dashboard / Flutter app does) has
+    # created an admin provision session and written the encrypted bundle. Real radio / NimBLE / mbedtls are NOT covered.
+    $n3 = 'esp32-a1b2c3d4e503'
+    $bleDir = Join-Path $work 'ble'; New-Item -ItemType Directory -Force $bleDir | Out-Null
+    $bleOut = Join-Path $bleDir 'sim.out.log'; $bleErr = Join-Path $bleDir 'sim.err.log'; $bleStop = Join-Path $bleDir 'sim.stop'
+    $blePort = $null
+    $simDir = Join-Path $root 'tools\sim-esp32'
+    function Prov-Client([string]$popFile) {
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $env:PYTHONPATH = $simDir; $env:PROV_ADMIN_TOKEN = $tok; $env:PROV_WIFI_PASSWORD = 'e2e-sim-wifi-pw'  # scan-ok: test fixture
+        try { $o = & $simPy -I -c "import sys; sys.path.insert(0, sys.argv.pop(1)); from simesp32.provclient import main; sys.exit(main(sys.argv[1:]))" $simDir --peer "127.0.0.1:$blePort" --gateway $base --pop-file $popFile 2>&1 }
+        finally { Remove-Item Env:PYTHONPATH, Env:PROV_ADMIN_TOKEN, Env:PROV_WIFI_PASSWORD -ErrorAction SilentlyContinue; $ErrorActionPreference = $prev }
+        [pscustomobject]@{ Code = $LASTEXITCODE; Out = ($o -join "`n") }
+    }
+    Step 'BLE: a credential-less sim node opens its provisioning window and stays off the broker' {
+        $yaml3 = Join-Path $bleDir 'sim3.yaml'
+        Put $yaml3 @"
+nodes:
+  - node_id: $n3
+    heartbeat_s: 30
+    endpoints:
+      - local_id: l1
+        type: light
+        capabilities:
+          - {id: power, boot_value: false, failsafe_value: false}
+"@
+        $script:bleProc = Start-Process -FilePath $simPy -ArgumentList @('-u', (Join-Path $root 'tools\e2e\run_sim.py'), $bleStop, $yaml3, '--ble-provision', '--ble-pop-dir', (Join-Path $bleDir 'pop'), '--host', 'localhost', '--port', "$mqPort", '--ca', (Join-Path $mq 'certs\ca.crt')) -RedirectStandardOutput $bleOut -RedirectStandardError $bleErr -PassThru -WindowStyle Hidden
+        Wait-Until { (Test-Path $bleOut) -and ((Get-Content $bleOut -Raw) -match 'ble ready') } 30 'ble sim start' | Out-Null
+        $m = [regex]::Match((Get-Content $bleOut -Raw), "BLE-GATT $n3 127\.0\.0\.1:(\d+)")
+        Need $m.Success 'no BLE-GATT line'
+        $script:blePortStr = $m.Groups[1].Value
+        Start-Sleep -Seconds 2
+        $r = Api GET '/admin/nodes' $null $tok
+        Need (@($r.Json | Where-Object { $_.node_id -eq $n3 }).Count -eq 0) 'node announced before it was provisioned'
+        $true
+    }
+    $blePort = $script:blePortStr
+    $popFile = Join-Path $bleDir "pop\$n3.pop"
+    Step 'BLE: a client with the WRONG proof-of-possession is refused (bad_bundle) and nothing is stored' {
+        $wrong = Join-Path $bleDir 'wrong.pop'; Put $wrong 'AAAAAAAAAAAAAAAAAAAAAAAAAA'
+        $c = Prov-Client $wrong
+        Need ($c.Code -eq 1 -and $c.Out -match 'bad_bundle') "exit $($c.Code): $($c.Out)"
+        Start-Sleep -Seconds 1
+        $r = Api GET '/admin/nodes' $null $tok
+        Need (@($r.Json | Where-Object { $_.node_id -eq $n3 }).Count -eq 0) 'node announced after a failed attempt'
+        $true
+    }
+    Step 'BLE: admin provision session + encrypted bundle over the fake GATT peer; node connects, announces, shows as pending' {
+        Need (Test-Path $popFile) 'PoP file missing'
+        $c = Prov-Client $popFile
+        Need ($c.Code -eq 0 -and $c.Out -match '"state": ?"stored"') "exit $($c.Code): $($c.Out)"
+        Wait-Until { (Get-Content $bleOut -Raw) -match "BLE-CONNECTING $n3" } 20 'node connecting' | Out-Null
+        $row = Wait-Until { $r = Api GET '/admin/nodes' $null $tok; $x = @($r.Json | Where-Object { $_.node_id -eq $n3 }); if ($x.Count -eq 1) { $x[0] } } 40 'BLE-provisioned node announced'
+        Need ($row.status -eq 'pending') "expected status pending, got $($row.status)"
+        $true
+    }
+    Step 'BLE: sim log and client output carry no Wi-Fi password, MQTT password or PoP' {
+        Put $bleStop 'stop'
+        if ($script:bleProc) { $script:bleProc.WaitForExit(15000) | Out-Null }
+        $txt = (Get-Content $bleOut -Raw) + (Get-Content $bleErr -Raw)
+        $pop = (Get-Content $popFile -Raw).Trim()
+        Need ($txt.IndexOf('e2e-sim-wifi-pw', [StringComparison]::Ordinal) -lt 0) 'wifi password in the sim log'
+        Need ($txt.IndexOf($pop, [StringComparison]::Ordinal) -lt 0) 'PoP in the sim log'
+        Need ($txt -match '"stored": 1') 'ble stats line missing'
+        $true
+    }
+
     # ------------------------------------------------------------ sim evidence
     Step 'sim stats: commands applied and acks sent by the simulated nodes' {
         Put $stopFile 'stop'
@@ -413,6 +485,7 @@ print('RESULT', rc[0] if rc else 'none')
 finally {
     Write-Host '--- teardown (only what this run started)'
     if ($script:simProc -and -not $script:simProc.HasExited) { Put $stopFile 'stop'; if (-not $script:simProc.WaitForExit(8000)) { Stop-Process -Id $script:simProc.Id -Force } }
+    if ($script:bleProc -and -not $script:bleProc.HasExited) { Put $bleStop 'stop'; if (-not $script:bleProc.WaitForExit(8000)) { Stop-Process -Id $script:bleProc.Id -Force } }
     foreach ($id in $script:bg) { $pr = Get-Process -Id $id -ErrorAction SilentlyContinue; if ($pr) { Stop-Process -Id $id -Force } }
     $ErrorActionPreference = 'Continue'
     if ($script:results | Where-Object { -not $_.Ok }) { & docker @compose logs --no-color --tail 40 2>&1 | ForEach-Object { Write-Host "  | $_" } }
