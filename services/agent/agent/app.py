@@ -30,6 +30,7 @@ from starlette.routing import Route
 
 from .auth import ApiAuth, AuthMiddleware
 from .scope import MISSING, make_scope
+from .sched.images import NodeImage, image_ref
 from .service import Agent
 
 log = logging.getLogger("agent.api")
@@ -117,6 +118,12 @@ def check_images(images: list[dict]) -> str | None:
     return None
 
 
+def decode_images(images: list[dict]) -> list[NodeImage]:
+    """Validated inline images -> RAM-only `NodeImage`s (call after `check_images`). `ref` is mapped to the nodes' stricter pattern."""
+    return [NodeImage(image_ref(im.get("ref"), i), im["media_type"], base64.b64decode(im["data_b64"], validate=True))
+            for i, im in enumerate(images)]
+
+
 def create_app(agent: Agent, auth: ApiAuth | None) -> Starlette:
     """`auth=None` only for `--mock --insecure-no-auth` (enforced by the CLI) and tests."""
 
@@ -136,7 +143,9 @@ def create_app(agent: Agent, auth: ApiAuth | None) -> Starlette:
             return err(429, "llm_busy", "the assistant is busy", {"Retry-After": "5"})
         # Fail closed (scope.py): a missing field is [] for member/guest; null is unrestricted only for admin/member.
         scope = make_scope(body["role"], body.get("allowed_rooms", MISSING), body.get("allowed_scenes", MISSING))
-        ctx = agent.new_request(body["user_id"], body["session_id"], text, body["role"], len(images), scope)
+        ctx = agent.new_request(body["user_id"], body["session_id"], text, body["role"], len(images), scope,
+                                **({"image_data": decode_images(images)} if images else {}))
+        body = images = None                   # the request copy of the base64 is not kept past this point
 
         async def gen():
             try:
