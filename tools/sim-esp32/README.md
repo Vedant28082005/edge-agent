@@ -1,6 +1,6 @@
 # sim-esp32
 
-Python virtual ESP32 nodes that speak the edge-agent contract (`contracts/mqtt.md`, `capabilities.md`, schemas in `contracts/`) like the real firmware: MQTT over TLS, retained announce, status with LWT, state on change + heartbeat, desired-state `cmd` handling with dedup, ack, `identify`, `unprovision`, and the firmware safety behaviour (boot/failsafe/max_on, curtain travel + interlock). It lets device-hub, the agent and the gateway be developed with no hardware. No BLE: credentials come from flags/env (provisioning bypass).
+Python virtual ESP32 nodes that speak the edge-agent contract (`contracts/mqtt.md`, `capabilities.md`, schemas in `contracts/`) like the real firmware: MQTT over TLS, retained announce, status with LWT, state on change + heartbeat, desired-state `cmd` handling with dedup, ack, `identify`, `unprovision`, and the firmware safety behaviour (boot/failsafe/max_on, curtain travel + interlock). It lets device-hub, the agent and the gateway be developed with no hardware. Credentials come from flags/env (provisioning bypass) **or** from a simulated BLE provisioning flow (`--ble-provision`, below).
 
 Every outgoing `announce`, `state` and `ack` is validated against `contracts/*.schema.json` before it is published (a violation is counted, logged and **not sent**). The single exception is the deliberate `malformed_announce` fault.
 
@@ -36,6 +36,23 @@ The hub's dynsec client (or the dev helper `deploy\mosquitto\dynsec-node-user.ps
 | credentials | `--creds-dir DIR` with `<node_id>.cred` files (`username=` / `password=` lines, the format `dynsec-node-user.ps1` writes) | `SIM_MQTT_CREDS_DIR`; or `SIM_MQTT_PASSWORD_<NODE_ID>` (`-`→`_`, upper-case); single node only: `SIM_MQTT_PASSWORD` |
 
 There is deliberately **no password flag** (argv leaks into process lists). Passwords are never logged or printed.
+
+## BLE provisioning mode (S2b, no radio)
+
+```powershell
+# the node starts WITHOUT credentials, opens a fake BLE window (loopback-only GATT peer) and joins the broker only after a client wrote a valid bundle
+.\.venv\Scripts\python.exe -m simesp32 examples\home3.yaml --only esp32-a1b2c3d4e501 --ble-provision --ble-pop-dir C:\path\pops `
+    --host localhost --port 8883 --ca ..\..\deploy\mosquitto\certs\ca.crt
+#  prints:  BLE-GATT esp32-a1b2c3d4e501 127.0.0.1:<port>   then   ble ready
+# the "app" (what the dashboard / Flutter do): admin session from the gateway + encrypted bundle over the fake GATT peer
+$env:PROV_ADMIN_TOKEN = '<admin jwt>'; $env:PROV_WIFI_PASSWORD = '<wifi pw>'
+.\.venv\Scripts\python.exe -m simesp32.provclient --peer 127.0.0.1:<port> --gateway http://127.0.0.1:8080 --pop-file C:\path\pops\esp32-a1b2c3d4e501.pop
+```
+
+The per-board PoP (the "label" secret) is read from `<pop-dir>\<node_id>.pop` (created owner-only if missing, never printed, never on argv). `simesp32/ble.py` is the board side
+(window, PoP mixed into HKDF, lockout, chunking, AES-256-GCM) plus `BleClient`; `tools\e2e-smoke.ps1` runs it against the real hub/gateway (wrong PoP refused, correct PoP ->
+announce -> `pending`). `--ble-use-bundle-endpoint` connects to the broker host from the bundle instead of `--host`. `provclient --bleak <name>` drives a REAL board (optional `bleak`, unverified).
+Protocol, security decisions and the hardware checklist: `firmware/BLE-PROVISIONING.md`.
 
 ## YAML
 
@@ -135,7 +152,7 @@ In YAML under `faults:` or on the CLI as `--fault [NODE_ID:]KEY=VALUE` (repeatab
 
 ## Tests
 
-`run-tests.ps1`: 126 unit tests using an in-memory transport and a manual clock (no sleeping): contract agreement (vocabulary table vs `announce.schema.json`, every capability announces validly, hub-rule rejections), protocol (boot sequence, retained flags, ordering, dedup, all error codes, atomicity, garbage input, identify, unprovision, heartbeat), safety (boot, failsafe, max_on, curtain travel/interlock incl. "never both relays"), faults, CLI/credential handling.
+`run-tests.ps1`: 140 unit tests (incl. 14 BLE provisioning tests) using an in-memory transport and a manual clock (no sleeping): contract agreement (vocabulary table vs `announce.schema.json`, every capability announces validly, hub-rule rejections), protocol (boot sequence, retained flags, ordering, dedup, all error codes, atomicity, garbage input, identify, unprovision, heartbeat), safety (boot, failsafe, max_on, curtain travel/interlock incl. "never both relays"), faults, CLI/credential handling.
 
 ### Integration against the dev broker
 
@@ -150,7 +167,7 @@ It creates three throwaway node users with `dynsec-node-user.ps1` (dev-PC helper
 
 ## Limits / assumptions
 
-- No BLE, Wi-Fi or NTP phases; `ts` is the PC clock. The "no valid time, no TLS" rule of `mqtt.md` is not modelled.
+- BLE only as the fake loopback peer (no radio); no Wi-Fi or NTP phases; `ts` is the PC clock. The "no valid time, no TLS" rule of `mqtt.md` is not modelled.
 - MQTT 3.1.1, clean session, `client_id == username == node_id` (a credentials file with another username is rejected). Nothing is queued while disconnected: publishes are dropped and fresh state goes out on reconnect. A denied publish is only visible to the client under MQTT v5, so the ACL probe in the tests uses v5.
 - Hub liveness is judged by the MQTT link only, not by whether device-hub is actually running.
 - `max_on_s` is supported on bool capabilities only; config rejects it elsewhere.
