@@ -1,0 +1,44 @@
+{
+  "question": "Describe the room",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "lights_on": {
+        "type": "boolean"
+      },
+      "people": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 20
+      },
+      "room_state": {
+        "type": "string",
+        "enum": [
+          "tidy",
+          "messy"
+        ]
+      },
+      "note": {
+        "type": "string",
+        "maxLength": 40
+      },
+      "objects": {
+        "type": "array",
+        "maxItems": 5,
+        "items": {
+          "type": "string",
+          "enum": [
+            "cup",
+            "plate"
+          ]
+        }
+      }
+    },
+    "required": [
+      "lights_on",
+      "people"
+    ]
+  },
+  "max_tokens": 128,
+  "timeout_ms": 20000
+}

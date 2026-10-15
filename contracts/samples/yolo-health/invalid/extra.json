@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "service": "yolo-node",
+  "node": "jetson-yolo",
+  "contract_version": "1.0.0",
+  "mem_available_mb": 1500.0,
+  "queue_depth": 0,
+  "busy": false,
+  "temp_c": 51.0,
+  "engine_loaded": true,
+  "sources_online": 1,
+  "token": "x"
+}

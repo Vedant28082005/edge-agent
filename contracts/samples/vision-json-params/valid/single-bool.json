@@ -1,0 +1,13 @@
+{
+  "question": "Lights?",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "on": {
+        "type": "boolean"
+      }
+    }
+  },
+  "max_tokens": 16,
+  "timeout_ms": 5000
+}

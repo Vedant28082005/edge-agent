@@ -1,0 +1,10 @@
+{
+  "sources": [
+    {
+      "source_id": "cam0",
+      "type": "rtsp",
+      "online": true,
+      "url": "rtsp://u:p@10.0.0.5/s"
+    }
+  ]
+}

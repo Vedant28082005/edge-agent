@@ -1,0 +1,14 @@
+{
+  "question": "x",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "a": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  "max_tokens": 64,
+  "timeout_ms": 5000
+}

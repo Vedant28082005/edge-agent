@@ -1,0 +1,13 @@
+{
+  "question": "x",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "a": {
+        "$ref": "#/defs/a"
+      }
+    }
+  },
+  "max_tokens": 64,
+  "timeout_ms": 5000
+}

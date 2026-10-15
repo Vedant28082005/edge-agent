@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "service": "vision-node",
+  "node": "pi-vision",
+  "contract_version": "1.0.0",
+  "queue_depth": 0,
+  "busy": false,
+  "temp_c": 58.5,
+  "models": [
+    {
+      "name": "qwen3-vl-2b-q4",
+      "loaded": true
+    }
+  ]
+}

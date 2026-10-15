@@ -1,0 +1,541 @@
+openapi: 3.1.0
+info:
+  title: Edge Agent vision-node Internal API
+  version: 1.0.0
+  description: |
+    SERVICE-TO-SERVICE ONLY. How the agent reaches vision-node (`pi-vision`: Qwen3-VL-2B behind llama-server, whisper.cpp,
+    and a YOLOv8n fallback, all behind one priority queue). Changing this file requires bumping info.version. The matching
+    contract for the Jetson is `yolo-node-internal.yaml`; the Python client lives in the agent behind the
+    `PerceptionBackend` interface (`services/agent/agent/sched/router.py`).
+
+    **Transport and reachability.** Plain HTTP on port 8300, bound to the node's Tailscale address only (never `0.0.0.0`,
+    never the LAN). Tailscale (WireGuard) is the transport encryption; the tailnet ACL allows only `pi-brain` to reach
+    `pi-vision:8300`. The agent is the only caller. There is no gateway scope, no user scope and no admin operation.
+
+    **Authentication is MANDATORY on every operation except `GET /health`.** The agent sends `X-Service-Secret`. The
+    secret is a file `/etc/edge-agent/secrets/vision-node-api.secret` on pi-brain (mode 600, owned by the agent user,
+    256-bit random, base64), DIFFERENT from the agent's hub secret and from the yolo-node secret, so a node that sees
+    the header on the wire can replay it nowhere else. vision-node holds only a SHA-256 verifier
+    (`/etc/edge-agent/secrets/verifiers/agent.sha256`, hex, mode 600, owned by the vision-node user) and compares in
+    constant time, exactly like device-hub. Secrets are read from files, never from env/argv, never logged. Missing or
+    unknown secret: 401. No-auth dev mode: `--insecure-no-auth`, accepted only together with `--mock`; a warning is
+    logged on every start.
+
+    **Images and audio (bytes path).** Bytes always arrive in the request, as a `multipart/form-data` upload from the
+    agent (which already holds them, inline from the gateway, see `agent-internal.yaml` `InlineImage`). There is NO
+    by-reference mode: the node never fetches a URL, never calls the gateway and holds no gateway secret, so there is no
+    SSRF surface and no extra credential. `image_ref` is only an opaque correlation id chosen by the agent and echoed
+    back. Limits: image at most 5 MiB, `image/jpeg`, `image/png` or `image/webp` (checked by magic bytes, not by the
+    declared type), at most 4096 x 4096 px / 16 megapixels (else 422 `bad_image`); audio at most 10 MiB and 60 s; whole
+    request at most 6 MiB for images and 11 MiB for audio (413 `payload_too_large`); a `params` part at most 16 KiB.
+    **Nodes never persist images or audio**: held in RAM for the request only, no temp file, no cache of bytes (the
+    30 s answer cache is keyed by a hash and stores the answer text only), and never logged: no bytes, no base64, no
+    question, no answer, no transcript, no filename. Logs carry operation, status, latency and queue depth only.
+
+    **Everything a node returns is untrusted data (CLAUDE.md rule 6).** Responses are closed schemas
+    (`additionalProperties: false`): there is no field that can carry an instruction, a tool call, a URL or a
+    device/scene id, and a consumer discards any unknown field. Free text (`text` of `/v1/vlm/short`, string values in
+    `/v1/vlm/json`, the transcript) is restricted by the node to the ASCII allowlist `[A-Za-z0-9 .,;:!?'()%/_+-]`
+    (control characters, quotes, brackets, backticks, angle brackets, `$`, `@` and non-ASCII are stripped) on one line,
+    with the length limits below; detection labels use `[A-Za-z0-9 _-]{1,32}`, the same as
+    `perception-event.schema.json`. The allowlist limits the alphabet, not the meaning: a short sentence can still say
+    "ignore previous instructions". The agent MUST therefore (a) re-validate every response against this file and drop
+    anything that fails, (b) only ever place node text in the prompt as a quoted data block, never in the system
+    prompt, a tool schema or the tool-call grammar, (c) never derive an endpoint id, scene id, capability, value or
+    confirmation from node text, and (d) prefer the closed forms (`yes|no|unsure`, detection labels and counts) over
+    free text whenever the question allows. Nothing a node returns can add, remove or modify a device or risk level
+    (CLAUDE.md rule 11); the five runtime tools are unchanged.
+
+    **Errors.** JSON `{"error": "<code>", "message": "<fixed text>"}`; `message` is fixed per code and never echoes
+    request content. Codes: `bad_request` 400, `unauthorized` 401, `payload_too_large` 413, `unsupported_media_type`
+    415, `bad_image` 422, `bad_audio` 422, `queue_full` 429 (with `Retry-After`), `model_error` 500,
+    `schema_violation` 502 (the model output did not satisfy the requested schema after the node's retry),
+    `vision_unavailable` 503 (model not loaded, or MemAvailable below 400 MB; the router treats it like a down node),
+    `timeout` 504 (`timeout_ms` or the 25 s node cap exceeded).
+
+    **Scheduling.** One heavy job at a time. Queue bounded at 4 waiting jobs (429 `queue_full` beyond that).
+    `/v1/stt` has priority over the VLM and YOLO operations. Jobs whose `timeout_ms` elapses while still queued are
+    dropped with 504 without running. `latency_ms` is the node's total handling time from the last request byte to the
+    first response byte (queue wait included); `queue_ms` is the part spent waiting. Cost tables should use the
+    caller-measured round trip and may subtract `queue_ms`. Any number labelled latency in docs built from this API is
+    `[measured]` only if observed on the real node, otherwise `[est]`.
+servers:
+  - url: http://pi-vision:8300
+    description: Tailscale MagicDNS name; reachable from pi-brain only (tailnet ACL)
+security:
+  - agentSecret: []
+tags:
+  - name: vlm
+    description: Qwen3-VL-2B questions about an image. Scope agent.
+  - name: stt
+    description: whisper.cpp speech-to-text. Scope agent.
+  - name: detect
+    description: YOLOv8n fallback detection on the Pi (router source `yolo_pi`). Scope agent.
+  - name: system
+    description: Health. Open.
+paths:
+  /health:
+    get:
+      tags: [system]
+      operationId: visionHealth
+      x-scopes: [open]
+      security: []
+      description: |
+        Liveness and readiness. Open, no secret, no prompts or content. Also feeds the router's `update_health` (node
+        name `pi-vision`, `up` = `ok`, `mem_available_mb`); the same figures are published on MQTT as `node_health`
+        (`mqtt.md`).
+      responses:
+        '200': {description: Health, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+  /v1/vlm/yesno:
+    post:
+      tags: [vlm]
+      operationId: visionVlmYesNo
+      x-scopes: [agent]
+      x-router-source: vlm_yesno
+      description: |
+        Answers a yes/no question about one image. Constrained to the three-value enum; the model cannot return prose.
+        Multipart parts: `params` (JSON, `VlmYesNoParams`) and `image` (binary). Router source `vlm_yesno`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [params, image]
+              properties:
+                params: {$ref: '#/components/schemas/VlmYesNoParams'}
+                image: {type: string, format: binary}
+            encoding:
+              params: {contentType: application/json}
+              image: {contentType: 'image/jpeg, image/png, image/webp'}
+      responses:
+        '200': {description: Answer, content: {application/json: {schema: {$ref: '#/components/schemas/VlmYesNoResult'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/QueueFull'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+  /v1/vlm/short:
+    post:
+      tags: [vlm]
+      operationId: visionVlmShort
+      x-scopes: [agent]
+      x-router-source: vlm_short
+      description: |
+        Short open answer (one or two sentences) about one image. Hard-capped by `max_tokens` and `timeout_ms`; the
+        text is restricted to the allowlist in the API description and is untrusted. Router source `vlm_short`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [params, image]
+              properties:
+                params: {$ref: '#/components/schemas/VlmShortParams'}
+                image: {type: string, format: binary}
+            encoding:
+              params: {contentType: application/json}
+              image: {contentType: 'image/jpeg, image/png, image/webp'}
+      responses:
+        '200': {description: Answer, content: {application/json: {schema: {$ref: '#/components/schemas/VlmShortResult'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/QueueFull'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+  /v1/vlm/json:
+    post:
+      tags: [vlm]
+      operationId: visionVlmJson
+      x-scopes: [agent]
+      x-router-source: vlm_json
+      description: |
+        Schema-constrained answer about one image. The caller sends a restricted structural schema (`BoundedSchema`:
+        one flat object of at most 16 fields, each boolean, bounded integer or number, enum string, short string or
+        enum-string array; no `$ref`, no descriptions, no prose) and the node decodes under that schema (grammar
+        constrained) and validates the result before returning it. Output that still violates the schema after one
+        retry is 502 `schema_violation`. Bounded by `max_tokens` and `timeout_ms`. Router source `vlm_json`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [params, image]
+              properties:
+                params: {$ref: '#/components/schemas/VlmJsonParams'}
+                image: {type: string, format: binary}
+            encoding:
+              params: {contentType: application/json}
+              image: {contentType: 'image/jpeg, image/png, image/webp'}
+      responses:
+        '200': {description: Answer, content: {application/json: {schema: {$ref: '#/components/schemas/VlmJsonResult'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/QueueFull'}
+        '500': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+  /v1/stt:
+    post:
+      tags: [stt]
+      operationId: visionStt
+      x-scopes: [agent]
+      description: |
+        Speech to text (whisper.cpp, English model). Multipart parts: `params` (JSON, `SttParams`, may be `{}`) and
+        `audio` (binary: `audio/wav`, `audio/webm`, `audio/mp4` for m4a, `audio/aac`; converted to 16 kHz mono
+        server-side). The post-filter drops junk transcripts (`you`, `[BLANK_AUDIO]`, music notes) and reports it in
+        `filtered` (then `text` is empty). The transcript is untrusted user speech and is never logged by the node.
+        Highest queue priority.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [params, audio]
+              properties:
+                params: {$ref: '#/components/schemas/SttParams'}
+                audio: {type: string, format: binary}
+            encoding:
+              params: {contentType: application/json}
+              audio: {contentType: 'audio/wav, audio/webm, audio/mp4, audio/aac'}
+      responses:
+        '200': {description: Transcript, content: {application/json: {schema: {$ref: '#/components/schemas/SttResult'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/QueueFull'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+  /v1/detect:
+    post:
+      tags: [detect]
+      operationId: visionDetect
+      x-scopes: [agent]
+      x-router-source: yolo_pi
+      description: |
+        YOLOv8n detection on the Pi, used when the Jetson is down or absent. Same request and result shapes as
+        `yolo-node-internal.yaml` `POST /v1/detect` (`DetectParams`, `DetectResult` are byte-identical in both files;
+        `tools\contract_test.py` checks it). Detections are sorted by `conf` descending. Router source `yolo_pi`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [params, image]
+              properties:
+                params: {$ref: '#/components/schemas/DetectParams'}
+                image: {type: string, format: binary}
+            encoding:
+              params: {contentType: application/json}
+              image: {contentType: 'image/jpeg, image/png, image/webp'}
+      responses:
+        '200': {description: Detections, content: {application/json: {schema: {$ref: '#/components/schemas/DetectResult'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/QueueFull'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    agentSecret:
+      type: apiKey
+      in: header
+      name: X-Service-Secret
+      description: |
+        agent-to-vision-node secret (file /etc/edge-agent/secrets/vision-node-api.secret on pi-brain, mode 600, owned
+        by the agent user). vision-node holds a SHA-256 verifier only. Scope `agent`: every operation in this file
+        except the open `GET /health`. Different from the hub secret and the yolo-node secret.
+  responses:
+    Error:
+      description: Error. `error` is one of the codes in the API description; `message` is fixed text per code.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    QueueFull:
+      description: Queue full (`queue_full`); retry after the given seconds
+      headers:
+        Retry-After: {schema: {type: integer, minimum: 1, maximum: 60}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          enum: [bad_request, unauthorized, payload_too_large, unsupported_media_type, bad_image, bad_audio, queue_full,
+                 model_error, schema_violation, vision_unavailable, timeout]
+        message: {type: string, maxLength: 120}
+    ImageRef:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{1,64}$'
+      maxLength: 64
+      description: Opaque correlation id chosen by the agent, echoed back unchanged. Not a way to fetch anything.
+    Question:
+      type: string
+      minLength: 1
+      maxLength: 300
+      description: The user's question, as text. The node strips control characters. It is data for the VLM prompt template, never an instruction channel back to the agent.
+    TimeoutMs:
+      type: integer
+      minimum: 1000
+      maximum: 25000
+      default: 25000
+      description: Hard deadline for the whole job including queue wait. Node cap is 25000.
+    Latency:
+      type: number
+      minimum: 0
+      maximum: 120000
+    SafeText:
+      type: string
+      maxLength: 240
+      pattern: "^[A-Za-z0-9 .,;:!?'()%/_+-]{0,240}$"
+      description: Single line, ASCII allowlist, untrusted.
+    SafeValue:
+      type: string
+      maxLength: 64
+      pattern: "^[A-Za-z0-9 .,;:!?'()%/_+-]{0,64}$"
+      description: Single line, ASCII allowlist, untrusted.
+    VlmYesNoParams:
+      type: object
+      additionalProperties: false
+      required: [question]
+      properties:
+        question: {$ref: '#/components/schemas/Question'}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+        timeout_ms: {$ref: '#/components/schemas/TimeoutMs'}
+    VlmYesNoResult:
+      type: object
+      additionalProperties: false
+      required: [answer, latency_ms, queue_ms, cached]
+      properties:
+        answer: {type: string, enum: ['yes', 'no', unsure]}
+        latency_ms: {$ref: '#/components/schemas/Latency'}
+        queue_ms: {$ref: '#/components/schemas/Latency'}
+        cached: {type: boolean}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+    VlmShortParams:
+      type: object
+      additionalProperties: false
+      required: [question]
+      properties:
+        question: {$ref: '#/components/schemas/Question'}
+        max_tokens: {type: integer, minimum: 8, maximum: 128, default: 48}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+        timeout_ms: {$ref: '#/components/schemas/TimeoutMs'}
+    VlmShortResult:
+      type: object
+      additionalProperties: false
+      required: [text, truncated, latency_ms, queue_ms, cached]
+      properties:
+        text: {$ref: '#/components/schemas/SafeText'}
+        truncated: {type: boolean, description: "True when generation stopped at max_tokens"}
+        latency_ms: {$ref: '#/components/schemas/Latency'}
+        queue_ms: {$ref: '#/components/schemas/Latency'}
+        cached: {type: boolean}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+    FieldName:
+      type: string
+      pattern: '^[a-z][a-z0-9_]{0,31}$'
+      maxLength: 32
+    EnumValue:
+      type: string
+      pattern: '^[a-z0-9][a-z0-9 _-]{0,31}$'
+      maxLength: 32
+    FieldSpec:
+      description: One field of a BoundedSchema. Purely structural; there is no free-text slot that could carry an instruction to the model.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type]
+          properties:
+            type: {const: boolean}
+        - type: object
+          additionalProperties: false
+          required: [type, minimum, maximum]
+          properties:
+            type: {const: integer}
+            minimum: {type: integer, minimum: -1000000, maximum: 1000000}
+            maximum: {type: integer, minimum: -1000000, maximum: 1000000}
+        - type: object
+          additionalProperties: false
+          required: [type, minimum, maximum]
+          properties:
+            type: {const: number}
+            minimum: {type: number, minimum: -1000000, maximum: 1000000}
+            maximum: {type: number, minimum: -1000000, maximum: 1000000}
+        - type: object
+          additionalProperties: false
+          required: [type, enum]
+          properties:
+            type: {const: string}
+            enum: {type: array, minItems: 2, maxItems: 32, uniqueItems: true, items: {$ref: '#/components/schemas/EnumValue'}}
+        - type: object
+          additionalProperties: false
+          required: [type, maxLength]
+          properties:
+            type: {const: string}
+            maxLength: {type: integer, minimum: 1, maximum: 64}
+        - type: object
+          additionalProperties: false
+          required: [type, items, maxItems]
+          properties:
+            type: {const: array}
+            maxItems: {type: integer, minimum: 1, maximum: 16}
+            items:
+              type: object
+              additionalProperties: false
+              required: [type, enum]
+              properties:
+                type: {const: string}
+                enum: {type: array, minItems: 2, maxItems: 32, uniqueItems: true, items: {$ref: '#/components/schemas/EnumValue'}}
+    BoundedSchema:
+      type: object
+      additionalProperties: false
+      required: [type, properties]
+      properties:
+        type: {const: object}
+        properties:
+          type: object
+          minProperties: 1
+          maxProperties: 16
+          propertyNames: {$ref: '#/components/schemas/FieldName'}
+          additionalProperties: {$ref: '#/components/schemas/FieldSpec'}
+        required:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/FieldName'}
+    VlmJsonParams:
+      type: object
+      additionalProperties: false
+      required: [question, schema, max_tokens, timeout_ms]
+      properties:
+        question: {$ref: '#/components/schemas/Question'}
+        schema: {$ref: '#/components/schemas/BoundedSchema'}
+        max_tokens: {type: integer, minimum: 16, maximum: 512}
+        timeout_ms: {$ref: '#/components/schemas/TimeoutMs'}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+    JsonValue:
+      oneOf:
+        - {type: boolean}
+        - {type: number, minimum: -1000000, maximum: 1000000}
+        - {$ref: '#/components/schemas/SafeValue'}
+        - {type: array, maxItems: 16, items: {$ref: '#/components/schemas/SafeValue'}}
+    VlmJsonResult:
+      type: object
+      additionalProperties: false
+      required: [data, latency_ms, queue_ms, cached]
+      properties:
+        data:
+          type: object
+          maxProperties: 16
+          propertyNames: {$ref: '#/components/schemas/FieldName'}
+          additionalProperties: {$ref: '#/components/schemas/JsonValue'}
+          description: Validated against the request schema by the node (field set, types, bounds, enums). Untrusted values.
+        latency_ms: {$ref: '#/components/schemas/Latency'}
+        queue_ms: {$ref: '#/components/schemas/Latency'}
+        cached: {type: boolean}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+    SttParams:
+      type: object
+      additionalProperties: false
+      properties:
+        timeout_ms: {$ref: '#/components/schemas/TimeoutMs'}
+    SttResult:
+      type: object
+      additionalProperties: false
+      required: [text, duration_ms, filtered, latency_ms, queue_ms]
+      properties:
+        text:
+          type: string
+          maxLength: 1000
+          pattern: "^[A-Za-z0-9 .,;:!?'()%/_+-]{0,1000}$"
+          description: English transcript, single line, ASCII allowlist, untrusted. Empty when `filtered` is true.
+        duration_ms: {type: integer, minimum: 0, maximum: 60000, description: Length of the audio clip}
+        filtered: {type: boolean}
+        latency_ms: {$ref: '#/components/schemas/Latency'}
+        queue_ms: {$ref: '#/components/schemas/Latency'}
+    DetectParams:
+      type: object
+      additionalProperties: false
+      properties:
+        min_conf: {type: number, minimum: 0.05, maximum: 1, default: 0.25}
+        max_detections: {type: integer, minimum: 1, maximum: 50, default: 50}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+        timeout_ms: {$ref: '#/components/schemas/TimeoutMs'}
+    Detection:
+      description: Same item as perception-event.schema.json `detections[]`. The label comes from the model's fixed class table, never from free text.
+      type: object
+      additionalProperties: false
+      required: [label, conf, bbox]
+      properties:
+        label: {type: string, pattern: '^[A-Za-z0-9 _-]{1,32}$', maxLength: 32}
+        conf: {type: number, minimum: 0, maximum: 1}
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: {type: number, minimum: 0}
+          description: "[x, y, w, h] in pixels of the submitted image"
+    DetectResult:
+      type: object
+      additionalProperties: false
+      required: [detections, image_width, image_height, model, latency_ms, queue_ms]
+      properties:
+        detections:
+          type: array
+          maxItems: 50
+          items: {$ref: '#/components/schemas/Detection'}
+        image_width: {type: integer, minimum: 1, maximum: 4096}
+        image_height: {type: integer, minimum: 1, maximum: 4096}
+        model: {type: string, pattern: '^[A-Za-z0-9._-]{1,48}$', maxLength: 48}
+        latency_ms: {$ref: '#/components/schemas/Latency'}
+        queue_ms: {$ref: '#/components/schemas/Latency'}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+    Health:
+      type: object
+      additionalProperties: false
+      required: [ok, service, node, contract_version, mem_available_mb, queue_depth, busy, models]
+      properties:
+        ok: {type: boolean, description: "False while models are loading or MemAvailable is below the 400 MB guard"}
+        service: {const: vision-node}
+        node: {type: string, pattern: '^[a-z0-9-]{1,32}$', maxLength: 32}
+        mock: {type: boolean}
+        contract_version: {type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$', maxLength: 16}
+        mem_available_mb: {type: number, minimum: 0}
+        queue_depth: {type: integer, minimum: 0, maximum: 4}
+        busy: {type: boolean}
+        temp_c: {type: [number, 'null']}
+        models:
+          type: array
+          maxItems: 8
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, loaded]
+            properties:
+              name: {type: string, pattern: '^[A-Za-z0-9._-]{1,48}$', maxLength: 48}
+              loaded: {type: boolean}

@@ -1,0 +1,9 @@
+{
+  "answer": "yes",
+  "latency_ms": 2412.5,
+  "queue_ms": 0.0,
+  "cached": false,
+  "tool_call": {
+    "name": "set_state"
+  }
+}
