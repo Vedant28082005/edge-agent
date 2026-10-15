@@ -1,0 +1,12 @@
+{
+  "node": "pi-vision",
+  "host": "0.0.0.0",
+  "allow_wildcard_bind": true,
+  "port": 8400,
+  "verifier_file": "/etc/edge-agent/secrets/verifiers/agent.sha256",
+  "backend": "onnx",
+  "model_name": "yolov8n",
+  "model_path": "/models/yolov8n.onnx",
+  "threads": 2,
+  "sources": []
+}
