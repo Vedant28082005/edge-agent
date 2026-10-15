@@ -33,6 +33,17 @@ def build_parser():
                         "malformed_announce=invalid_json. Prefix with a node_id to target one node.")
     p.add_argument("--mock", action="store_true", help="no broker: in-memory bus, messages echoed to stdout; "
                    "stdin lines '<node_id> <cmd json>' inject commands")
+    p.add_argument("--ble-provision", action="store_true",
+                   help="S2b: nodes start WITHOUT credentials, open a fake BLE window (loopback GATT peer) and connect "
+                        "only after a client wrote a valid bundle (see simesp32.provclient)")
+    p.add_argument("--ble-pop-dir", default=os.environ.get("SIM_BLE_POP_DIR"),
+                   help="folder with one <node_id>.pop file per node (the 'printed label' secret; created if missing)")
+    p.add_argument("--ble-use-bundle-endpoint", action="store_true",
+                   help="connect to the broker host/port from the bundle (default: --host/--port, for hosts the bundle "
+                        "names but this PC cannot resolve)")
+    p.add_argument("--ble-window-s", type=float, default=300.0)
+    p.add_argument("--ble-max-failures", type=int, default=5)
+    p.add_argument("--ble-lock-s", type=float, default=300.0)
     p.add_argument("--check", action="store_true", help="validate the YAML and its announces, print a summary, exit")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -82,6 +93,9 @@ def main(argv=None):
         return 0
 
     clock = Clock()
+    if args.ble_provision:
+        from .bleprov import run_ble
+        return run_ble(args, nodes, validator, clock)
     bus = MemoryBus(echo=print) if args.mock else None
     runtime = []
     try:

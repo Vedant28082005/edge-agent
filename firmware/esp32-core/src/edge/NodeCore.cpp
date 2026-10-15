@@ -282,6 +282,7 @@ bool NodeCore::ledOn(uint32_t now) {
   }
   switch (phase_) {
     case NetPhase::Unconfigured: return (now / 250) % 2 == 0;   // 2 Hz: waiting for configuration
+    case NetPhase::Provisioning: return (now / 125) % 2 == 0;   // 4 Hz: BLE provisioning window open
     case NetPhase::Wifi:
     case NetPhase::Ntp:
     case NetPhase::Mqtt: return (now % 1000) < 100;             // short flash each second: connecting
