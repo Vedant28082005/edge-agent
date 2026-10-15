@@ -1,0 +1,6 @@
+{
+  "type": "confirmation_expired",
+  "request_id": "r1",
+  "summary": "x",
+  "reason": "whenever"
+}

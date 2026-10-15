@@ -1,0 +1,36 @@
+{
+  "registry_version": 12,
+  "devices": [
+    {
+      "endpoint_id": "ep_3fa91c02",
+      "name": "Blinds",
+      "room": "Living room",
+      "tags": [],
+      "type": "cover",
+      "online": true,
+      "risk": "normal",
+      "capabilities": [
+        {
+          "id": "position",
+          "kind": "actuator",
+          "type": "int",
+          "min": 0,
+          "max": 100,
+          "unit": "%",
+          "settle_s": 30
+        }
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "scene_id": "sc_9a8b7c6d",
+      "name": "Good night"
+    },
+    {
+      "scene_id": "sc_00000001",
+      "name": "Old",
+      "broken": true
+    }
+  ]
+}

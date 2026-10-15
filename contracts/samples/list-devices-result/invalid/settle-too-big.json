@@ -1,0 +1,22 @@
+{
+  "registry_version": 1,
+  "devices": [
+    {
+      "endpoint_id": "ep_3fa91c02",
+      "name": "Blinds",
+      "room": "Living room",
+      "tags": [],
+      "type": "cover",
+      "online": true,
+      "risk": "normal",
+      "capabilities": [
+        {
+          "id": "position",
+          "kind": "actuator",
+          "type": "int",
+          "settle_s": 500
+        }
+      ]
+    }
+  ]
+}

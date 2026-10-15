@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.10.0
+  version: 2.11.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -91,7 +91,13 @@ paths:
         '200': {description: Result, content: {application/json: {schema: {$ref: '#/components/schemas/SetResult'}}}}
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
-        '409': {description: "Nothing executed: `confirmation_required` (risk:confirm without a valid token) or `endpoint_offline`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '409':
+          description: |
+            Nothing executed: `confirmation_required` (risk:confirm without a valid token) or `endpoint_offline`.
+            For `confirmation_required` the body is a `ConfirmationRequired`: a server-built `summary` (clients show it
+            verbatim, no client wording), the exact `action` to send to `POST /confirmations` (direct flow) and its
+            `action_hash`. Other 409s keep the plain `Error` shape.
+          content: {application/json: {schema: {anyOf: [{$ref: '#/components/schemas/ConfirmationRequired'}, {$ref: '#/components/schemas/Error'}]}}}
         '502': {$ref: '#/components/responses/BadGateway'}
         '504': {$ref: '#/components/responses/GatewayTimeout'}
   /scenes:
@@ -257,7 +263,9 @@ paths:
                 audio_ref: {type: string, maxLength: 64}
                 image_refs: {type: array, maxItems: 4, items: {type: string, maxLength: 64}}
       responses:
-        '200': {description: SSE stream, content: {text/event-stream: {schema: {type: string}}}}
+        '200':
+          description: SSE stream. Each frame's `event:` name and JSON `data:` are described by `SseEvent` (`{event, data}` as parsed by the client).
+          content: {text/event-stream: {schema: {type: string}, x-event-schema: {$ref: '#/components/schemas/SseEvent'}}}
         '400': {description: "Malformed body or `bad_media_ref`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
         '413': {$ref: '#/components/responses/TooLarge'}
         '429': {$ref: '#/components/responses/TooManyRequests'}
@@ -357,7 +365,8 @@ paths:
           visible to them, evaluated at delivery time; for `deleted`, by visibility just before deletion); everyone else gets nothing.
           The message carries no scene content: the client refetches `GET /scenes`.
         * `notification` `{level, text}` is for everything else (e.g. `level: action_blocked`).
-        Payloads match `agent-events.md`.
+        Payloads match `agent-events.md`. Every message is exactly one member of the `WsMessage` schema (discriminator `type`),
+        so clients can generate types from it; `state` is `{type, endpoint_id, values, ts}`.
 
         **Auth: the JWT is NEVER sent in the URL (no `?token=`, no path segment): URLs end up in proxy and access logs.**
         Obtain a ticket with `POST /ws/ticket` (single use, 30 s TTL, bound to the user) and pass it on connect, in the `Sec-WebSocket-Protocol` header as
@@ -729,6 +738,32 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
 
+  /admin/action-log:
+    get:
+      tags: [admin]
+      operationId: adminActionLog
+      x-required-role: admin
+      description: |
+        Paginated log of device actions (who asked for what, through which path, and how it ended), newest first.
+        Rows are one per action and are updated in place as it settles (`moving` -> `settled` / `settle_timeout`).
+        It holds NO agent turn traces, prompts, chat text, tool arguments, tokens or secrets; traces are a different
+        store that this route never reads. Filters combine with AND. Pagination is by opaque `cursor` (stable under
+        inserts); `limit` default 50, max 200. Reading the log is itself audit-logged.
+      parameters:
+        - {name: node_id, in: query, schema: {$ref: '#/components/schemas/NodeId'}}
+        - {name: endpoint_id, in: query, schema: {$ref: '#/components/schemas/EndpointId'}}
+        - {name: user_id, in: query, schema: {type: string, maxLength: 64}}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/ActionStatus'}}
+        - {name: from, in: query, schema: {type: integer, minimum: 0}, description: "Unix seconds, inclusive"}
+        - {name: to, in: query, schema: {type: integer, minimum: 0}, description: "Unix seconds, exclusive"}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 256}, description: '`next_cursor` of the previous page'}
+      responses:
+        '200': {description: One page, content: {application/json: {schema: {$ref: '#/components/schemas/ActionLogPage'}}}}
+        '400': {description: "Bad filter, `from` after `to`, or bad `cursor` (`bad_request`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
 components:
   securitySchemes:
     bearerAuth:
@@ -805,6 +840,7 @@ components:
         max: {type: number}
         values: {type: array, items: {type: string}}
         unit: {type: string}
+        settle_s: {type: number, minimum: 1, maximum: 120, description: "Motion capabilities only (e.g. `position`): worst-case seconds to reach a target, as announced. A set on it answers `status: moving` and the result arrives as `action_settled` / `action_settle_timeout`; the dashboard shows a moving state for up to this long. Absent for instant capabilities and sensors."}
     Endpoint:
       type: object
       required: [endpoint_id, name, room, type, online, enabled, capabilities]
@@ -871,6 +907,313 @@ components:
             scene_id: {type: string}
             owner: {type: string}
             broken: {type: boolean}
+    Scalar: {oneOf: [{type: boolean}, {type: number}, {type: string}]}
+    ActionStatus: {type: string, enum: [done, moving, settled, settle_timeout, failed, blocked, confirmation_required, declined, expired, denied]}
+    ActionLogEntry:
+      type: object
+      additionalProperties: false
+      required: [id, ts, user_id, source, kind, status]
+      properties:
+        id: {type: integer}
+        ts: {type: integer, description: Unix seconds the action was requested}
+        user_id: {type: string, description: "Requesting user id; `household` for non-user triggers (automations, perception)"}
+        source: {type: string, enum: [direct, agent, scene, automation, admin]}
+        kind: {type: string, enum: [set_state, run_scene]}
+        node_id: {oneOf: [{$ref: '#/components/schemas/NodeId'}, {type: 'null'}]}
+        endpoint_id: {oneOf: [{$ref: '#/components/schemas/EndpointId'}, {type: 'null'}]}
+        scene_id: {type: [string, 'null'], maxLength: 64}
+        capability: {type: [string, 'null'], maxLength: 64}
+        value: {oneOf: [{$ref: '#/components/schemas/Scalar'}, {type: 'null'}]}
+        status: {$ref: '#/components/schemas/ActionStatus'}
+        error: {type: [string, 'null'], maxLength: 64, description: Error code from mcp-tools.md, never free text}
+        call_id: {type: [string, 'null'], maxLength: 64}
+        elapsed_ms: {type: [integer, 'null'], minimum: 0}
+    ActionLogPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/ActionLogEntry'}}
+        next_cursor: {type: [string, 'null'], maxLength: 256, description: null on the last page}
+    ConfirmationRequired:
+      type: object
+      additionalProperties: false
+      required: [error, summary, action, action_hash]
+      properties:
+        error: {const: confirmation_required}
+        summary: {type: string, maxLength: 200, description: "Server-built from registry labels (admin-set, sanitized), e.g. `Unlock Front door?`. Clients display it as is."}
+        action: {$ref: '#/components/schemas/ConfirmAction'}
+        action_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        expires_in_s: {type: integer, minimum: 1, maximum: 300, description: TTL a token minted now would have}
+    EventAction:
+      description: The hashed action as carried by `confirmation_request` (agent-events.md); `run_scene` uses `scene_id` + canonical `actions`.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, endpoint_id, capability, value]
+          properties:
+            type: {const: set_state}
+            endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            capability: {type: string, maxLength: 64}
+            value: {$ref: '#/components/schemas/Scalar'}
+        - type: object
+          additionalProperties: false
+          required: [type, scene_id, actions]
+          properties:
+            type: {const: run_scene}
+            scene_id: {type: string, maxLength: 64}
+            actions:
+              type: array
+              maxItems: 50
+              items:
+                type: object
+                additionalProperties: false
+                required: [endpoint_id, capability, value]
+                properties:
+                  endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+                  capability: {type: string, maxLength: 64}
+                  value: {$ref: '#/components/schemas/Scalar'}
+    SettledFields:
+      type: object
+      required: [call_id, endpoint_id, capability, value, observed, elapsed_ms]
+      properties:
+        call_id: {type: string, maxLength: 64}
+        endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+        capability: {type: string, maxLength: 64}
+        value: {$ref: '#/components/schemas/Scalar'}
+        observed: {$ref: '#/components/schemas/Scalar'}
+        elapsed_ms: {type: integer, minimum: 0}
+    SettleTimeoutFields:
+      type: object
+      required: [call_id, endpoint_id, capability, value, observed, settle_s]
+      properties:
+        call_id: {type: string, maxLength: 64}
+        endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+        capability: {type: string, maxLength: 64}
+        value: {$ref: '#/components/schemas/Scalar'}
+        observed: {oneOf: [{$ref: '#/components/schemas/Scalar'}, {type: 'null'}]}
+        settle_s: {type: number, minimum: 1, maximum: 120}
+    ConfirmationRequestFields:
+      type: object
+      required: [request_id, summary, action, action_hash, expires_in_s]
+      properties:
+        request_id: {type: string, maxLength: 64}
+        summary: {type: string, maxLength: 200}
+        action: {$ref: '#/components/schemas/EventAction'}
+        action_hash: {type: string, pattern: '^[0-9a-f]{64}$'}
+        expires_in_s: {type: integer, minimum: 1, maximum: 300}
+    ConfirmationDeclinedFields:
+      type: object
+      required: [request_id, summary]
+      properties:
+        request_id: {type: string, maxLength: 64}
+        summary: {type: string, maxLength: 200}
+    ConfirmationExpiredFields:
+      type: object
+      required: [request_id, summary, reason]
+      properties:
+        request_id: {type: string, maxLength: 64}
+        summary: {type: string, maxLength: 200}
+        reason: {type: string, enum: [no_response, token_expired]}
+    AsyncResultFields:
+      type: object
+      required: [ref, kind, text, latency_ms]
+      properties:
+        ref: {type: string, maxLength: 64}
+        kind: {type: string, enum: [vision]}
+        text: {type: string, maxLength: 4000}
+        latency_ms: {type: integer, minimum: 0}
+    Route:
+      type: string
+      enum: [fast, llm, vision, sensor, yolo, vlm]
+      description: |
+        Scheduler route that produced a reply (ARCHITECTURE 5). `fast` rule/grammar path, `llm` tool-calling loop,
+        `sensor` direct `read_sensor`, `yolo` person/object presence, `vlm` VLM question, `vision` legacy umbrella for
+        a vision answer that does not say which model (kept for compatibility; new code emits `yolo` / `vlm`).
+        Clients MUST treat an unknown value as an opaque label, so a later route is not breaking.
+    WsMessage:
+      description: "One WebSocket message. Discriminator `type`. Messages are exactly these shapes (no extra properties); adding a type or field is a contract change."
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, endpoint_id, values, ts]
+          properties:
+            type: {const: state}
+            endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            values: {type: object, minProperties: 1, additionalProperties: {$ref: '#/components/schemas/Scalar'}}
+            ts: {type: integer, minimum: 1000000000}
+        - type: object
+          additionalProperties: false
+          required: [type, event]
+          properties:
+            type: {const: perception}
+            event: {type: object, additionalProperties: true, description: A perception event (perception-event.schema.json)}
+        - type: object
+          additionalProperties: false
+          required: [type, scene_id, change]
+          properties:
+            type: {const: scenes_changed}
+            scene_id: {type: string, maxLength: 64}
+            change: {type: string, enum: [created, updated, deleted]}
+        - type: object
+          additionalProperties: false
+          required: [type, version, endpoint_ids]
+          properties:
+            type: {const: registry_changed}
+            version: {type: integer, minimum: 0}
+            endpoint_ids: {type: array, items: {$ref: '#/components/schemas/EndpointId'}}
+        - type: object
+          additionalProperties: false
+          required: [type, level, text]
+          properties:
+            type: {const: notification}
+            level: {type: string, maxLength: 32, description: "Open vocabulary, e.g. `info`, `action_blocked`; unknown levels display as info"}
+            text: {type: string, maxLength: 500}
+        - type: object
+          unevaluatedProperties: false
+          allOf:
+            - {$ref: '#/components/schemas/AsyncResultFields'}
+            - {type: object, required: [type], properties: {type: {const: async_result}}}
+        - type: object
+          unevaluatedProperties: false
+          allOf:
+            - {$ref: '#/components/schemas/ConfirmationRequestFields'}
+            - {type: object, required: [type], properties: {type: {const: confirmation_request}}}
+        - type: object
+          unevaluatedProperties: false
+          allOf:
+            - {$ref: '#/components/schemas/ConfirmationDeclinedFields'}
+            - {type: object, required: [type], properties: {type: {const: confirmation_declined}}}
+        - type: object
+          unevaluatedProperties: false
+          allOf:
+            - {$ref: '#/components/schemas/ConfirmationExpiredFields'}
+            - {type: object, required: [type], properties: {type: {const: confirmation_expired}}}
+        - type: object
+          unevaluatedProperties: false
+          allOf:
+            - {$ref: '#/components/schemas/SettledFields'}
+            - {type: object, required: [type], properties: {type: {const: action_settled}}}
+        - type: object
+          unevaluatedProperties: false
+          allOf:
+            - {$ref: '#/components/schemas/SettleTimeoutFields'}
+            - {type: object, required: [type], properties: {type: {const: action_settle_timeout}}}
+    SseEnvelope:
+      type: object
+      required: [seq, req_id]
+      properties:
+        seq: {type: integer, minimum: 0, description: Monotonic per request}
+        req_id: {type: string, maxLength: 64}
+    SseEvent:
+      description: |
+        A `/chat` SSE frame as parsed by the client: `{event, data}` (`event:` line + parsed `data:` JSON). `data` always
+        carries `seq` and `req_id`. The confirmation token never appears in any event.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: status}
+            data: {allOf: [{$ref: '#/components/schemas/SseEnvelope'}, {type: object, required: [text], properties: {text: {type: string, maxLength: 200}}}]}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: tool_call}
+            data:
+              allOf:
+                - {$ref: '#/components/schemas/SseEnvelope'}
+                - type: object
+                  required: [call_id, tool, args]
+                  properties:
+                    call_id: {type: string, maxLength: 64}
+                    tool: {type: string, enum: [list_devices, get_state, set_state, run_scene, read_sensor]}
+                    args: {type: object, additionalProperties: true}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: tool_result}
+            data:
+              allOf:
+                - {$ref: '#/components/schemas/SseEnvelope'}
+                - type: object
+                  required: [call_id, tool, result, ok]
+                  properties:
+                    call_id: {type: string, maxLength: 64}
+                    tool: {type: string, enum: [list_devices, get_state, set_state, run_scene, read_sensor]}
+                    result: {type: object, additionalProperties: true}
+                    ok: {type: boolean}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: token}
+            data: {allOf: [{$ref: '#/components/schemas/SseEnvelope'}, {type: object, required: [text], properties: {text: {type: string}}}]}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: final}
+            data:
+              allOf:
+                - {$ref: '#/components/schemas/SseEnvelope'}
+                - type: object
+                  required: [text, route, latency_ms]
+                  properties:
+                    text: {type: string}
+                    route: {$ref: '#/components/schemas/Route'}
+                    latency_ms: {type: integer, minimum: 0}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: error}
+            data:
+              allOf:
+                - {$ref: '#/components/schemas/SseEnvelope'}
+                - type: object
+                  required: [code, message]
+                  properties:
+                    code: {type: string, enum: [llm_busy, vision_unavailable, budget_exceeded, bad_request]}
+                    message: {type: string, maxLength: 500}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: async_result}
+            data: {allOf: [{$ref: '#/components/schemas/SseEnvelope'}, {$ref: '#/components/schemas/AsyncResultFields'}]}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: confirmation_request}
+            data: {allOf: [{$ref: '#/components/schemas/SseEnvelope'}, {$ref: '#/components/schemas/ConfirmationRequestFields'}]}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: confirmation_declined}
+            data: {allOf: [{$ref: '#/components/schemas/SseEnvelope'}, {$ref: '#/components/schemas/ConfirmationDeclinedFields'}]}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: confirmation_expired}
+            data: {allOf: [{$ref: '#/components/schemas/SseEnvelope'}, {$ref: '#/components/schemas/ConfirmationExpiredFields'}]}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: action_settled}
+            data: {allOf: [{$ref: '#/components/schemas/SseEnvelope'}, {$ref: '#/components/schemas/SettledFields'}]}
+        - type: object
+          additionalProperties: false
+          required: [event, data]
+          properties:
+            event: {const: action_settle_timeout}
+            data: {allOf: [{$ref: '#/components/schemas/SseEnvelope'}, {$ref: '#/components/schemas/SettleTimeoutFields'}]}
     ConsumeRequest:
       type: object
       additionalProperties: false
@@ -919,6 +1262,8 @@ components:
         executed: {type: boolean}
         scene: {type: string, description: Permanent scene id}
         scene_name: {type: string}
+        summary: {type: string, maxLength: 200, description: "With `status: needs_confirmation`: server-built prompt text, shown verbatim (same rule as `ConfirmationRequired`)"}
+        action_hash: {type: string, pattern: '^[0-9a-f]{64}$', description: "With `status: needs_confirmation`: canonical hash of `{actions: needs_confirmation, scene_id, type: run_scene}`"}
         error: {type: string, enum: [unknown_scene, scene_broken]}
         status: {type: string, enum: [needs_confirmation]}
         needs_confirmation:

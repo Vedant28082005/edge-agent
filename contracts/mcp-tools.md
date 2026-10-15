@@ -1,9 +1,10 @@
-﻿# MCP tools (device-hub), runtime only (v6)
+﻿# MCP tools (device-hub), runtime only (v7)
 
 The MCP server exposes **exactly five tools**. The list is fixed and never changes as devices come and go. There is **no** tool to add, remove, rename, rebind or re-provision a device, to change a risk level, to create/edit/delete scenes or users, or to touch MQTT credentials. All of that is `/admin/*` (see `openapi/gateway.yaml`) and is unreachable from the LLM. A review rule: any PR adding a sixth tool needs a contract version bump and owner sign-off.
 
 Endpoint identity is always the permanent `endpoint_id` (`ep_` + 8 lowercase hex, e.g. `ep_3fa91c02`). Names/rooms are labels. Any device-supplied text in results is sanitized and length-limited.
 
+Version 7 change: `list_devices` also returns `registry_version` and a read-only `scenes` list, and each capability may carry `settle_s` (no new tool; still exactly five).
 Version 5 change: optional `_meta.call_id` (see "`_meta.call_id`" below and the Contract changelog in `mqtt.md`, S0d).
 Version 4 change: see the Contract changelog in `mqtt.md` (S0c). Items are described inline below.
 Version 3 change: motion capabilities (those announcing `settle_s`) return `status: "moving"` and are verified asynchronously (see `set_state`); `run_scene` per-action statuses are `done|moving|...`.
@@ -44,7 +45,10 @@ Both the gateway (when minting) and device-hub (when consuming) must compute the
 
 ## list_devices
 Args: `room?: string`, `type?: string` (endpoint type enum).
-Returns: `{"devices": [{"endpoint_id", "name", "room", "tags", "type", "online": bool, "risk": "normal|confirm", "capabilities": [{"id", "kind", "type", "min?", "max?", "values?", "unit?"}]}]}`. Excludes disabled endpoints. No live state.
+Returns: `{"registry_version": <int>, "devices": [{"endpoint_id", "name", "room", "tags", "type", "online": bool, "risk": "normal|confirm", "capabilities": [{"id", "kind", "type", "min?", "max?", "values?", "unit?", "settle_s?"}]}], "scenes": [{"scene_id", "name", "broken?": true}]}`. Excludes disabled endpoints. No live state. Schema: `ListDevicesResult` in `openapi/device-hub-internal.yaml`.
+- `registry_version` is the registry version at the moment of the read (the same number as `registry_changed.version` and `GET /registry/version`). A cached list is current iff its `registry_version` equals the latest one seen.
+- `scenes` is a **read-only listing** (permanent `scene_id`, display `name`, `broken: true` only when the scene would refuse to run; never the scene's actions). It always lists every scene, regardless of the `room` / `type` filters, and is not a way to create, change or delete anything. The hub does not filter by role; the agent restricts it to the caller's allowed scenes. `run_scene` takes the id or exact name as before.
+- `settle_s` (motion capabilities only) is the announced worst-case seconds to reach a target; its presence tells a client that a set returns `status: "moving"`.
 
 ## get_state
 Args: exactly one of `endpoint_id: string` | `room: string`.

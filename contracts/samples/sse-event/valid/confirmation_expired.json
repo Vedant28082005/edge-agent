@@ -1,0 +1,10 @@
+{
+  "event": "confirmation_expired",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "request_id": "r1",
+    "summary": "x",
+    "reason": "token_expired"
+  }
+}

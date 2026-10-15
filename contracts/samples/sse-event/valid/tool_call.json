@@ -1,0 +1,14 @@
+{
+  "event": "tool_call",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "call_id": "c1",
+    "tool": "set_state",
+    "args": {
+      "endpoint_id": "ep_3fa91c02",
+      "capability": "position",
+      "value": 40
+    }
+  }
+}

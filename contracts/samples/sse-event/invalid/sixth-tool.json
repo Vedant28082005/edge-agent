@@ -1,0 +1,10 @@
+{
+  "event": "tool_call",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "call_id": "c1",
+    "tool": "add_device",
+    "args": {}
+  }
+}

@@ -72,6 +72,10 @@ OPENAPI_SUITES = {
     "consume-request": "ConsumeRequest",
     "consume-response": "ConsumeResponse",
     "scene-action": "SceneAction",
+    "action-log-page": "ActionLogPage",
+    "confirmation-required": "ConfirmationRequired",
+    "ws-message": "WsMessage",
+    "sse-event": "SseEvent",
 }
 spec_for_refs = dict(spec)
 # ConsumeResponse = granted or denied
@@ -93,6 +97,41 @@ for folder, comp in OPENAPI_SUITES.items():
             else:
                 failures += 1
                 print(f"FAIL {folder}/{kind}/{f.name}: " + ("expected to pass but failed: " + errors[0].message[:100] if kind == "valid" else "expected to fail but passed"))
+
+
+
+def run_component_suite(folder, comp, components):
+    """Samples in samples/<folder>/{valid,invalid} against one component schema of another OpenAPI file."""
+    global failures
+    v = Draft202012Validator({"$ref": f"#/components/schemas/{comp}", "components": components})
+    for kind in ("valid", "invalid"):
+        files = sorted((contracts / "samples" / folder / kind).glob("*.json"))
+        if not files:
+            failures += 1
+            print(f"FAIL: no samples for {folder} in {kind}/")
+        for f in files:
+            counts[kind] += 1
+            errors = list(v.iter_errors(json.loads(f.read_text(encoding="utf-8"))))
+            if bool(errors) == (kind == "invalid"):
+                print(f"ok   {folder}/{kind}/{f.name}")
+            else:
+                failures += 1
+                print(f"FAIL {folder}/{kind}/{f.name}")
+
+
+# gateway contract facts the dashboard relies on
+_gs = spec["components"]["schemas"]
+for _route in ("fast", "llm", "vision", "sensor", "yolo", "vlm"):
+    if _route not in _gs["Route"]["enum"]:
+        failures += 1
+        print(f"FAIL gateway Route enum lacks {_route}")
+if "settle_s" not in _gs["Capability"]["properties"]:
+    failures += 1
+    print("FAIL gateway Capability lacks settle_s")
+if "/admin/action-log" not in spec["paths"] or spec["paths"]["/admin/action-log"]["get"].get("x-required-role") != "admin":
+    failures += 1
+    print("FAIL gateway /admin/action-log must exist and be admin-gated")
+print("ok   gateway Route enum, Capability.settle_s, admin action-log checked")
 
 # internal section: only service-secret auth, never user JWT, never /admin
 for path, item in spec["paths"].items():
@@ -216,6 +255,8 @@ if "agentSecret" not in hub["components"]["securitySchemes"] or "gatewaySecret" 
 if failures == _f0:
     print("ok   hub-internal auth mandatory; agent scope = POST /mcp + allowlisted GET /events only")
 
+run_component_suite("list-devices-result", "ListDevicesResult", hub["components"])
+
 # --- agent internal API: valid OpenAPI, auth mandatory on EVERY operation, own secret ------------------
 agent_api = yaml.safe_load((contracts / "openapi" / "agent-internal.yaml").read_text(encoding="utf-8"))
 try:
@@ -273,6 +314,8 @@ for name, body, want_ok in [("chat with role", {"user_id": "u1", "role": "guest"
     if not ok:
         failures += 1
     print(("ok   " if ok else "FAIL ") + f"agent-internal {name}")
+
+run_component_suite("agent-chat-request", "ChatRequest", agent_api["components"])
 
 # --- canonical action hash vectors -------------------------------------------------
 import copy

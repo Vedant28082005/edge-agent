@@ -35,7 +35,7 @@ Contract version: **2** (v2: note that endpoint `tags` are not part of the annou
 - **Sensors:** `interval_s` (1-86400 s) required; `boot_value`, `failsafe_value`, `max_on_s` not allowed.
 - `min`/`max` only on `int`/`float`; `values` only on `enum`.
 - `unit` optional, from a fixed set: `C % lux W A V K step`.
-- `settle_s` (number, 1-120 s): optional on actuators, not allowed on sensors, **required when `id` is `position`**. Worst-case time for the motion to reach a commanded target. For a capability with `settle_s` the ack means "accepted, motion started" and `state` reports actual progress; the hub verifies convergence within `settle_s` (see `mcp-tools.md`). Added within announce schema 2 (no nodes deployed yet).
+- `settle_s` (number, 1-120 s): optional on actuators, not allowed on sensors, **required when `id` is `position`**. Worst-case time for the motion to reach a commanded target. For a capability with `settle_s` the ack means "accepted, motion started" and `state` reports actual progress; the hub verifies convergence within `settle_s` (see `mcp-tools.md`). Added within announce schema 2 (no nodes deployed yet). It is also exposed on the gateway `Capability` and in `list_devices` capabilities (`settle_s`, optional), so UIs know a set will answer `moving`.
 - `max_on_s` = continuous on-time limit in seconds, 0 = unlimited (firmware-enforced).
 - Node-level optional `failsafe_after_s` (default 60, 0 = keep last values).
 

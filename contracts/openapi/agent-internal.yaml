@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Internal API (agent)
-  version: 1.2.0
+  version: 1.3.0
   description: |
     The agent's local API. Listens on 127.0.0.1:8200 only (never on a public or tailnet interface); the only
     caller is the gateway. Changing this file requires bumping info.version.
@@ -19,6 +19,19 @@ info:
     gateway, from its own DB, and the agent trusts it only because the call is authenticated as the gateway. The
     agent never infers a role from a user id, a username or anything in a prompt, and uses it only to scope what it
     offers (for example guests get no `risk: confirm` prompts and no memory).
+
+    **Scope per request (`allowed_rooms`, `allowed_scenes` in `POST /v1/chat`).** Next to `role` the gateway sends what
+    this caller may touch, computed from its own DB at request time (guests: assigned rooms and assigned scenes;
+    members: their rooms and the scenes visible to them; admins: `null` = unrestricted). The agent enforces it in its
+    executor, independent of the model: a `get_state`, `read_sensor` or `set_state` on an endpoint whose room is not in
+    `allowed_rooms`, or a `run_scene` of a scene not in `allowed_scenes`, is not sent to device-hub; the tool result is
+    `{"ok": false, "error": "out_of_scope"}` (agent-side code, never a hub code). `list_devices` results and the prompt
+    device/scene list are filtered the same way, so out-of-scope names never reach the model. **Fail closed:** for
+    `member` and `guest`, a missing field is treated as `[]` (nothing allowed); only an explicit `null` (admin or an
+    unrestricted member) means unrestricted, and the agent honours `null` only together with a role of `admin`
+    or `member`, never `guest`. The agent never widens scope from anything in text. The lists are snapshotted for the turn;
+    hub-side `run_scene` selectors that expand into rooms outside `allowed_rooms` are not run by the agent for a
+    guest (it runs only assigned scenes, exactly as stored).
 
     `user_id` in bodies is trusted only because the caller is the authenticated gateway. Device- and user-supplied
     strings are untrusted (CLAUDE.md rule 6).
@@ -184,6 +197,18 @@ components:
         user_id: {type: string, minLength: 1, maxLength: 64}
         role: {$ref: '#/components/schemas/Role'}
         session_id: {type: string, maxLength: 64}
+        allowed_rooms:
+          type: [array, 'null']
+          maxItems: 64
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 48}
+          description: "Room names (admin-set labels) the caller may read or control. null = unrestricted (never for guest). Missing = [] for member/guest."
+        allowed_scenes:
+          type: [array, 'null']
+          maxItems: 200
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 64}
+          description: "Permanent scene ids the caller may run. null = unrestricted (never for guest). Missing = [] for member/guest."
         text: {type: string, maxLength: 4000}
         images:
           type: array

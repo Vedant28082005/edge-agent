@@ -1,0 +1,10 @@
+{
+  "event": "final",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "text": "21 C",
+    "route": "sensor",
+    "latency_ms": 12
+  }
+}
