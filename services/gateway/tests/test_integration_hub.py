@@ -355,7 +355,7 @@ def test_websocket_receives_real_hub_state_filtered_by_role(stack, api):
         t = api.post("/ws/ticket", headers=api.hdr[who]).json()["ticket"]
         stack.ws_tickets = getattr(stack, "ws_tickets", []) + [t]
         s = websockets.connect(url, subprotocols=[Subprotocol(f"edge-ticket.{t}")])
-        assert json.loads(s.recv(5))["role"] == who
+        assert json.loads(s.recv(5))["text"] == "connected"
         socks[who] = s
     # a JWT in the URL gets nowhere, and a used ticket cannot be replayed
     from websockets.exceptions import ConnectionClosed

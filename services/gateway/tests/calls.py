@@ -77,6 +77,7 @@ def build(gw, op: str, role: str | None) -> dict:
         "adminForgetNode": ("DELETE", f"/admin/nodes/{NODE}", {"params": {"confirm": "true"}}, 204),
         "adminPatchEndpoint": ("PATCH", "/admin/endpoints/ep_00000001", {"json": {"name": "Renamed", "tags": ["a"]}}, 200),
         "adminRebindEndpoint": ("POST", "/admin/endpoints/ep_00000001/rebind", {"json": {"node_id": NODE, "local_id": "l9"}}, 200),
+        "adminActionLog": ("GET", "/admin/action-log", {"params": {"limit": "5"}}, 200),
         "adminListUsers": ("GET", "/admin/users", {}, 200),
         "adminCreateUser": ("POST", "/admin/users", {"json": {"username": f"new{next(_n)}", "password": "long-enough-pw", "role": "guest",
                                                               "rooms": ["Hall"]}}, 201),

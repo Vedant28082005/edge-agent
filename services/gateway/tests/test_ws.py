@@ -23,7 +23,7 @@ def connect(gw, role, **kw):
     ws = gw.pub.websocket_connect("/ws", subprotocols=[f"edge-ticket.{ticket(gw, role)}"], **kw)
     s = ws.__enter__()
     first = s.receive_json()
-    assert first == {"type": "notification", "level": "info", "text": "connected", "role": role}
+    assert first == {"type": "notification", "level": "info", "text": "connected"}
     return ws, s
 
 
@@ -67,7 +67,7 @@ def test_ticket_shape_and_single_use(gw):
     assert r.status_code == 200 and r.json()["expires_in_s"] == 30 and re.fullmatch(r"[A-Za-z0-9_-]{43}", r.json()["ticket"])
     t = r.json()["ticket"]
     with gw.pub.websocket_connect("/ws", subprotocols=[f"edge-ticket.{t}"]) as s:
-        assert s.accepted_subprotocol == f"edge-ticket.{t}" and s.receive_json()["role"] == "member"
+        assert s.accepted_subprotocol == f"edge-ticket.{t}" and s.receive_json()["text"] == "connected"
     with pytest.raises(WebSocketDisconnect) as e:                       # burned by its first presentation
         with gw.pub.websocket_connect("/ws", subprotocols=[f"edge-ticket.{t}"]) as s:
             s.receive_json()
@@ -100,9 +100,9 @@ def test_ticket_in_first_message_and_bearer_header_work(gw):
     gw.ctx.cfg.ws_auth_timeout_s = 2
     with gw.pub.websocket_connect("/ws") as s:
         s.send_json({"type": "auth", "ticket": ticket(gw, "guest")})
-        assert s.receive_json()["role"] == "guest"
+        assert s.receive_json()["text"] == "connected"
     with gw.pub.websocket_connect("/ws", headers={"Authorization": gw.h("admin")["Authorization"]}) as s:
-        assert s.receive_json()["role"] == "admin"
+        assert s.receive_json()["text"] == "connected"
 
 
 def test_a_jwt_or_ticket_in_the_url_never_authenticates(gw):
@@ -118,7 +118,7 @@ def test_a_jwt_or_ticket_in_the_url_never_authenticates(gw):
         assert getattr(e.value, "code", 4401) in (4401, 1000) or "404" in str(e.value) or True
     # the URL attempts neither authenticated nor spent the ticket
     with gw.pub.websocket_connect("/ws", subprotocols=[f"edge-ticket.{t}"]) as s:
-        assert s.receive_json()["role"] == "member"
+        assert s.receive_json()["text"] == "connected"
     # a JWT is not a ticket: not as subprotocol, not in the first message (key `token` or `ticket`)
     for attempt in ({"type": "auth", "token": jwt_}, {"type": "auth", "ticket": jwt_}):
         with pytest.raises(WebSocketDisconnect) as e:
@@ -150,7 +150,7 @@ def test_websocket_ends_with_the_access_token_that_made_the_ticket(gw):
         tok = gw.ctx.auth.jwt.issue(gw.uid("member"), "member")
         t = gw.pub.post("/ws/ticket", headers={"Authorization": "Bearer " + tok}).json()["ticket"]
         with gw.pub.websocket_connect("/ws", subprotocols=[f"edge-ticket.{t}"]) as s:
-            assert s.receive_json()["role"] == "member"
+            assert s.receive_json()["text"] == "connected"
             with pytest.raises(WebSocketDisconnect) as e:
                 s.receive_json()
             assert e.value.code == 4401
@@ -159,7 +159,7 @@ def test_websocket_ends_with_the_access_token_that_made_the_ticket(gw):
 # ------------------------------------------------------------------ hub events, filtered
 def test_state_events_are_filtered_by_room(gw, sockets):
     for ep in ("ep_00000003", "ep_00000001", "ep_00000004"):
-        pub(gw, from_hub({"type": "state", "data": {"endpoint_id": ep, "values": {"power": True}, "ts": 1}}))
+        pub(gw, from_hub({"type": "state", "data": {"endpoint_id": ep, "values": {"power": True}, "ts": 1_700_000_001}}))
     got = drain(gw, sockets)
     assert types(got["admin"]) == [("state", "ep_00000003"), ("state", "ep_00000001"), ("state", "ep_00000004")]
     assert types(got["member"]) == [("state", "ep_00000001"), ("state", "ep_00000004")]          # Bedroom + Kitchen
@@ -167,7 +167,7 @@ def test_state_events_are_filtered_by_room(gw, sockets):
 
 
 def test_unknown_endpoints_are_admin_only(gw, sockets):
-    pub(gw, from_hub({"type": "state", "data": {"endpoint_id": "ep_deadbeef", "values": {}, "ts": 1}}))
+    pub(gw, from_hub({"type": "state", "data": {"endpoint_id": "ep_deadbeef", "values": {"power": True}, "ts": 1_700_000_001}}))
     got = drain(gw, sockets)
     assert len(got["admin"]) == 1 and got["member"] == [] and got["guest"] == []
 
@@ -201,8 +201,8 @@ def test_settle_events_are_their_own_types(gw, sockets):
     got = drain(gw, sockets)
     assert types(got["admin"]) == [("action_settled", "ep_00000003"), ("action_settle_timeout", "ep_00000001")]
     assert types(got["member"]) == [("action_settle_timeout", "ep_00000001")] and types(got["guest"]) == types(got["member"])
-    assert set(got["admin"][1]) == {"type", "endpoint_id", "capability", "value", "observed", "settle_s"}
-    assert got["admin"][1]["observed"] is None
+    assert set(got["admin"][1]) == {"type", "call_id", "endpoint_id", "capability", "value", "observed", "settle_s"}
+    assert got["admin"][1]["observed"] is None and got["admin"][1]["call_id"].startswith("gw_")      # contract: call_id is required
 
 
 # ------------------------------------------------------------------ agent events, filtered
@@ -235,10 +235,10 @@ def test_confirmation_events_reach_only_their_user(gw, sockets):
 
 
 def test_room_change_and_disable_apply_to_live_sockets(gw, sockets):
-    pub(gw, from_hub({"type": "state", "data": {"endpoint_id": "ep_00000001", "values": {}, "ts": 1}}))
+    pub(gw, from_hub({"type": "state", "data": {"endpoint_id": "ep_00000001", "values": {"power": True}, "ts": 1_700_000_001}}))
     assert len(drain(gw, sockets)["guest"]) == 1
     assert gw.pub.patch(f"/admin/users/{gw.uid('guest')}", json={"rooms": ["Kitchen"]}, headers=gw.h("admin")).status_code == 200
-    pub(gw, from_hub({"type": "state", "data": {"endpoint_id": "ep_00000001", "values": {}, "ts": 1}}))
+    pub(gw, from_hub({"type": "state", "data": {"endpoint_id": "ep_00000001", "values": {"power": True}, "ts": 1_700_000_001}}))
     assert drain(gw, sockets)["guest"] == []
     assert gw.pub.patch(f"/admin/users/{gw.uid('guest')}", json={"disabled": True}, headers=gw.h("admin")).status_code == 200
     with pytest.raises(WebSocketDisconnect):
@@ -260,8 +260,8 @@ def test_hub_events_flow_end_to_end_through_the_subscriber(gw):
         gw.pub.portal.call(lambda: gw.ctx.start(retry_s=0.05))
         try:
             h = gw.m.hub
-            h.push("state", {"endpoint_id": "ep_00000003", "values": {"lock": "unlocked"}, "ts": 1})
-            h.push("state", {"endpoint_id": "ep_00000001", "values": {"power": True}, "ts": 2})
+            h.push("state", {"endpoint_id": "ep_00000003", "values": {"lock": "unlocked"}, "ts": 1_700_000_001})
+            h.push("state", {"endpoint_id": "ep_00000001", "values": {"power": True}, "ts": 1_700_000_002})
             h.push("node_status", {"node_id": "esp32-aabbccddeeff", "online": True})
             seen = collect(a, 3)
             assert [m.get("endpoint_id") or m["type"] for m in seen] == ["ep_00000003", "ep_00000001", "notification"]

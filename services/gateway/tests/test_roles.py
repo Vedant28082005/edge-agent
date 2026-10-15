@@ -147,7 +147,7 @@ def test_device_list_filters_by_role(gw):
     member = {e["endpoint_id"] for e in gw.pub.get("/devices", headers=gw.h("member")).json()}
     guest = {e["endpoint_id"] for e in gw.pub.get("/devices", headers=gw.h("guest")).json()}
     assert "ep_00000005" in admin and "ep_00000005" not in member      # disabled endpoint: admin only
-    assert member == {"ep_00000001", "ep_00000002", "ep_00000004"} and guest == {"ep_00000001", "ep_00000002"}
+    assert member == {"ep_00000001", "ep_00000002", "ep_00000004", "ep_00000006"} and guest == {"ep_00000001", "ep_00000002", "ep_00000006"}
 
 
 def test_room_changes_apply_immediately_without_new_token(gw):

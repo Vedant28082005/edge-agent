@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS audit_log(
 CREATE TABLE IF NOT EXISTS wifi_profiles(name TEXT PRIMARY KEY, ssid TEXT NOT NULL, password_enc BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS scene_assignments(user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE, scene_id TEXT NOT NULL,
   PRIMARY KEY(user_id, scene_id));
+CREATE TABLE IF NOT EXISTS action_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, user_id TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL,
+  node_id TEXT, endpoint_id TEXT, scene_id TEXT, capability TEXT, value_json TEXT, status TEXT NOT NULL, error TEXT,
+  call_id TEXT, elapsed_ms INTEGER);
+CREATE INDEX IF NOT EXISTS action_log_ts ON action_log(ts);
+CREATE INDEX IF NOT EXISTS action_log_ep ON action_log(endpoint_id, capability, status);
 """
 
 
