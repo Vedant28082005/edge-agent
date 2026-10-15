@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest
+pytest-asyncio
+pytest-timeout
+httpx>=0.27
+jsonschema>=4.21
+pyyaml

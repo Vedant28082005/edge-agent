@@ -1,0 +1,11 @@
+[project]
+name = "yolo-node"
+version = "0.1.0"
+description = "Edge agent yolo-node: object detection service (contract yolo-node-internal.yaml)"
+requires-python = ">=3.8"
+dependencies = ["starlette>=0.37", "uvicorn>=0.30", "numpy>=1.24", "Pillow>=10.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120
+asyncio_mode = "auto"
