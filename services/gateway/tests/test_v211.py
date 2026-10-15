@@ -499,3 +499,48 @@ def test_declined_and_expired_confirmations_are_logged(gw):
     assert st == ["expired", "declined"] and new
     for i in log(gw).json()["items"]:
         assert i["endpoint_id"] == "ep_00000003" and i["source"] == "agent"
+
+
+# ------------------------------------------------------------------ regression: the real agent differs from the mock
+# e2e-smoke failed 5 steps because the deployed agent (< 1.3.0) has a closed ChatRequest and answered 400 "invalid body" to
+# allowed_rooms / allowed_scenes, while the mock agent had been taught the new fields.
+def test_gateway_survives_an_agent_without_scope_support(gw):
+    gw.m.agent.scope_support = False
+    r = gw.pub.post("/chat", json={"text": "hello"}, headers=gw.h("member"))
+    assert r.status_code == 200 and "event: final" in r.text
+    assert len(gw.m.agent.rejected) == 1 and set(gw.m.agent.requests[-1]) == {"user_id", "role", "session_id", "text"}
+    # the old shape is remembered: no second rejected call while the window lasts
+    assert gw.pub.post("/chat", json={"text": "again"}, headers=gw.h("guest")).status_code == 200
+    assert len(gw.m.agent.rejected) == 1
+
+
+def test_scope_fallback_can_be_switched_off_to_fail_closed(gw):
+    gw.ctx.cfg.agent_scope_fallback = False
+    gw.m.agent.scope_support = False
+    r = gw.pub.post("/chat", json={"text": "hello"}, headers=gw.h("member"))
+    assert r.status_code == 400 and gw.m.agent.requests == []
+
+
+def test_chat_payload_matches_the_real_agents_request_schema(gw):
+    """The unscoped shape must validate against the agent code in this checkout; the scoped one only against agent >= 1.3.0."""
+    import sys
+    from pathlib import Path
+    agent_dir = Path(__file__).resolve().parents[2] / "agent"
+    if not agent_dir.is_dir():
+        pytest.skip("services/agent not present")
+    sys.path.insert(0, str(agent_dir))
+    try:
+        from agent import app as agent_app
+    except Exception:                                                                       # pragma: no cover
+        pytest.skip("agent package not importable here")
+    finally:
+        sys.path.remove(str(agent_dir))
+    v = agent_app._V["chat"]
+    for who in ("admin", "member", "guest"):
+        gw.pub.post("/chat", json={"text": "hi"}, headers=gw.h(who))
+        sent = gw.m.agent.requests[-1]
+        unscoped = {k: x for k, x in sent.items() if not k.startswith("allowed_")}
+        assert v.is_valid(unscoped), list(v.iter_errors(unscoped))
+        # the scoped shape must also pass the contract's ChatRequest (agent-internal.yaml) schema
+        spec = __import__("yaml").safe_load((CONTRACTS / "openapi" / "agent-internal.yaml").read_text(encoding="utf-8"))
+        Draft202012Validator({"$ref": "#/components/schemas/ChatRequest", "components": spec["components"]}).validate(sent)

@@ -304,6 +304,8 @@ class FakeAgent:
         self.push: list[tuple[str, dict]] = []          # (event name, data incl. user_id); ids are 1..n
         self.memories: dict[str, dict[str, str]] = {}
         self.fail_delivery = False
+        self.scope_support = True          # False = agent-internal.yaml < 1.3.0: closed ChatRequest, 400 "invalid body" on allowed_*
+        self.rejected: list[dict] = []
         self.delivery_status = 202
         self.calls: list[dict] = []
         self._n = itertools.count(1)
@@ -332,6 +334,9 @@ class FakeAgent:
             if not isinstance(b, dict) or set(b) - CHAT_KEYS or not {"user_id", "role", "session_id"} <= set(b) \
                     or len(b["session_id"]) > 64 or b["role"] not in ("admin", "member", "guest"):
                 return JSONResponse({"error": "bad_request", "message": "invalid ChatRequest"}, status_code=400)
+            if not self.scope_support and {"allowed_rooms", "allowed_scenes"} & set(b):
+                self.rejected.append(b)
+                return JSONResponse({"error": "bad_request", "message": "invalid body"}, status_code=400)
             for k, mx, ln in (("allowed_rooms", 64, 48), ("allowed_scenes", 200, 64)):
                 v = b.get(k, [] if b["role"] != "admin" else None)          # missing = [] for member/guest (fail closed)
                 if v is None:

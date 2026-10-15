@@ -49,6 +49,7 @@ class Config:
     # per-user request limits {name: [max requests, window seconds]}; exceeding -> 429 + Retry-After
     rate_limits: dict = field(default_factory=lambda: {"chat": [30, 60], "voice": [20, 60], "confirm": [30, 60],
                                                        "ticket": [10, 60], "ws": [20, 60], "ws_msg": [20, 10]})
+    agent_scope_fallback: bool = True             # agent < 1.3.0 rejects allowed_rooms/allowed_scenes: retry without them (false = fail closed)
     mock: bool = False
 
     def __post_init__(self) -> None:

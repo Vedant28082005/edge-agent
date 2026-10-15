@@ -9,6 +9,7 @@ import contextlib
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
@@ -536,6 +537,9 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             raise ApiError(504 if status == 504 else 502, "upstream_timeout" if status == 504 else "upstream_error", "agent error")
         return status, body
 
+    agent_legacy_until = [0.0]                                   # monotonic deadline: agent seen without 1.3.0 scope support
+    LEGACY_AGENT_S = 300
+
     async def chat_scope(u: User) -> dict:
         """`allowed_rooms` / `allowed_scenes` for the agent (agent-internal.yaml 1.3.0), from our own DB and the hub at request
         time. Explicit null = unrestricted and ONLY for admin; members get lists; a guest gets its room scope, never null.
@@ -583,13 +587,20 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         # agent-internal.yaml 1.3.0 ChatRequest: exactly these fields; session ids are per user and at most 64 chars
         payload = {"user_id": u.user_id, "role": u.role, "session_id": "s_" + sha256_hex(f"{u.user_id}\0{client_sid}")[:48],
                    **scope, **({"text": text} if text else {}), **({"images": images} if images else {})}
-        cm = ctx.agent.stream("POST", "/v1/chat", json=payload, headers={"Accept": "text/event-stream"})
-        try:
-            resp = await cm.__aenter__()
-        except httpx.TimeoutException:
-            raise UpstreamError("agent", 504, "upstream_timeout") from None
-        except httpx.HTTPError:
-            raise UpstreamError("agent") from None
+        async def open_agent(body: dict):
+            cm_ = ctx.agent.stream("POST", "/v1/chat", json=body, headers={"Accept": "text/event-stream"})
+            try:
+                return cm_, await cm_.__aenter__()
+            except httpx.TimeoutException:
+                raise UpstreamError("agent", 504, "upstream_timeout") from None
+            except httpx.HTTPError:
+                raise UpstreamError("agent") from None
+
+        # An agent older than agent-internal.yaml 1.3.0 has a closed ChatRequest and answers 400 `invalid body` to the scope
+        # fields. With `agent_scope_fallback` (default) the gateway then retries once without them and keeps sending the
+        # old shape for a while; such an agent does not enforce the scope anyway. Set it to false to fail closed instead.
+        legacy = cfg.agent_scope_fallback and time.monotonic() < agent_legacy_until[0]
+        cm, resp = await open_agent({k: v for k, v in payload.items() if k not in scope} if legacy else payload)
         if resp.status_code != 200:
             data = await resp.aread()
             await cm.__aexit__(None, None, None)
@@ -597,12 +608,25 @@ def create_public_app(ctx: Ctx) -> FastAPI:
                 err = json.loads(data)
             except ValueError:
                 err = {}
-            if resp.status_code == 429:                       # agent busy / budget exceeded
-                raise ApiError(429, "rate_limited", "the agent is busy", {"Retry-After": resp.headers.get("retry-after", "5")})
-            if resp.status_code == 400:
-                return fwd(400, {"error": "bad_request", "message": str((err or {}).get("message", ""))[:200]})
-            raise ApiError(504 if resp.status_code == 504 else 502, "upstream_timeout" if resp.status_code == 504 else "upstream_error",
-                           "agent error")
+            if resp.status_code == 400 and cfg.agent_scope_fallback and not legacy                     and str((err or {}).get("message", "")) == "invalid body":
+                log.warning("agent rejected the scope fields (agent-internal.yaml < 1.3.0?): retrying without them for %ss",
+                            LEGACY_AGENT_S)
+                agent_legacy_until[0] = time.monotonic() + LEGACY_AGENT_S
+                cm, resp = await open_agent({k: v for k, v in payload.items() if k not in scope})
+                if resp.status_code != 200:
+                    data = await resp.aread()
+                    await cm.__aexit__(None, None, None)
+                    try:
+                        err = json.loads(data)
+                    except ValueError:
+                        err = {}
+            if resp.status_code != 200:
+                if resp.status_code == 429:                       # agent busy / budget exceeded
+                    raise ApiError(429, "rate_limited", "the agent is busy", {"Retry-After": resp.headers.get("retry-after", "5")})
+                if resp.status_code == 400:
+                    return fwd(400, {"error": "bad_request", "message": str((err or {}).get("message", ""))[:200]})
+                raise ApiError(504 if resp.status_code == 504 else 502, "upstream_timeout" if resp.status_code == 504 else "upstream_error",
+                               "agent error")
 
         async def gen():
             frame: list[str] = []
