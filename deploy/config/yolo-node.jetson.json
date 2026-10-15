@@ -1,0 +1,15 @@
+{
+  "node": "jetson-yolo",
+  "host": "100.64.0.20",
+  "port": 8400,
+  "verifier_file": "/etc/edge-agent/secrets/verifiers/agent.sha256",
+  "backend": "trt",
+  "model_name": "yolov8n-trt-fp16",
+  "trt": {
+    "engine_path": "/var/lib/edge-agent/yolo-node/models/yolov8n-fp16.engine",
+    "worker_python": "/usr/bin/python3",
+    "start_timeout_s": 180,
+    "io_timeout_s": 30
+  },
+  "sources": []
+}
