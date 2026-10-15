@@ -109,6 +109,12 @@ TLS certificate dates are checked against the board's clock, and a board without
 
 ## Contract changelog
 
+- **S0h** (announce stays schema 2; `mqtt.md` changelog only, `gateway.yaml` 2.11.0, `agent-internal.yaml` 1.3.0, `device-hub-internal.yaml` 1.4.0, `mcp-tools.md` v7, `agent-events.md` v8). All additive, nothing removed or renamed:
+  - `gateway.yaml`: `GET /admin/action-log` (admin only; filters node/endpoint/user/status/time; cursor pagination; no trace rows); `WsMessage` and `SseEvent` schemas with valid and invalid samples (dashboard types can be generated); `Capability.settle_s`; `409 confirmation_required` on a direct set (and a `needs_confirmation` scene run) carries a server-built `summary`, `action` and `action_hash`; `Route` enum.
+  - `agent-internal.yaml`: `allowed_rooms` / `allowed_scenes` in `POST /v1/chat`, enforced by the agent executor (`out_of_scope`), fail closed for member/guest when missing.
+  - `mcp-tools.md` / hub: `list_devices` returns `registry_version` and a read-only `scenes` list (still exactly five tools); `settle_s` on capabilities.
+  - `agent-events.md`: `final.route` adds `sensor|yolo|vlm`; chat request carries `role` and scope.
+
 - **S0e addendum** (`mqtt.md` v5 (changelog only), `agent-internal.yaml` 1.1.0, `mcp-tools.md` v6, `device-hub-internal.yaml` 1.2.0, `agent-events.md` v7, ARCHITECTURE v6):
   - `agent-internal.yaml`: required `role` (`admin|member|guest`) in `POST /v1/chat` and `POST /v1/confirmations/{request_id}`; set only by the gateway, trusted only from the authenticated gateway call, never inferred from a user id. Tests added.
   - `run_scene` blocked result (`mcp-tools.md`, hub `POST /scenes/{id}/run` 409): also `scene_id`, the canonical `risk: confirm` action list (the exact hashed objects) and the canonical `action_hash`. The `confirmation_request` run_scene action in `agent-events.md` is now `{type, scene_id, actions}` as hashed.

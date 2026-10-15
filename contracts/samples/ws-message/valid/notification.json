@@ -1,0 +1,5 @@
+{
+  "type": "notification",
+  "level": "action_blocked",
+  "text": "Rule 'night lights' wanted to unlock the front door."
+}

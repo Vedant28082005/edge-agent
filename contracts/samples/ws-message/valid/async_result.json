@@ -1,0 +1,7 @@
+{
+  "type": "async_result",
+  "ref": "c2",
+  "kind": "vision",
+  "text": "The door is closed.",
+  "latency_ms": 5400
+}

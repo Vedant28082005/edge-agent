@@ -1,0 +1,10 @@
+{
+  "event": "final",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "text": "Checking.",
+    "route": "vlm",
+    "latency_ms": 3000
+  }
+}

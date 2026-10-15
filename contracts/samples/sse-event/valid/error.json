@@ -1,0 +1,9 @@
+{
+  "event": "error",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "code": "llm_busy",
+    "message": "try again"
+  }
+}

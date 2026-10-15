@@ -1,0 +1,15 @@
+{
+  "event": "tool_result",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "call_id": "c1",
+    "tool": "set_state",
+    "result": {
+      "ok": true,
+      "status": "moving",
+      "verified": false
+    },
+    "ok": true
+  }
+}

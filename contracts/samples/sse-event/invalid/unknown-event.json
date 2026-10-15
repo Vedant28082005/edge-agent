@@ -1,0 +1,8 @@
+{
+  "event": "thinking",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "text": "hmm"
+  }
+}

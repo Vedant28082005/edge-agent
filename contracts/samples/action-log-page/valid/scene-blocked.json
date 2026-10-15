@@ -1,0 +1,15 @@
+{
+  "items": [
+    {
+      "id": 7,
+      "ts": 1790000100,
+      "user_id": "household",
+      "source": "automation",
+      "kind": "run_scene",
+      "scene_id": "sc_9a8b7c6d",
+      "status": "blocked",
+      "error": "confirmation_required"
+    }
+  ],
+  "next_cursor": null
+}

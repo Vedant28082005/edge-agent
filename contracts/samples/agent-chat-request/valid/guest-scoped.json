@@ -1,0 +1,12 @@
+{
+  "user_id": "u_g",
+  "role": "guest",
+  "session_id": "s1",
+  "allowed_rooms": [
+    "Living room"
+  ],
+  "allowed_scenes": [
+    "sc_9a8b7c6d"
+  ],
+  "text": "close the blinds"
+}

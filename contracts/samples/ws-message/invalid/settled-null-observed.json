@@ -1,0 +1,9 @@
+{
+  "type": "action_settled",
+  "call_id": "c1",
+  "endpoint_id": "ep_3fa91c02",
+  "capability": "position",
+  "value": 40,
+  "observed": null,
+  "elapsed_ms": 1
+}

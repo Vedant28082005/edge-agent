@@ -1,0 +1,10 @@
+{
+  "error": "confirmation_required",
+  "action": {
+    "type": "set_state",
+    "endpoint_id": "ep_1b2c3d4e",
+    "capability": "lock",
+    "value": "unlocked"
+  },
+  "action_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent device-hub Internal API
-  version: 1.3.0
+  version: 1.4.0
   description: |
     SERVICE-TO-SERVICE ONLY. How the gateway and the agent reach device-hub (pi-brain, loopback). Promoted from the
     S1 proposal (`services/device-hub/INTERNAL_API.md`, branch s1-device-hub). Never exposed through
@@ -69,7 +69,7 @@ paths:
         `_meta: {"confirmation_token": "...", "user_id": "...", "call_id": "..."}` out of band (`call_id` optional,
         a correlation label echoed on the settle events, never trusted; see `mcp-tools.md`). DNS-rebinding
         protection: Host header limited to loopback. With `GET /events` this is one of the TWO operations the agent
-        scope may call.
+        scope may call. `list_devices` returns `ListDevicesResult` (`registry_version`, `devices`, read-only `scenes`).
       requestBody:
         required: true
         content:
@@ -749,6 +749,56 @@ components:
         automations: {type: integer}
         scene_list: {type: array, items: {type: object, properties: {scene_id: {type: string}, name: {type: string}}}}
         message: {type: string}
+    ListDevicesResult:
+      description: |
+        Structured result of the `list_devices` tool (mcp-tools.md). `registry_version` equals `registry_changed.version`
+        and `GET /registry/version`, so the agent can tell whether its cached list is current without another call.
+        `scenes` is a READ-ONLY listing (id and display name, no actions) so the agent can offer `run_scene` ids;
+        it is not affected by the `room` / `type` filters and adds no tool. The hub applies no role filtering: the
+        agent filters by `allowed_scenes` (agent-internal.yaml).
+      type: object
+      additionalProperties: false
+      required: [registry_version, devices]
+      properties:
+        registry_version: {type: integer, minimum: 0}
+        devices:
+          type: array
+          items:
+            type: object
+            required: [endpoint_id, name, room, type, online, risk, capabilities]
+            properties:
+              endpoint_id: {type: string, pattern: '^ep_[0-9a-f]{8}$'}
+              name: {type: string, maxLength: 48}
+              room: {type: string, maxLength: 48}
+              tags: {type: array, maxItems: 8, items: {type: string}}
+              type: {type: string, enum: [light, fan, outlet, lock, cover, thermostat, sensor, generic]}
+              online: {type: boolean}
+              risk: {type: string, enum: [normal, confirm]}
+              capabilities:
+                type: array
+                items:
+                  type: object
+                  required: [id, kind, type]
+                  properties:
+                    id: {type: string}
+                    kind: {type: string, enum: [actuator, sensor]}
+                    type: {type: string, enum: [bool, int, float, enum]}
+                    min: {type: number}
+                    max: {type: number}
+                    values: {type: array, items: {type: string}}
+                    unit: {type: string}
+                    settle_s: {type: number, minimum: 1, maximum: 120}
+        scenes:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            additionalProperties: false
+            required: [scene_id, name]
+            properties:
+              scene_id: {type: string, maxLength: 64}
+              name: {type: string, maxLength: 48}
+              broken: {type: boolean, description: Present and true when the scene refuses to run (scene_broken)}
     Health:
       type: object
       properties:

@@ -1,0 +1,11 @@
+{
+  "event": "async_result",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "ref": "c2",
+    "kind": "vision",
+    "text": "Closed.",
+    "latency_ms": 5400
+  }
+}

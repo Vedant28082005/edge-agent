@@ -1,7 +1,7 @@
 import { useLive } from "../live";
 
-// The contract exposes no action-log / audit REST endpoint. This is the live feed of what the WebSocket delivered
-// to this browser (state, settle, confirmations, notifications), kept in memory only.
+// Live feed of what the WebSocket delivered to this browser (state, settle, confirmations, notifications), in memory only.
+// The persistent history is the admin Action log.
 function describe(m: ReturnType<typeof useLive>["feed"][number]["msg"]): string {
   switch (m.type) {
     case "state": return `${m.endpoint_id} state ${JSON.stringify(m.values)}`;
@@ -12,7 +12,7 @@ function describe(m: ReturnType<typeof useLive>["feed"][number]["msg"]): string 
     case "confirmation_expired": return `expired: ${m.summary}`;
     case "notification": return `${m.level}: ${m.text}`;
     case "async_result": return `async ${m.kind}: ${m.text}`;
-    case "registry_changed": return `registry changed (${m.reason ?? "update"})`;
+    case "registry_changed": return `registry changed (v${m.version})`;
     case "scenes_changed": return `scene ${m.scene_id} ${m.change}`;
     default: return m.type;
   }

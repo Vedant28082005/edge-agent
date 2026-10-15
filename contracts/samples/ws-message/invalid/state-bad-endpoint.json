@@ -1,0 +1,8 @@
+{
+  "type": "state",
+  "endpoint_id": "bedroom",
+  "values": {
+    "power": true
+  },
+  "ts": 1790000000
+}

@@ -1,0 +1,13 @@
+{
+  "type": "confirmation_request",
+  "request_id": "r1",
+  "summary": "Unlock Front door?",
+  "action": {
+    "type": "set_state",
+    "endpoint_id": "ep_1b2c3d4e",
+    "capability": "lock",
+    "value": "unlocked"
+  },
+  "action_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expires_in_s": 60
+}

@@ -1,0 +1,8 @@
+{
+  "user_id": "u_g",
+  "role": "guest",
+  "session_id": "s1",
+  "allowed_endpoints": [
+    "ep_3fa91c02"
+  ]
+}
