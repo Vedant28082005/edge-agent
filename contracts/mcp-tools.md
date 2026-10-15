@@ -46,7 +46,7 @@ Both the gateway (when minting) and device-hub (when consuming) must compute the
 ## list_devices
 Args: `room?: string`, `type?: string` (endpoint type enum).
 Returns: `{"registry_version": <int>, "devices": [{"endpoint_id", "name", "room", "tags", "type", "online": bool, "risk": "normal|confirm", "capabilities": [{"id", "kind", "type", "min?", "max?", "values?", "unit?", "settle_s?"}]}], "scenes": [{"scene_id", "name", "broken?": true}]}`. Excludes disabled endpoints. No live state. Schema: `ListDevicesResult` in `openapi/device-hub-internal.yaml`.
-- `registry_version` is the registry version at the moment of the read (the same number as `registry_changed.version` and `GET /registry/version`). A cached list is current iff its `registry_version` equals the latest one seen.
+- `registry_version` is a content hash of the registry (endpoints and scenes) at the moment of the read. It changes on any registry or scene change, is stable across restarts, and is not the same number as `registry_changed.version` or `GET /registry/version`, which are a separate counter. A cached list is current iff its `registry_version` equals the one in the latest `list_devices` result.
 - `scenes` is a **read-only listing** (permanent `scene_id`, display `name`, `broken: true` only when the scene would refuse to run; never the scene's actions). It always lists every scene, regardless of the `room` / `type` filters, and is not a way to create, change or delete anything. The hub does not filter by role; the agent restricts it to the caller's allowed scenes. `run_scene` takes the id or exact name as before.
 - `settle_s` (motion capabilities only) is the announced worst-case seconds to reach a target; its presence tells a client that a set returns `status: "moving"`.
 
