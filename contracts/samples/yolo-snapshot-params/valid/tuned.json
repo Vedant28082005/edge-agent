@@ -1,0 +1,5 @@
+{
+  "source_id": "cam0",
+  "min_conf": 0.5,
+  "timeout_ms": 4000
+}

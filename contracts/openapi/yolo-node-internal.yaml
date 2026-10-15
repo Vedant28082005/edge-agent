@@ -1,0 +1,270 @@
+openapi: 3.1.0
+info:
+  title: Edge Agent yolo-node Internal API
+  version: 1.0.0
+  description: |
+    SERVICE-TO-SERVICE ONLY. How the agent reaches yolo-node (`jetson-yolo`: YOLOv8n TensorRT FP16, optional camera).
+    Changing this file requires bumping info.version. Sibling contract: `vision-node-internal.yaml` (its `/v1/detect`
+    is the Pi fallback with the same request and result). The agent client sits behind `PerceptionBackend`
+    (`services/agent/agent/sched/router.py`, source `yolo_jetson`).
+
+    **Transport, auth, bytes path, untrusted output and errors follow `vision-node-internal.yaml` exactly**, with these
+    differences: port 8400 on `jetson-yolo` (Tailscale address only, tailnet ACL allows `pi-brain` only); secret file
+    `/etc/edge-agent/secrets/yolo-node-api.secret` (agent user, mode 600), verifier
+    `/etc/edge-agent/secrets/verifiers/agent.sha256` on the Jetson; the only caller is the agent (scope `agent`).
+    **Auth is MANDATORY on every operation except `GET /health`.** `--insecure-no-auth` only together with `--mock`.
+    Images: multipart upload only, at most 5 MiB, jpeg/png/webp by magic bytes, at most 4096 x 4096 px; never
+    persisted (RAM only, no temp file), never logged; no by-reference mode and no URL fetching. Camera frames grabbed
+    for `/v1/detect/snapshot` follow the same rule: the frame is detected on and dropped, never stored or logged.
+    Output is a closed schema of numbers and labels from the model's fixed class table (`[A-Za-z0-9 _-]{1,32}`, same
+    as `perception-event.schema.json`); a consumer re-validates it and treats labels as untrusted data, never as an
+    instruction, and never builds a device id or tool call from one.
+
+    **No admin operations.** Registering, removing or configuring sources (`POST /sources` in ARCHITECTURE 4.8) and
+    the continuous camera loop that publishes `perception/{node}/events` over MQTT are NOT part of this API; they are
+    local node configuration (`--config`) and MQTT (`mqtt.md`, `perception-event.schema.json`). This API can read
+    sources and run one detection, nothing more.
+
+    **Camera is optional.** A node without a camera has an empty `GET /v1/sources` list and answers
+    `POST /v1/detect/snapshot` with 404 `unknown_source`; `/v1/detect` always works (upload).
+
+    **Errors:** same body and codes as vision-node (`bad_request`, `unauthorized`, `payload_too_large`,
+    `unsupported_media_type`, `bad_image`, `queue_full` 429, `model_error`, `vision_unavailable` 503, `timeout` 504)
+    plus `unknown_source` 404 and `source_offline` 409. One inference at a time, bounded queue of 8 (429
+    `queue_full` beyond it). `latency_ms` = total node handling time from the last request byte to the first
+    response byte, `queue_ms` = the waiting part. Jetson latency is not yet measured: seeds are `[est]`.
+servers:
+  - url: http://jetson-yolo:8400
+    description: Tailscale MagicDNS name; reachable from pi-brain only (tailnet ACL)
+security:
+  - agentSecret: []
+tags:
+  - name: detect
+    description: Object detection. Scope agent.
+  - name: sources
+    description: Read-only list of image sources. Scope agent.
+  - name: system
+    description: Health. Open.
+paths:
+  /health:
+    get:
+      tags: [system]
+      operationId: yoloHealth
+      x-scopes: [open]
+      security: []
+      description: |
+        Liveness and readiness. Open, no secret. Feeds the router's `update_health` (node name `jetson-yolo`); the same
+        figures are published on MQTT as `node_health`.
+      responses:
+        '200': {description: Health, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+  /v1/detect:
+    post:
+      tags: [detect]
+      operationId: yoloDetect
+      x-scopes: [agent]
+      x-router-source: yolo_jetson
+      description: |
+        Detection on an uploaded image. Multipart parts: `params` (JSON, `DetectParams`, may be `{}`) and `image`
+        (binary). Detections sorted by `conf` descending. Works with no camera. Router source `yolo_jetson`.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [params, image]
+              properties:
+                params: {$ref: '#/components/schemas/DetectParams'}
+                image: {type: string, format: binary}
+            encoding:
+              params: {contentType: application/json}
+              image: {contentType: 'image/jpeg, image/png, image/webp'}
+      responses:
+        '200': {description: Detections, content: {application/json: {schema: {$ref: '#/components/schemas/DetectResult'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/QueueFull'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+  /v1/detect/snapshot:
+    post:
+      tags: [detect]
+      operationId: yoloDetectSnapshot
+      x-scopes: [agent]
+      x-router-source: yolo_jetson
+      description: |
+        Grabs one current frame from a configured camera source and detects on it. No image crosses the wire. The agent
+        MUST only call this for a caller allowed to see that camera (camera/room scoping is the agent's job, see the
+        scope rules in `agent-internal.yaml`); the node cannot check it. Rate limited to 1 snapshot per source per
+        second (429 `queue_full`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SnapshotParams'}
+      responses:
+        '200': {description: Detections, content: {application/json: {schema: {$ref: '#/components/schemas/SnapshotResult'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/QueueFull'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        '504': {$ref: '#/components/responses/Error'}
+  /v1/sources:
+    get:
+      tags: [sources]
+      operationId: yoloSources
+      x-scopes: [agent]
+      description: Read-only list of the image sources configured on this node (empty when it has no camera).
+      responses:
+        '200': {description: Sources, content: {application/json: {schema: {$ref: '#/components/schemas/Sources'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    agentSecret:
+      type: apiKey
+      in: header
+      name: X-Service-Secret
+      description: |
+        agent-to-yolo-node secret (file /etc/edge-agent/secrets/yolo-node-api.secret on pi-brain, mode 600, owned by
+        the agent user). yolo-node holds a SHA-256 verifier only. Scope `agent`. Different from the hub secret and the
+        vision-node secret.
+  responses:
+    Error:
+      description: Error. `error` is one of the codes in the API description; `message` is fixed text per code.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    QueueFull:
+      description: Queue full or snapshot rate limit (`queue_full`); retry after the given seconds
+      headers:
+        Retry-After: {schema: {type: integer, minimum: 1, maximum: 60}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          enum: [bad_request, unauthorized, payload_too_large, unsupported_media_type, bad_image, queue_full, model_error,
+                 vision_unavailable, timeout, unknown_source, source_offline]
+        message: {type: string, maxLength: 120}
+    ImageRef:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{1,64}$'
+      maxLength: 64
+      description: Opaque correlation id chosen by the agent, echoed back unchanged. Not a way to fetch anything.
+    TimeoutMs:
+      type: integer
+      minimum: 1000
+      maximum: 25000
+      default: 25000
+      description: Hard deadline for the whole job including queue wait. Node cap is 25000.
+    Latency:
+      type: number
+      minimum: 0
+      maximum: 120000
+    DetectParams:
+      type: object
+      additionalProperties: false
+      properties:
+        min_conf: {type: number, minimum: 0.05, maximum: 1, default: 0.25}
+        max_detections: {type: integer, minimum: 1, maximum: 50, default: 50}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+        timeout_ms: {$ref: '#/components/schemas/TimeoutMs'}
+    Detection:
+      description: Same item as perception-event.schema.json `detections[]`. The label comes from the model's fixed class table, never from free text.
+      type: object
+      additionalProperties: false
+      required: [label, conf, bbox]
+      properties:
+        label: {type: string, pattern: '^[A-Za-z0-9 _-]{1,32}$', maxLength: 32}
+        conf: {type: number, minimum: 0, maximum: 1}
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: {type: number, minimum: 0}
+          description: "[x, y, w, h] in pixels of the submitted image"
+    DetectResult:
+      type: object
+      additionalProperties: false
+      required: [detections, image_width, image_height, model, latency_ms, queue_ms]
+      properties:
+        detections:
+          type: array
+          maxItems: 50
+          items: {$ref: '#/components/schemas/Detection'}
+        image_width: {type: integer, minimum: 1, maximum: 4096}
+        image_height: {type: integer, minimum: 1, maximum: 4096}
+        model: {type: string, pattern: '^[A-Za-z0-9._-]{1,48}$', maxLength: 48}
+        latency_ms: {$ref: '#/components/schemas/Latency'}
+        queue_ms: {$ref: '#/components/schemas/Latency'}
+        image_ref: {$ref: '#/components/schemas/ImageRef'}
+    SourceId:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{1,32}$'
+      maxLength: 32
+    SnapshotParams:
+      type: object
+      additionalProperties: false
+      required: [source_id]
+      properties:
+        source_id: {$ref: '#/components/schemas/SourceId'}
+        min_conf: {type: number, minimum: 0.05, maximum: 1, default: 0.25}
+        max_detections: {type: integer, minimum: 1, maximum: 50, default: 50}
+        timeout_ms: {$ref: '#/components/schemas/TimeoutMs'}
+    SnapshotResult:
+      type: object
+      additionalProperties: false
+      required: [source_id, detections, image_width, image_height, frame_age_ms, model, latency_ms, queue_ms]
+      properties:
+        source_id: {$ref: '#/components/schemas/SourceId'}
+        detections:
+          type: array
+          maxItems: 50
+          items: {$ref: '#/components/schemas/Detection'}
+        image_width: {type: integer, minimum: 1, maximum: 4096}
+        image_height: {type: integer, minimum: 1, maximum: 4096}
+        frame_age_ms: {type: number, minimum: 0, maximum: 60000, description: "Age of the frame when detection started"}
+        model: {type: string, pattern: '^[A-Za-z0-9._-]{1,48}$', maxLength: 48}
+        latency_ms: {$ref: '#/components/schemas/Latency'}
+        queue_ms: {$ref: '#/components/schemas/Latency'}
+    Sources:
+      type: object
+      additionalProperties: false
+      required: [sources]
+      properties:
+        sources:
+          type: array
+          maxItems: 8
+          items:
+            type: object
+            additionalProperties: false
+            required: [source_id, type, online]
+            properties:
+              source_id: {$ref: '#/components/schemas/SourceId'}
+              type: {type: string, enum: [usb, csi, rtsp, http_snapshot, folder_replay]}
+              online: {type: boolean}
+    Health:
+      type: object
+      additionalProperties: false
+      required: [ok, service, node, contract_version, mem_available_mb, queue_depth, busy, engine_loaded, sources_online]
+      properties:
+        ok: {type: boolean, description: "False while the TensorRT engine is not loaded"}
+        service: {const: yolo-node}
+        node: {type: string, pattern: '^[a-z0-9-]{1,32}$', maxLength: 32}
+        mock: {type: boolean}
+        contract_version: {type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$', maxLength: 16}
+        mem_available_mb: {type: number, minimum: 0}
+        queue_depth: {type: integer, minimum: 0, maximum: 8}
+        busy: {type: boolean}
+        temp_c: {type: [number, 'null']}
+        engine_loaded: {type: boolean}
+        sources_online: {type: integer, minimum: 0, maximum: 8}

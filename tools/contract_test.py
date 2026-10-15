@@ -379,6 +379,108 @@ for sc in scen["scenarios"]:
         failures += 1
         print(f"FAIL consume scenario: {sc['name']}: got {got}, want {want}")
 
+# --- perception node internal APIs (vision-node, yolo-node): mandatory auth except /health, closed untrusted output ----
+NODE_APIS = {}
+for _fname in ("vision-node-internal", "yolo-node-internal"):
+    _spec = yaml.safe_load((contracts / "openapi" / f"{_fname}.yaml").read_text(encoding="utf-8"))
+    NODE_APIS[_fname] = _spec
+    try:
+        validate_openapi(_spec)
+        print(f"ok   openapi/{_fname}.yaml is a valid OpenAPI document")
+    except Exception as e:  # noqa: BLE001
+        failures += 1
+        print(f"FAIL openapi/{_fname}.yaml: {str(e)[:120]}")
+    _f2 = failures
+    if list(_spec["components"]["securitySchemes"]) != ["agentSecret"] or _spec.get("security") != [{"agentSecret": []}]:
+        failures += 1
+        print(f"FAIL {_fname}: exactly one scheme (agentSecret) and it must be the default security")
+    _open = 0
+    for path, item in _spec["paths"].items():
+        for method, op in item.items():
+            if method not in ("get", "post", "put", "patch", "delete"):
+                continue
+            label = f"{method.upper()} {path}"
+            sec = op.get("security", _spec.get("security", []))
+            scopes = op.get("x-scopes")
+            if path == "/health":
+                _open += 1
+                if method != "get" or sec != [] or scopes != ["open"]:
+                    failures += 1
+                    print(f"FAIL {_fname} {label}: /health must be GET, security [] and x-scopes [open]")
+                continue
+            if sec != [{"agentSecret": []}] or scopes != ["agent"]:
+                failures += 1
+                print(f"FAIL {_fname} {label}: every operation except GET /health must require agentSecret with x-scopes [agent]")
+            if "401" not in op["responses"]:
+                failures += 1
+                print(f"FAIL {_fname} {label}: missing 401 response")
+            if "admin" in path or "provision" in path or not path.startswith("/v1/"):
+                failures += 1
+                print(f"FAIL {_fname} {label}: no admin/provisioning operations; paths live under /v1/")
+            if method == "get" and path == "/v1/sources":
+                continue
+            if method != "post":
+                failures += 1
+                print(f"FAIL {_fname} {label}: only POST inference operations (and read-only GET /v1/sources) are allowed")
+    if _open != 1:
+        failures += 1
+        print(f"FAIL {_fname}: exactly one open operation (GET /health) expected, found {_open}")
+    # every object schema is closed (or an explicit typed map) and every string is bounded: nothing free-form can pass
+    def _walk(node, where):
+        global failures
+        if isinstance(node, dict):
+            if node.get("type") == "object" and "properties" in node and node.get("additionalProperties") in (None, True):
+                failures += 1
+                print(f"FAIL {_fname} {where}: object schema must set additionalProperties false")
+            if node.get("type") == "string" and not any(k in node for k in ("maxLength", "enum", "const", "format")):
+                failures += 1
+                print(f"FAIL {_fname} {where}: string schema without maxLength/enum/const")
+            for k, v in node.items():
+                _walk(v, f"{where}/{k}")
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                _walk(v, f"{where}[{i}]")
+    _walk(_spec["components"]["schemas"], "components.schemas")
+    _bad_keys = [k for k in ("tool_calls", "tool_call", "instructions", "prompt", "system") if f'"{k}":' in json.dumps(_spec["components"]["schemas"])]
+    if _bad_keys:
+        failures += 1
+        print(f"FAIL {_fname}: schemas must not define instruction-like fields: {_bad_keys}")
+    if failures == _f2:
+        print(f"ok   {_fname} auth mandatory except /health; schemas closed and bounded; no admin operation")
+
+_vis, _yol = NODE_APIS["vision-node-internal"], NODE_APIS["yolo-node-internal"]
+# the Pi fallback and the Jetson must return the same detection shape, and it must be the perception-event item
+for _c in ("DetectParams", "DetectResult", "Detection", "ImageRef", "TimeoutMs", "Latency"):
+    if _vis["components"]["schemas"][_c] != _yol["components"]["schemas"][_c]:
+        failures += 1
+        print(f"FAIL vision-node and yolo-node differ on {_c}")
+_evt_item = json.loads((contracts / "perception-event.schema.json").read_text(encoding="utf-8"))["properties"]["detections"]["items"]
+_det = _vis["components"]["schemas"]["Detection"]
+if _det["properties"]["label"]["pattern"] != _evt_item["properties"]["label"]["pattern"] or \
+        _det["properties"]["bbox"]["minItems"] != 4 or _det["required"] != _evt_item["required"]:
+    failures += 1
+    print("FAIL node Detection must match perception-event.schema.json detections[] (label pattern, bbox, required)")
+print("ok   node DetectResult identical across both nodes and aligned with perception-event")
+# image bytes: upload only, never a URL or reference to fetch
+for _n, _s in NODE_APIS.items():
+    _txt = json.dumps(_s)
+    if "image_url" in _txt or '"uri"' in _txt or '"format": "uri"' in _txt:
+        failures += 1
+        print(f"FAIL {_n}: images must be uploaded, never fetched by URL")
+
+for _folder, _comp, _api in [
+    ("vision-yesno-params", "VlmYesNoParams", _vis), ("vision-yesno-result", "VlmYesNoResult", _vis),
+    ("vision-short-params", "VlmShortParams", _vis), ("vision-short-result", "VlmShortResult", _vis),
+    ("vision-json-params", "VlmJsonParams", _vis), ("vision-json-result", "VlmJsonResult", _vis),
+    ("vision-stt-result", "SttResult", _vis), ("vision-health", "Health", _vis),
+    ("detect-params", "DetectParams", _vis), ("detect-params", "DetectParams", _yol),
+    ("detect-result", "DetectResult", _vis), ("detect-result", "DetectResult", _yol),
+    ("yolo-snapshot-params", "SnapshotParams", _yol), ("yolo-snapshot-result", "SnapshotResult", _yol),
+    ("yolo-sources", "Sources", _yol), ("yolo-health", "Health", _yol),
+    ("node-error", "Error", _vis), ("node-error", "Error", _yol),
+]:
+    run_component_suite(_folder, _comp, _api["components"])
+
 # --- docs: no devices/ topics, exactly 5 MCP tools -------------------------------
 for doc in contracts.glob("*.md"):
     if re.search(r"home/v1/devices|[\s`]devices/\{", doc.read_text(encoding="utf-8")):

@@ -1,0 +1,21 @@
+{
+  "source_id": "cam0",
+  "detections": [
+    {
+      "label": "person",
+      "conf": 0.81,
+      "bbox": [
+        10,
+        20,
+        100,
+        200
+      ]
+    }
+  ],
+  "image_width": 1280,
+  "image_height": 720,
+  "frame_age_ms": 40.0,
+  "model": "yolov8n-trt-fp16",
+  "latency_ms": 2412.5,
+  "queue_ms": 0.0
+}

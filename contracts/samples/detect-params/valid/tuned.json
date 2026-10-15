@@ -1,0 +1,6 @@
+{
+  "min_conf": 0.4,
+  "max_detections": 10,
+  "image_ref": "img_01",
+  "timeout_ms": 3000
+}

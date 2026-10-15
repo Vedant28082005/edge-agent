@@ -1,0 +1,18 @@
+{
+  "detections": [
+    {
+      "label": "person",
+      "conf": 0.81,
+      "bbox": [
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "image_width": 640,
+  "image_height": 480,
+  "model": "yolov8n",
+  "latency_ms": 2412.5,
+  "queue_ms": 0.0
+}

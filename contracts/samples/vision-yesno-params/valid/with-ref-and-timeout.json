@@ -1,0 +1,5 @@
+{
+  "question": "Is anyone at the door?",
+  "image_ref": "img_01",
+  "timeout_ms": 8000
+}

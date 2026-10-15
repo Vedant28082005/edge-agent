@@ -1,0 +1,13 @@
+{
+  "data": {
+    "lights_on": true,
+    "people": 2,
+    "room_state": "tidy",
+    "objects": [
+      "cup"
+    ]
+  },
+  "latency_ms": 2412.5,
+  "queue_ms": 0.0,
+  "cached": false
+}

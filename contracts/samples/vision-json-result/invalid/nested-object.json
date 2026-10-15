@@ -1,0 +1,10 @@
+{
+  "data": {
+    "a": {
+      "b": 1
+    }
+  },
+  "latency_ms": 2412.5,
+  "queue_ms": 0.0,
+  "cached": false
+}

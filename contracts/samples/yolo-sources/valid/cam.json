@@ -1,0 +1,9 @@
+{
+  "sources": [
+    {
+      "source_id": "cam0",
+      "type": "usb",
+      "online": true
+    }
+  ]
+}
