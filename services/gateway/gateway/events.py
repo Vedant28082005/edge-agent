@@ -4,9 +4,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 from .auth import User
+from .security import new_id
 from .upstream import JsonClient, UpstreamError
 
 log = logging.getLogger("gateway.events")
@@ -38,6 +40,7 @@ class Client:
 
 class Broadcaster:
     def __init__(self, queue_size: int = 256) -> None:
+        self.node_of: dict[str, str] = {}          # endpoint_id -> node_id (action log)
         self.room_of: dict[str, str] = {}          # endpoint_id -> room; never forgets (forgotten endpoints stay filtered)
         self.scenes: dict[str, dict] = {}          # scene_id -> last known scene (to judge visibility of a deleted scene)
         self.clients: set[Client] = set()
@@ -96,7 +99,58 @@ class Broadcaster:
                 c.closed.set()
 
 
-NODE_RE = __import__("re").compile(r"^esp32-[0-9a-f]{12}$")
+NODE_RE = re.compile(r"^esp32-[0-9a-f]{12}$")
+EP_RE = re.compile(r"^ep_[0-9a-f]{8}$")
+
+
+# ---- WsMessage shapes (gateway.yaml 2.11.0): every message is built by one of these, so what leaves the gateway is exactly
+# the contract's shape. Anything that does not fit is dropped (None), never forwarded half-formed.
+def _int(v, lo: int = 0) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= lo
+
+
+def _str(v, n: int) -> bool:
+    return isinstance(v, str) and len(v) <= n
+
+
+def _scalar(v) -> bool:
+    return isinstance(v, (bool, int, float, str)) and not (isinstance(v, float) and v != v)
+
+
+def _num(v, lo: float, hi: float) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def clean_state(d: dict) -> dict | None:
+    ep, vals, ts = d.get("endpoint_id"), d.get("values"), d.get("ts")
+    if isinstance(ts, float):
+        ts = int(ts)
+    if _int(ts) and ts > 100_000_000_000:                   # milliseconds -> seconds
+        ts //= 1000
+    if not (isinstance(ep, str) and EP_RE.match(ep) and isinstance(vals, dict) and vals and all(_scalar(v) for v in vals.values())
+            and _int(ts, 1_000_000_000)):
+        return None
+    return {"endpoint_id": ep, "values": vals, "ts": ts}
+
+
+def clean_settle(name: str, d: dict) -> dict | None:
+    """action_settled / action_settle_timeout. `call_id` is required by the contract: a hub event for a gateway-initiated
+    command has none, so the gateway labels it `gw_<random>` (the message is not tied to any chat request)."""
+    cid = d.get("call_id")
+    if not (isinstance(cid, str) and 0 < len(cid) <= 64):
+        cid = new_id("gw_")
+    base = {"call_id": cid, "endpoint_id": d.get("endpoint_id"), "capability": d.get("capability"), "value": d.get("value")}
+    if not (isinstance(base["endpoint_id"], str) and EP_RE.match(base["endpoint_id"]) and isinstance(base["capability"], str)
+            and len(base["capability"]) <= 64 and _scalar(base["value"])):
+        return None
+    if name == "action_settled":
+        if not (_scalar(d.get("observed")) and _int(d.get("elapsed_ms"))):
+            return None
+        return {**base, "observed": d["observed"], "elapsed_ms": d["elapsed_ms"]}
+    obs = d.get("observed")
+    if not ((obs is None or _scalar(obs)) and _num(d.get("settle_s"), 1, 120)):
+        return None
+    return {**base, "observed": obs, "settle_s": d["settle_s"]}
 
 
 def from_hub(env: dict) -> Event | None:
@@ -106,17 +160,18 @@ def from_hub(env: dict) -> Event | None:
     commands) go to everyone who can see the endpoint's room."""
     t, d = env.get("type"), env.get("data") or {}
     if t == "registry_changed":
-        return Event("registry_changed", {"version": d.get("version"), "reason": d.get("reason"),
-                                          "endpoint_ids": d.get("endpoint_ids") or []},
-                     endpoint_ids=list(d.get("endpoint_ids") or []))
+        ids = [x for x in (d.get("endpoint_ids") or []) if isinstance(x, str) and EP_RE.match(x)]
+        if not _int(d.get("version")):
+            return None
+        return Event("registry_changed", {"version": d["version"], "endpoint_ids": ids}, endpoint_ids=ids)
     if t == "state":
-        return Event("state", {"endpoint_id": d.get("endpoint_id"), "values": d.get("values"), "ts": d.get("ts")},
-                     endpoint_id=d.get("endpoint_id"))
+        m = clean_state(d)
+        return Event("state", m, endpoint_id=m["endpoint_id"]) if m else None
     if t in ("action_settled", "action_settle_timeout"):
         if d.get("call_id"):
             return None
-        keys = ("endpoint_id", "capability", "value", "observed", "elapsed_ms" if t == "action_settled" else "settle_s")
-        return Event(t, {k: d.get(k) for k in keys}, endpoint_id=d.get("endpoint_id"))
+        m = clean_settle(t, d)
+        return Event(t, m, endpoint_id=m["endpoint_id"]) if m else None
     node = d.get("node_id") if isinstance(d.get("node_id"), str) and NODE_RE.match(d.get("node_id")) else None
     if t == "node_status" and node:                          # infrastructure detail: admins only
         return Event("notification", {"level": "info", "text": f"{node} is {'online' if d.get('online') else 'offline'}"}, admin_only=True)
@@ -125,12 +180,20 @@ def from_hub(env: dict) -> Event | None:
     return None                                              # scenes_changed is handled by scene_events (needs the hub)
 
 
-AGENT_FIELDS = {
-    "async_result": ("ref", "kind", "text", "latency_ms"),
-    "action_settled": ("call_id", "endpoint_id", "capability", "value", "observed", "elapsed_ms"),
-    "action_settle_timeout": ("call_id", "endpoint_id", "capability", "value", "observed", "settle_s"),
-    "notification": ("level", "text"),
-}
+def clean_agent(name: str, d: dict) -> dict | None:
+    """Agent event fields -> WsMessage fields (None = not forwardable). Only the contract's fields are kept."""
+    if name in ("action_settled", "action_settle_timeout"):
+        return clean_settle(name, d) if isinstance(d.get("call_id"), str) and d.get("call_id") else None
+    if name == "async_result":
+        if _str(d.get("ref"), 64) and d.get("ref") and d.get("kind") == "vision" and isinstance(d.get("text"), str) \
+                and _int(d.get("latency_ms")):
+            return {"ref": d["ref"], "kind": "vision", "text": d["text"][:4000], "latency_ms": d["latency_ms"]}
+        return None
+    if name == "notification":
+        if isinstance(d.get("level"), str) and 0 < len(d["level"]) <= 32 and isinstance(d.get("text"), str):
+            return {"level": d["level"], "text": d["text"][:500]}
+        return None
+    return None
 
 
 def from_agent(name: str, d: dict) -> Event | None:
@@ -138,13 +201,21 @@ def from_agent(name: str, d: dict) -> Event | None:
     Only the contract's fields are forwarded (agent-events.md). Owner events go to that user only. Household events:
     settle events to everyone who can see the endpoint's room, the rest to admin and members, never guests.
     `confirmation_request` is handled by the subscriber."""
-    fields = AGENT_FIELDS.get(name)
-    if fields is None or not isinstance(d, dict):
+    if not isinstance(d, dict):
+        return None
+    m = clean_agent(name, d)
+    if m is None:
         return None
     owner = d.get("user_id") if isinstance(d.get("user_id"), str) and d.get("user_id") != "household" else None
-    ep = d.get("endpoint_id") if name.startswith("action_") and isinstance(d.get("endpoint_id"), str) else None
-    return Event(name, {k: d[k] for k in fields if k in d}, user_id=owner, endpoint_id=ep,
-                 no_guest=owner is None and ep is None)
+    ep = m["endpoint_id"] if name.startswith("action_") else None
+    return Event(name, m, user_id=owner, endpoint_id=ep, no_guest=owner is None and ep is None)
+
+
+def confirmation_request_event(user_id: str, request_id: str, summary: str, action: dict, action_hash: str, expires_in_s: int) -> Event:
+    """The WsMessage `confirmation_request` from what the gateway stored (canonical action, bounded fields)."""
+    return Event("confirmation_request", {"request_id": request_id, "summary": str(summary)[:200], "action": action,
+                                          "action_hash": action_hash, "expires_in_s": max(1, min(int(expires_in_s), 300))},
+                 user_id=user_id)
 
 
 SCENE_CHANGE = {"create": "created", "delete": "deleted"}
@@ -182,6 +253,13 @@ async def scene_events(env: dict, hub, bc: Broadcaster, assigned) -> list[Event]
     return out
 
 
+def note_settle(actions, name: str, d) -> None:
+    """A settle event from the hub or the agent closes the matching `moving` row in the action log."""
+    if isinstance(d, dict):
+        actions.settle(name == "action_settled", d.get("endpoint_id"), d.get("capability"), d.get("value"), d.get("call_id"),
+                       d.get("elapsed_ms"))
+
+
 async def refresh_scenes(hub, bc: Broadcaster) -> None:
     try:
         status, body = await hub.hub("GET", "/scenes")
@@ -200,9 +278,11 @@ async def refresh_rooms(hub, bc: Broadcaster) -> None:
         for e in body:
             if isinstance(e, dict) and e.get("endpoint_id"):
                 bc.room_of[e["endpoint_id"]] = e.get("room", "")
+                if isinstance(e.get("node_id"), str):
+                    bc.node_of[e["endpoint_id"]] = e["node_id"]
 
 
-async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Event, retry_s: float = 1.0, assigned=None) -> None:
+async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Event, retry_s: float = 1.0, assigned=None, actions=None) -> None:
     last_id: str | None = None
     delay = retry_s
     while not stop.is_set():
@@ -220,6 +300,8 @@ async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Eve
                     continue
                 if ev == "hello" or not isinstance(env, dict):
                     continue
+                if actions is not None and env.get("type") in ("action_settled", "action_settle_timeout"):
+                    note_settle(actions, env.get("type"), env.get("data"))
                 if env.get("type") == "registry_changed":
                     await refresh_rooms(hub, bc)
                 if env.get("type") == "scenes_changed" and assigned is not None:
@@ -243,7 +325,8 @@ async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Eve
             pass
 
 
-async def run_agent_subscriber(agent: JsonClient, bc: Broadcaster, confirm, stop: asyncio.Event, retry_s: float = 2.0) -> None:
+async def run_agent_subscriber(agent: JsonClient, bc: Broadcaster, confirm, stop: asyncio.Event, retry_s: float = 2.0,
+                               actions=None) -> None:
     """Consumes the agent's GET /v1/events (agent-internal.yaml): reconnects with Last-Event-ID; `reset` = older than the
     agent's buffer, missed events are lost."""
     last_id: str | None = None
@@ -266,10 +349,12 @@ async def run_agent_subscriber(agent: JsonClient, bc: Broadcaster, confirm, stop
                     continue
                 uid = d.get("user_id")
                 if ev == "confirmation_request":
-                    if isinstance(uid, str) and uid != "household" and confirm.register_request(uid, None, d):
-                        bc.publish(Event("confirmation_request", {k: d.get(k) for k in
-                                         ("request_id", "summary", "action", "action_hash", "expires_in_s")}, user_id=uid))
+                    if isinstance(uid, str) and uid != "household":
+                        if confirm.register_request(uid, None, d):
+                            bc.publish(confirm.request_event(d["request_id"]))
                     continue
+                if actions is not None and ev in ("action_settled", "action_settle_timeout"):
+                    note_settle(actions, ev, d)
                 out = from_agent(ev, d)
                 if out:
                     bc.publish(out)
