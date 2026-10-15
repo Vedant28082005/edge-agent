@@ -40,6 +40,7 @@ class Hub:
                                  on_announce_accepted=self.provisioning.on_announce)
         self.executor = Executor(self.registry, self.bridge, gateway, cfg, self.clock, self.bus)
         self.scenes = SceneService(self.registry, self.executor, self.bus, self.clock)
+        self.executor.scenes = self.scenes
         self.admin = AdminService(self.registry, self.bridge, self.dynsec, self.provisioning, self.executor, self.scenes)
         self._stop = threading.Event()
         self._maint: threading.Thread | None = None
