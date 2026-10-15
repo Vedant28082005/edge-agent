@@ -21,6 +21,7 @@ from .notify import Notifier
 from .policy import Action, Decision, Trigger, needs_confirmation
 from .reqctx import ReqCtx
 from .schema import strip_forbidden, validate_call
+from .scope import NOTHING, Scope
 from .settle import SettleTable, _scalar
 from .store import Store
 from .util import action_hash, clean_label
@@ -69,12 +70,10 @@ class CallOutcome:
 
 class Executor:
     def __init__(self, hub: McpClient, registry: DeviceRegistry, store: Store, confirmations: ConfirmationManager,
-                 settles: SettleTable, notifier: Notifier, metrics: Metrics | None = None,
-                 scene_names: tuple[str, ...] = ()) -> None:
+                 settles: SettleTable, notifier: Notifier, metrics: Metrics | None = None) -> None:
         self.hub, self.registry, self.store = hub, registry, store
         self.confirmations, self.settles, self.notifier = confirmations, settles, notifier
         self.metrics = metrics or Metrics()
-        self.scene_names = scene_names
 
     # ------------------------------------------------------------------------------------------ public
     async def run_calls(self, ctx: ReqCtx, calls: list[dict]) -> list[CallOutcome]:
@@ -99,7 +98,9 @@ class Executor:
             if removed:
                 self.metrics.stripped_fields += len(removed)
                 log.warning("model supplied out-of-band argument(s) %s for %s; stripped", removed, tool)
-        err, args = validate_call(self.registry, tool, raw_args, self.scene_names)
+        if not _guest_may_not(ctx, tool) and self._scope_error(ctx, tool, raw_args):   # before validation: an out-of-scope id never gets a richer error
+            return await self._out_of_scope(ctx, call_id, tool, raw_args)
+        err, args = validate_call(self.registry, tool, raw_args)
         shown_args = args if not err else (raw_args if isinstance(raw_args, dict) else {})
         shown_args = strip_forbidden(shown_args)[0] if isinstance(shown_args, dict) else {}
         tool_s = tool if isinstance(tool, str) and tool in ("list_devices", "get_state", "set_state", "run_scene", "read_sensor") else "invalid"
@@ -153,6 +154,8 @@ class Executor:
             tool, raw = "set_state", {k: action[k] for k in ("endpoint_id", "capability", "value")}
         else:
             tool, raw = "run_scene", {"scene": action.get("scene_id")}
+        if not _guest_may_not(ctx, tool) and self._scope_error(ctx, tool, raw):
+            return await self._out_of_scope(ctx, call_id, tool, raw, announce=False)
         err, args = validate_call(self.registry, tool, raw)
         if err:
             self.metrics.reject(err)
@@ -196,6 +199,8 @@ class Executor:
             return result
 
     async def _finish(self, ctx: ReqCtx, call_id: str, tool: str, args: dict, result: dict) -> CallOutcome:
+        if tool == "list_devices":
+            result = self._scoped_listing(ctx, result)
         ok = result.get("ok", True) is not False and "error" not in result
         status = result.get("status") if isinstance(result.get("status"), str) else None
         moving: set[tuple[str, str]] = set()
@@ -258,6 +263,56 @@ class Executor:
                                note="token_expired")
         return await self._finish(ctx, call_id, tool, args, result)
 
+    # ------------------------------------------------------------------------------------------ scope
+    @staticmethod
+    def scope_of(ctx: ReqCtx) -> Scope:
+        """The scope enforced for this request. A guest (role or trigger) is never unrestricted, whatever the ctx holds."""
+        sc = ctx.scope if isinstance(ctx.scope, Scope) else NOTHING
+        return sc.for_guest() if (ctx.role == "guest" or ctx.trigger.guest) else sc
+
+    def _scope_error(self, ctx: ReqCtx, tool: Any, raw: Any) -> str | None:
+        """`out_of_scope` when the call touches a room or scene the caller may not (agent-internal.yaml 1.3.0), else None.
+        Runs on every path (LLM plan, fast path, rules, approved retry) before anything reaches the hub. Unknown ids and
+        malformed arguments are left to `validate_call`; only existing things outside the scope are refused here."""
+        sc = self.scope_of(ctx)
+        if not sc.restricted or not isinstance(raw, dict):
+            return None
+        a = strip_forbidden(raw)[0]
+        reg = self.registry
+        if tool in ("set_state", "read_sensor", "get_state") and isinstance(a.get("endpoint_id"), str):
+            d = reg.devices.get(a["endpoint_id"])
+            if d is not None and not sc.room_ok(d.room):
+                return "out_of_scope"
+        if tool in ("get_state", "list_devices") and isinstance(a.get("room"), str) and not sc.room_ok(a["room"]):
+            return "out_of_scope"
+        if tool == "run_scene" and sc.scenes is not None and isinstance(a.get("scene"), str):
+            ref = a["scene"]
+            hit = reg.find_scene(ref)
+            by_name = next((x for x in reg.scenes.values() if x.name == ref), None)
+            if hit is not None and by_name is not None and hit.scene_id != by_name.scene_id:
+                return "out_of_scope"                            # a name that is also another scene's id: ambiguous, refuse
+            if not sc.scene_id_ok(hit.scene_id if hit is not None else ref):
+                return "out_of_scope"
+        return None
+
+    def _scoped_listing(self, ctx: ReqCtx, result: dict) -> dict:
+        sc = self.scope_of(ctx)
+        if not sc.restricted or not isinstance(result.get("devices"), list):
+            return result
+        return {**result, "devices": [d for d in result["devices"] if isinstance(d, dict) and sc.room_ok(d.get("room"))]}
+
+    async def _out_of_scope(self, ctx: ReqCtx, call_id: str, tool: Any, raw: Any, announce: bool = True) -> CallOutcome:
+        tool_s = tool if isinstance(tool, str) and tool in READ_TOOLS + ("set_state", "run_scene") else "invalid"
+        args = strip_forbidden(raw)[0] if isinstance(raw, dict) else {}
+        self.metrics.reject("out_of_scope")
+        self.settles.cancel(call_id)
+        res = {"ok": False, "error": "out_of_scope"}            # agent-side code, never a hub code; nothing was sent
+        if announce:
+            await ctx.emit("tool_call", {"call_id": call_id, "tool": tool_s, "args": _safe_args(args)})
+            await ctx.emit("tool_result", {"call_id": call_id, "tool": tool_s, "result": res, "ok": False})
+        self._log(ctx, "out_of_scope", tool_s, args, False, None)
+        return CallOutcome(call_id, tool_s, args, res, False, "denied", note="out_of_scope")
+
     def _action_for_confirmation(self, tool: str, args: dict, blocked: dict | None) -> tuple[dict, str]:
         if tool == "set_state":
             d = self.registry.devices.get(args["endpoint_id"])
@@ -303,9 +358,11 @@ class Executor:
 
 
 # ----------------------------------------------------------------------------------------------------- helpers
-# TODO(S0h contract change): guests are denied set_state/run_scene outright because the contract has no room scope on a
-# user/role. Once S0h adds room-scoped guest grants (gateway-supplied allowed rooms), replace this blanket denial with a
-# per-endpoint room check here, still failing closed when the scope is absent or the endpoint's room is unknown.
+# S8b rule, kept under agent-internal.yaml 1.3.0: a guest can NEVER set_state or run_scene, even in an assigned room or
+# for an assigned scene (the contract gives a guest reads within `allowed_rooms`; control stays admin/member only).
+# `allowed_rooms` / `allowed_scenes` scope members and a guest's reads (get_state, read_sensor, list_devices); see
+# `Executor._scope_error`. TODO(owner decision): if guests are ever to control assigned rooms/scenes, drop the tool from
+# GUEST_DENIED_TOOLS: the per-room / per-scene scope check already runs after this denial and would then apply.
 GUEST_DENIED_TOOLS = ("set_state", "run_scene")
 
 

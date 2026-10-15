@@ -18,7 +18,9 @@ from ..devices import DeviceRegistry
 from ..events import Event, EventBus
 from ..executor import CallOutcome, Executor
 from ..reqctx import ReqCtx
+from ..scope import UNRESTRICTED, Scope
 from ..store import Store
+from ..views import ScopedViews
 from .config import SchedConfig
 from .grammar import ConstraintCache, ConstraintSchema, make_backend
 from .memory import MemoryWindow
@@ -37,14 +39,14 @@ class Routed:
     outs: list = field(default_factory=list)
     say: str = ""
     text: str | None = None            # a complete answer (skips compose_final), e.g. a sensor reading or a denial
-    sse_route: str = "fast"            # fast | vision  (the SSE `route` enum is fast|llm|vision)
+    sse_route: str = "fast"            # fast | sensor | yolo | vlm  (SSE `route` enum fast|llm|sensor|yolo|vlm; `vision` is legacy, never emitted)
 
 
 class Scheduler:
     def __init__(self, cfg: SchedConfig, registry: DeviceRegistry, executor: Executor | None, store: Store, bus: EventBus,
-                 scene_names=lambda: ()) -> None:
+                 views: ScopedViews | None = None) -> None:
         self.cfg, self.registry, self.executor, self.store, self.bus = cfg, registry, executor, store, bus
-        self.scene_names = scene_names
+        self.views = views or ScopedViews(registry)
         self.resolver = FastPathResolver(cfg)
         self.router = CostRouter(cfg)
         self.constraints = ConstraintCache()
@@ -59,8 +61,10 @@ class Scheduler:
                 raise ValueError(f"not an ablation flag: {k}")
             setattr(self.cfg, k, v)
 
-    def schema(self) -> ConstraintSchema:
-        return self.constraints.get(self.registry, tuple(self.scene_names()))
+    def schema(self, scope: Scope = UNRESTRICTED) -> ConstraintSchema:
+        """Decoding schema for this scope: the full registry for an unrestricted caller, otherwise only its own endpoints,
+        rooms and scenes. Keyed on the hub's `registry_version` (content hash when the hub sent none)."""
+        return self.constraints.get(self.views.get(scope).registry, None, "" if not scope.restricted else scope.key)
 
     def new_trace(self, ctx: ReqCtx) -> TurnTrace:
         return TurnTrace(ctx.req_id, flags=self.cfg.flags())
@@ -79,7 +83,8 @@ class Scheduler:
         return None
 
     async def _fast(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
-        res = self.resolver.resolve(text, self.registry, ctx.role, tuple(self.scene_names()))
+        reg = self.views.get(ctx.scope).registry          # scoped: the resolver cannot even name an out-of-scope device or scene
+        res = self.resolver.resolve(text, reg, ctx.role, reg.scene_names())
         trace.fast_reason, trace.confidence = res.reason, round(res.confidence, 3)
         trace.candidates = [list(c) for c in res.candidates]
         if res.status == DENIED:
@@ -96,7 +101,7 @@ class Scheduler:
         return Routed(outs=outs, say=res.say)
 
     async def _perception(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
-        dec = self.router.route(text, self.registry, has_image=ctx.images > 0, role=ctx.role)
+        dec = self.router.route(text, self.views.get(ctx.scope).registry, has_image=ctx.images > 0, role=ctx.role)
         if dec.kind == "other":
             return None
         trace.candidates = [c.__dict__ for c in dec.candidates]
@@ -111,8 +116,8 @@ class Scheduler:
                 ok = out.ok and out.result.get("value") is not None
                 self.router.observe(src, ms, ok)
                 if ok:
-                    trace.route, trace.sse_route, trace.source = "sensor", "fast", "sensor"
-                    return Routed(outs=[out], text=self._sensor_text(out))
+                    trace.route, trace.sse_route, trace.source = "sensor", "sensor", "sensor"
+                    return Routed(outs=[out], text=self._sensor_text(out), sse_route="sensor")
                 trace.fallbacks.append(src)
                 continue
             backend = next((b for b in self.router.avail.backends if b.supports(src)), None)
@@ -121,8 +126,9 @@ class Scheduler:
             ans = await backend.answer(src, text, [])           # image bytes are not kept past the API layer (gap)
             self.router.observe(src, ans.latency_ms or (time.monotonic() - t0) * 1000, ans.ok)
             if ans.ok and ans.text:
-                trace.route, trace.sse_route, trace.source = src.split("_")[0], "vision", src
-                return Routed(text=ans.text, sse_route="vision")
+                kind = src.split("_")[0]                                  # yolo | vlm
+                trace.route, trace.sse_route, trace.source = kind, kind, src
+                return Routed(text=ans.text, sse_route=kind)
             trace.fallbacks.append(src)
         return None
 

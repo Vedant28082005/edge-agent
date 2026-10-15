@@ -19,6 +19,7 @@ from .reqctx import ReqCtx
 from .sched.scheduler import Scheduler
 from .sched.trace import TurnTrace
 from .store import Store
+from .views import ScopedViews
 from .util import clean_label, clean_user_text
 
 log = logging.getLogger("agent.chat")
@@ -33,7 +34,7 @@ ERROR_TEXT = {
     "device_error": "reported an error", "hub_unavailable": "the device hub is unreachable",
     "confirmation_required": "needs your confirmation", "budget_exceeded": "I ran out of budget for this request",
     "not_allowed": "guests can't do that", "blocked_notify_only": "needs your confirmation in the app",
-    "not_sensor": "that isn't a sensor", "bad_tool_result": "the hub returned something unexpected",
+    "out_of_scope": "that isn't available to you", "not_sensor": "that isn't a sensor", "bad_tool_result": "the hub returned something unexpected",
 }
 
 
@@ -91,8 +92,9 @@ def compose_final(say: str, outs: list[CallOutcome], reg: DeviceRegistry) -> str
 class ChatService:
     def __init__(self, registry: DeviceRegistry, builder: PromptBuilder, planner: Planner, executor: Executor,
                  store: Store, metrics: Metrics, settle_wait_s: float = 150.0, max_queued_turns: int = 2,
-                 sched: Scheduler | None = None) -> None:
+                 sched: Scheduler | None = None, views: ScopedViews | None = None) -> None:
         self.registry, self.builder, self.planner, self.executor = registry, builder, planner, executor
+        self.views = views or ScopedViews(registry, builder)
         self.sched = sched
         self.store, self.metrics, self.settle_wait_s = store, metrics, settle_wait_s
         self._active = 0
@@ -141,6 +143,8 @@ class ChatService:
 
     async def _turn_traced(self, ctx: ReqCtx, text: str, t0: float, trace: TurnTrace | None) -> None:
         user, sess, guest = ctx.user_id, ctx.session_id, ctx.role == "guest"
+        view = self.views.get(ctx.scope)               # what THIS caller may see: names outside the scope never reach the model
+        reg = view.registry
         routed = await self.sched.route(ctx, text, trace) if self.sched else None
         outs: list[CallOutcome] = []
         route = "llm"
@@ -148,7 +152,7 @@ class ChatService:
         if routed is not None:
             outs, route = routed.outs, routed.sse_route
             await ctx.emit("status", {"text": "working on it"})
-            final = routed.text if routed.text is not None else compose_final(routed.say, outs, self.registry)
+            final = routed.text if routed.text is not None else compose_final(routed.say, outs, reg)
         else:
             if self.sched:
                 win = self.sched.memory.load(user, sess, guest)
@@ -170,7 +174,7 @@ class ChatService:
                     say = "I stopped here because I reached this request's limit."
                     break
                 try:
-                    prompt = self.builder.build(text, history, summary, memories, extra_tail, tool_results)
+                    prompt = view.builder.build(text, history, summary, memories, extra_tail, tool_results)
                 except PromptBudgetError:
                     log.exception("prompt over budget")
                     await ctx.emit("error", {"code": "bad_request", "message": "request too large"})
@@ -178,7 +182,7 @@ class ChatService:
                         trace.outcome = "error:prompt_budget"
                     return
                 try:
-                    plan: Plan = await self.planner.plan(prompt.messages)
+                    plan: Plan = await self.planner.plan(prompt.messages, ctx.scope)
                 except LlmBusy:
                     await ctx.emit("error", {"code": "llm_busy", "message": "the assistant is busy, try again shortly"})
                     if trace:
@@ -202,8 +206,8 @@ class ChatService:
                 if not reads:
                     break
                 extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
-                tool_results = "\n".join(render_result(o.tool, o.args, o.result, self.registry) for o in new if o.ok)
-            final = compose_final(say, outs, self.registry)
+                tool_results = "\n".join(render_result(o.tool, o.args, o.result, reg) for o in new if o.ok)
+            final = compose_final(say, outs, reg)
         if ctx.images:
             final += " (I can't analyse images yet.)"
         words = final.split(" ")

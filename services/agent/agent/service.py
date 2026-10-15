@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import OrderedDict
 
 import httpx
 
@@ -22,6 +24,7 @@ from .planner import Planner
 from .policy import Trigger
 from .prompt import PromptBuilder
 from .reqctx import Budget, ReqCtx
+from .scope import NOTHING, UNRESTRICTED, Scope
 from .sched.config import SchedConfig
 from .sched.grammar import make_backend
 from .sched.scheduler import Scheduler
@@ -29,8 +32,11 @@ from .util import action_hash
 from .settle import SettleTable
 from .store import Store
 from .util import read_secret_file
+from .views import ScopedViews
 
 log = logging.getLogger("agent")
+
+SCOPE_MEMORY_S = 1800.0      # how long a user's last chat scope may serve an approved Retry the agent never saw
 
 
 class Agent:
@@ -53,16 +59,17 @@ class Agent:
         self.llm.prefix_cache, self.llm.id_slot = self.sched_cfg.prefix_cache, self.sched_cfg.id_slot
         self.hub = hub
         self.builder = PromptBuilder(self.registry)
+        self.views = ScopedViews(self.registry, self.builder)
+        self._last_scope: OrderedDict[str, tuple[str, Scope, float]] = OrderedDict()    # user -> (role, scope, monotonic ts)
         self.loader = RegistryLoader(hub, self.registry, self._on_registry_changed) if hub else None
         self.confirmations = ConfirmationManager(cfg.confirmation_ttl_s)
         self.settles = SettleTable(self.notifier, cfg.settle_wait_s)
         self.executor = Executor(hub, self.registry, self.store, self.confirmations, self.settles, self.notifier,
-                                 self.metrics, tuple(cfg.scene_names)) if hub else None
+                                 self.metrics) if hub else None
         self.planner = Planner(llm, self.plan_schema, self.metrics)
-        self.sched = Scheduler(self.sched_cfg, self.registry, self.executor, self.store, self.bus,
-                               lambda: tuple(cfg.scene_names))
+        self.sched = Scheduler(self.sched_cfg, self.registry, self.executor, self.store, self.bus, self.views)
         self.chat = ChatService(self.registry, self.builder, self.planner, self.executor, self.store, self.metrics,
-                                cfg.settle_wait_s, cfg.max_queued_turns, self.sched) if self.executor else None
+                                cfg.settle_wait_s, cfg.max_queued_turns, self.sched, self.views) if self.executor else None
         self.rules = RulesEngine(self.store, self._run_rule_action)
         self.stream = stream
         self._wire_bus()
@@ -87,9 +94,10 @@ class Agent:
         self.bus.subscribe(HUB_SETTLE_TIMEOUT, self._h_settle, "settle")
 
     # ------------------------------------------------------------------------------------------ schema / prefix
-    def plan_schema(self) -> dict:
-        """Constrained-decoding schema (+ GBNF), rebuilt only when the registry's decoding-relevant content changed."""
-        return self.sched.schema()
+    def plan_schema(self, scope: Scope = UNRESTRICTED) -> dict:
+        """Constrained-decoding schema (+ GBNF) for a scope, rebuilt only when the hub's registry_version (else the registry's
+        decoding-relevant content) changed."""
+        return self.sched.schema(scope)
 
     def set_flags(self, **flags: bool) -> None:
         """Runtime ablation switches (S10): fast_path, router, constrained_decoding, prefix_cache."""
@@ -137,14 +145,35 @@ class Agent:
         await self.settles.on_hub_event(ev.type.removeprefix("hub."), ev.data)
 
     # ------------------------------------------------------------------------------------------ chat entry
-    def new_request(self, user_id: str, session_id: str, text: str, role: str = "member", images: int = 0) -> ReqCtx:
-        """`role` comes only from the authenticated gateway call (app.py); it is never derived from the user id."""
+    def new_request(self, user_id: str, session_id: str, text: str, role: str = "member", images: int = 0,
+                    scope: Scope | None = None) -> ReqCtx:
+        """`role` and `scope` come only from the authenticated gateway call (app.py, which parses them fail-closed with
+        `scope.make_scope`); neither is ever derived from the user id or from text. `scope=None` is for in-process callers
+        (tests) and means unrestricted, except that a guest is never unrestricted."""
         c = self.cfg
         trig = Trigger("user", user_id=user_id, guest=(role == "guest"))
+        sc = UNRESTRICTED if scope is None else scope
+        if role == "guest":
+            sc = sc.for_guest()
+        self._remember_scope(user_id, role, sc)
         ctx = ReqCtx(user_id, session_id, text, trig, Budget(c.max_steps, c.max_calls, c.deadline_s, c.max_retries),
-                     role=role, images=images, sink=self._to_ring)
+                     role=role, images=images, sink=self._to_ring, scope=sc)
         self.bus.publish(Event(USER_MESSAGE, {"ctx": ctx}, source="chat", user_id=user_id))
         return ctx
+
+    def _remember_scope(self, user_id: str, role: str, scope: Scope) -> None:
+        self._last_scope[user_id] = (role, scope, time.monotonic())
+        self._last_scope.move_to_end(user_id)
+        while len(self._last_scope) > 512:
+            self._last_scope.popitem(last=False)
+
+    def _retry_scope(self, user_id: str, role: str) -> Scope:
+        """Scope for an approved Retry the agent never saw. The decision body carries no scope, so use what the same user's
+        latest chat request carried (same role, recent). Anything else is NOTHING: fail closed, the user asks again in chat."""
+        rec = self._last_scope.get(user_id)
+        if rec is None or rec[0] != role or time.monotonic() - rec[2] > SCOPE_MEMORY_S:
+            return NOTHING
+        return rec[1]
 
     def _to_ring(self, name: str, data: dict, user_id: str | None) -> None:
         self.ring.publish(name, data, user_id)
@@ -178,7 +207,7 @@ class Agent:
             if cm.is_handled(request_id):
                 return 202, {"accepted": True, "note": "already handled"}
             # unknown here: a Retry request only the gateway created. The body carries the full action; run exactly that.
-            self._spawn(self._run_standalone(user_id, request_id, action, token))
+            self._spawn(self._run_standalone(user_id, request_id, action, token, role))
             return 202, {"accepted": True}
         # declined / expired: no token; clear pending state
         if cm.knows(request_id, user_id):
@@ -193,10 +222,10 @@ class Agent:
         self._bg.add(t)
         t.add_done_callback(self._bg.discard)
 
-    async def _run_standalone(self, user_id: str, request_id: str, action: dict, token: str) -> None:
+    async def _run_standalone(self, user_id: str, request_id: str, action: dict, token: str, role: str = "member") -> None:
         c = self.cfg
         ctx = ReqCtx(user_id, "confirmation", "confirmed action", Trigger("user", user_id=user_id),
-                     Budget(1, 1, 60.0, c.max_retries), role="member", sink=self._to_ring)
+                     Budget(1, 1, 60.0, c.max_retries), role=role, sink=self._to_ring, scope=self._retry_scope(user_id, role))
         ctx.reason = f"user confirmed request {request_id}"
         ctx.detached = True                                         # no chat stream: late events go to the ring
         try:

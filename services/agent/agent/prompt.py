@@ -82,10 +82,12 @@ def _legend(reg: DeviceRegistry) -> str:
 def build_devices_section(reg: DeviceRegistry, limit: int) -> tuple[str, bool]:
     """(text, degraded). Full list when it fits; otherwise a rooms summary (ids move to the tail for the rooms the
     user names, see `rooms_detail`). Deterministic: sorted, no live state, so identical registries give identical bytes."""
+    scenes = reg.scene_names()
+    scene_line = ("\nScenes (run_scene by name): " + ", ".join(scenes)) if scenes else ""
     if not reg.devices:
-        return "Devices: none registered.", False
+        return "Devices: none registered." + scene_line, False
     lines = [device_line(d) for d in sorted(reg.devices.values(), key=lambda d: (d.room.lower(), d.name.lower(), d.endpoint_id))]
-    full = "Devices (id|name|room|type|tags):\n" + "\n".join(lines) + "\n" + _legend(reg)
+    full = "Devices (id|name|room|type|tags):\n" + "\n".join(lines) + "\n" + _legend(reg) + scene_line
     if est_tokens(full) <= limit:
         return full, False
     by_room: dict[str, set[str]] = {}
@@ -99,7 +101,7 @@ def build_devices_section(reg: DeviceRegistry, limit: int) -> tuple[str, bool]:
             out += "...more rooms\n"
             break
         out += line
-    return truncate_tokens(out.rstrip("\n"), limit), True
+    return truncate_tokens(out.rstrip("\n") + scene_line, limit), True
 
 
 def rooms_detail(reg: DeviceRegistry, text: str, limit: int) -> str:

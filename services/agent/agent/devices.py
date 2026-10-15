@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from .util import ENUM_VAL_RE, EP_RE, clean_label, clean_tag
+
+SCENE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 log = logging.getLogger("agent.devices")
 
@@ -113,13 +116,34 @@ def parse_device(raw: Any) -> Device | None:
     return Device(ep, name, room, raw["type"], tags, risk, bool(raw.get("online")), caps)
 
 
+@dataclass(frozen=True)
+class Scene:
+    """Read-only scene listing from `list_devices.scenes`: permanent id, admin-set display name (sanitised), broken flag."""
+    scene_id: str
+    name: str
+    broken: bool = False
+
+
+def parse_scene(raw: Any) -> Scene | None:
+    if not isinstance(raw, dict):
+        return None
+    sid, name = raw.get("scene_id"), clean_label(raw.get("name"))
+    if not isinstance(sid, str) or not SCENE_ID_RE.match(sid) or not name:
+        return None
+    return Scene(sid, name, raw.get("broken") is True)
+
+
 @dataclass
 class DeviceRegistry:
     devices: dict[str, Device] = field(default_factory=dict)
     version: int = -1                # hub registry version this list corresponds to
     generation: int = 0              # bumped on every reload
+    list_version: int | None = None  # `registry_version` carried by the last list_devices result (None = hub did not send one)
+    scenes: dict[str, Scene] = field(default_factory=dict)      # scene_id -> Scene (read-only listing)
+    scenes_known: bool = False       # the last list_devices result carried a `scenes` list
 
-    def replace(self, raw_devices: list, version: int | None = None) -> None:
+    def replace(self, raw_devices: list, version: int | None = None, scenes: Any = None,
+                list_version: int | None = None) -> None:
         devs: dict[str, Device] = {}
         for raw in raw_devices if isinstance(raw_devices, list) else []:
             d = parse_device(raw)
@@ -128,9 +152,42 @@ class DeviceRegistry:
                 continue
             devs[d.endpoint_id] = d
         self.devices = devs
+        if list_version is not None:
+            version = list_version              # the hub's own number beats the one a registry_changed event announced
+        self.list_version = list_version
         if version is not None:
             self.version = version
+        self.scenes_known = isinstance(scenes, list)
+        sc: dict[str, Scene] = {}
+        for raw in (scenes if isinstance(scenes, list) else [])[:200]:
+            s = parse_scene(raw)
+            if s is not None:
+                sc[s.scene_id] = s
+        self.scenes = sc
         self.generation += 1
+
+    # ------------------------------------------------------------------------------------------ scenes / scope
+    def scene_names(self) -> tuple[str, ...]:
+        """Display names of the runnable (not broken) scenes, sorted; what the model and the fast path may name."""
+        return tuple(sorted({s.name for s in self.scenes.values() if not s.broken}))
+
+    def find_scene(self, ref: object) -> Scene | None:
+        """A scene by permanent id or exact display name."""
+        if not isinstance(ref, str):
+            return None
+        if ref in self.scenes:
+            return self.scenes[ref]
+        return next((s for s in self.scenes.values() if s.name == ref), None)
+
+    def scoped(self, scope) -> "DeviceRegistry":
+        """A read-only view with only the devices in `scope.rooms` and the scenes in `scope.scenes`. The unrestricted
+        scope returns `self`. Names of anything out of scope are simply absent, so they cannot reach the model."""
+        if scope is None or not scope.restricted:
+            return self
+        v = DeviceRegistry(
+            {k: d for k, d in self.devices.items() if scope.room_ok(d.room)}, self.version, self.generation,
+            self.list_version, {k: s for k, s in self.scenes.items() if scope.scene_id_ok(k)}, self.scenes_known)
+        return v
 
     def mark_online(self, endpoint_ids: list[str], online: bool) -> None:
         for ep in endpoint_ids:
@@ -171,7 +228,9 @@ class RegistryLoader:
                 self._again = False
                 res = await self.hub.call_tool("list_devices", {})
                 if isinstance(res, dict) and isinstance(res.get("devices"), list):
-                    self.registry.replace(res["devices"], version)
+                    rv = res.get("registry_version")
+                    self.registry.replace(res["devices"], version, res.get("scenes"),
+                                          rv if isinstance(rv, int) and not isinstance(rv, bool) and rv >= 0 else None)
                     if self.on_changed:
                         self.on_changed()
                 else:

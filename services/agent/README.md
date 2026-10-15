@@ -70,9 +70,9 @@ All of it sits behind the five tools; nothing here can add one. Config: `AgentCo
 
 | Piece | File | Notes |
 |---|---|---|
-| Fast path | `resolver.py`, `text.py` | Deterministic: normalise, intent (on/off, set value, lock, open/close, scene), score every registry device by label/room/type/tag tokens (typo-tolerant), plan only if coverage x intent confidence >= `fast_threshold` (0.85) and the winner beats the runner-up by `fast_margin`; "all lights in X" groups (cap 8). Questions, negation, time/condition, compound and relative phrasing, unknown words ("kitchen fan" with no kitchen fan), out-of-range values fall through to the LLM. Guests: `set_state` utterances are denied (the agent does not know their assigned rooms/scenes), scenes fall through. Execution = `Executor.run_calls`, the same path as an LLM plan |
+| Fast path | `resolver.py`, `text.py` | Deterministic: normalise, intent (on/off, set value, lock, open/close, scene), score every registry device by label/room/type/tag tokens (typo-tolerant), plan only if coverage x intent confidence >= `fast_threshold` (0.85) and the winner beats the runner-up by `fast_margin`; "all lights in X" groups (cap 8). Questions, negation, time/condition, compound and relative phrasing, unknown words ("kitchen fan" with no kitchen fan), out-of-range values fall through to the LLM. The resolver only sees the caller's scoped registry and scene list (`allowed_rooms`/`allowed_scenes`). Guests (S8b rule): `set_state` utterances are denied, scenes fall through. Execution = `Executor.run_calls`, the same path as an LLM plan |
 | Router | `router.py` | Perception questions: sensor (`read_sensor`), YOLO jetson/pi, VLM yes/no / short / JSON, LLM last. Cost table in config (`est`/`measured` flags), EWMA of observed latency, failure breaker (30 s), health gate (VLM < 400 MB, node down). Vision sources need a registered `PerceptionBackend`; none exists yet, so they are skipped |
-| Constrained decoding | `grammar.py`, `llm.py` | `schema.build_plan_schema` -> `schema_to_gbnf`; `ConstraintCache` rebuilt only when ids/capabilities/ranges/enums/rooms/scenes change (not on a rename); backends `json_schema` (response_format) or `gbnf` (grammar field) |
+| Constrained decoding | `grammar.py`, `llm.py` | `schema.build_plan_schema` -> `schema_to_gbnf`; `ConstraintCache` keyed on the hub's `registry_version` from `list_devices` (content hash of ids/capabilities/ranges/enums/rooms/scenes when the hub sends none), one entry per request scope; backends `json_schema` (response_format) or `gbnf` (grammar field) |
 | Prefix cache | `prefix.py`, `prompt.py` | Static prefix first, then history/summary/memories/current; `cache_prompt` + pinned `id_slot`; `PrefixTracker` records same-prefix and server `cache_n` per turn |
 | Memory | `memory.py` | Per-user window by token budget (+ the builder's 4-message cap), rolling summary with its own budget, deterministic summariser (hook for an idle LLM one); guests in-process only |
 | Trace | `trace.py`, `scheduler.py` | One per turn: route, candidates, latency, tokens, cache hit, constrained, outcome, flags. Bus event `sched.trace` + a row in the `turn_traces` table (own retention cap, never in the action log); no user text. SSE `route` stays `fast|llm|vision` (sensor answers are `fast`) |
@@ -120,3 +120,21 @@ secret from the hub secret (`agent.secret`); neither works on the other API.
 6. Capability ids per type are shown to the model in the device list (slightly beyond names/rooms/types/tags).
 7. `node_status` has a node id but `list_devices` has none, so `online` is refreshed by reloading `list_devices`.
 8. S1 observation: `device_hub --mock` ignores `auth.verifier_dir` from `--config`; the integration test builds the hub in code.
+
+
+## Agent 1.3.0: request scope, registry_version, scenes, route enum
+
+* **Scope** (`scope.py`): `POST /v1/chat` carries `allowed_rooms` / `allowed_scenes`. Missing = `[]` for member and guest (nothing allowed);
+  explicit `null` = unrestricted for admin/member, never for guest (becomes `[]`); malformed = `[]`. The executor refuses
+  `set_state`, `read_sensor`, `get_state`, `list_devices(room)` outside `allowed_rooms` and `run_scene` outside `allowed_scenes` with
+  `{"ok": false, "error": "out_of_scope"}` (action-log status `out_of_scope`) before anything reaches the hub, on the LLM, fast-path,
+  rule and approved-retry paths. `list_devices` results, the prompt device/scene list, the decoding schema, the fast-path resolver and
+  the sensor router all use a per-scope filtered registry view (`views.py`), so out-of-scope names never reach the model. Unrestricted
+  callers keep the shared byte-stable prompt prefix.
+* **Guests** (S8b rule kept): never `set_state` / `run_scene`, even in an assigned room (`not_allowed`, `denied_guest`). They may read
+  (`get_state`, `read_sensor`, `list_devices`) inside `allowed_rooms`.
+* **Approved Retry the agent never saw**: the confirmation body has no scope, so it runs with the same user's latest chat scope (same role,
+  at most 30 min old), else with nothing allowed.
+* **registry_version / scenes**: `list_devices` returns `registry_version` and a read-only `scenes` list; the grammar cache is keyed on the
+  version (content hash when absent), scene names come from the list, the `scene_names` config key is retired (ignored if present).
+* **Routes**: SSE `final.route` is `fast|llm|sensor|yolo|vlm`; `vision` is legacy and never emitted. Traces carry the same values.

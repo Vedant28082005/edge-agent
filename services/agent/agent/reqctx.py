@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .policy import Trigger
+from .scope import UNRESTRICTED, Scope
 
 
 @dataclass
@@ -52,10 +53,13 @@ class Budget:
 
 class ReqCtx:
     def __init__(self, user_id: str, session_id: str, text: str, trigger: Trigger, budget: Budget,
-                 req_id: str | None = None, role: str = "member", images: int = 0, sink=None) -> None:
+                 req_id: str | None = None, role: str = "member", images: int = 0, sink=None, scope: Scope = UNRESTRICTED) -> None:
         self.req_id = req_id or "r_" + secrets.token_hex(6)
         self.user_id, self.session_id, self.text = user_id, session_id, text
         self.role = role                    # set only by the authenticated gateway; never inferred
+        # What this caller may touch (agent-internal.yaml 1.3.0). HTTP requests always pass the parsed, fail-closed scope;
+        # the unrestricted default is for internal callers only (admin-defined rules, tests). A guest is never unrestricted.
+        self.scope = scope.for_guest() if (role == "guest" or trigger.guest) else scope
         self.images = images                # count of validated inline images (not analysed in v1)
         self.sink = sink                    # (name, data, user_id) -> None: where events go when the stream is gone
         self.trigger, self.budget = trigger, budget

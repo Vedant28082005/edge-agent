@@ -12,9 +12,10 @@ resolver never silently picks a different device than the one named.
 The result is a list of `{"tool", "args"}` calls, executed through `Executor.run_calls` exactly like an LLM plan, so
 budgets, the confirmation policy, hub validation, verify/settle and the action log are shared, not re-implemented.
 
-Guests: the agent is told only `role`, not which rooms or scenes a guest was assigned (contract gap), so the fast path
-never controls anything for a guest. `set_state` utterances are answered with `denied` and nothing is executed; scene
-utterances fall through (the hub, not the agent, knows assignments)."""
+Scope: the caller passes the registry view of the request's `allowed_rooms` / `allowed_scenes` and the scene names of that
+view, so an out-of-scope device or scene cannot be matched at all (the executor enforces the scope again regardless).
+Guests (S8b rule): they can never set_state or run_scene, so `set_state` utterances are answered with `denied` and
+nothing is executed; scene utterances fall through to the LLM path, where the executor denies the call."""
 from __future__ import annotations
 
 import re
@@ -178,7 +179,7 @@ class FastPathResolver:
         else:
             return None
         if role == "guest":
-            return _fall("guest_scene_scope_unknown", "scene", [(c, conf) for c in cands])
+            return _fall("guest_scene_denied", "scene", [(c, conf) for c in cands])
         if len(cands) != 1:
             return _fall("scene_ambiguous" if cands else "scene_unknown", "scene", [(c, conf) for c in cands][:5])
         if conf < self.cfg.fast_threshold:

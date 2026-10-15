@@ -104,6 +104,8 @@ class FakeHub:
         self._subs: list[asyncio.Queue] = []
         self._tasks: set[asyncio.Task] = set()
         self.fail_next: list[str] = []                  # error codes returned by the next set_state calls
+        self.send_registry_version = True               # False = a pre-1.4.0 hub (no registry_version / scenes in list_devices)
+        self.send_scenes = True
 
     # -------------------------------------------------------------------------------------------- events
     def publish(self, etype: str, data: dict) -> dict:
@@ -184,7 +186,11 @@ class FakeHub:
         self.calls.append({"tool": name, "args": dict(a), "meta": dict(meta)})
         if name == "list_devices":
             devs = [d for d in self.devices.values() if (not a.get("room") or d["room"] == a["room"])]
-            return {"devices": devs}
+            out: dict = {"devices": devs}
+            if self.send_registry_version:                  # device-hub 1.4.0: registry_version + the read-only scenes listing
+                out = {"registry_version": self.version, "devices": devs,
+                       "scenes": [{"scene_id": i, "name": n} for i, (n, _) in self.SCENES.items()] if self.send_scenes else []}
+            return out
         if name == "get_state":
             eps = [a["endpoint_id"]] if "endpoint_id" in a else [e for e, d in self.devices.items() if d["room"] == a.get("room")]
             if "endpoint_id" in a and a["endpoint_id"] not in self.devices:

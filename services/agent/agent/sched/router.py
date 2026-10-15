@@ -201,8 +201,6 @@ class CostRouter:
         wants: list[str] = []
         if kind == SENSOR_Q:
             sensor, sdetail = find_sensor(text, reg)
-            if sensor is not None and role == "guest":
-                sensor, sdetail = None, "guest_room_scope_unknown"      # assigned rooms are not sent to the agent
             if sensor is not None:
                 wants.append("sensor")
         elif kind == PRESENCE_Q:

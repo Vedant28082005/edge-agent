@@ -11,10 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.config import AgentConfig  # noqa: E402
 from agent.mock import FakeHub, LocalServer, ScriptedLLM  # noqa: E402
+from agent.scope import Scope  # noqa: E402
 from agent.service import Agent  # noqa: E402
 from agent.util import _SECRETS  # noqa: E402
 
 SECRET = "test-agent-secret-0123456789"
+# A guest assigned every demo room and the demo scene (guests still never set_state / run_scene: S8b)
+GUEST_SCOPE = Scope(frozenset({"Bedroom", "Hall", "Living room"}), frozenset({"sc_9a8b7c6d"}))
 
 
 class Env:
@@ -27,8 +30,8 @@ class Env:
         await self.server.stop()
         _SECRETS.discard(SECRET)
 
-    async def chat(self, text, user="alice", session="s1", timeout=10.0, wait_close=True, role="member"):
-        ctx = self.agent.new_request(user, session, text, role)
+    async def chat(self, text, user="alice", session="s1", timeout=10.0, wait_close=True, role="member", scope=None):
+        ctx = self.agent.new_request(user, session, text, role, scope=scope)
         return ctx, await collect(ctx, timeout, wait_close)
 
 

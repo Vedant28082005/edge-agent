@@ -1,4 +1,4 @@
-"""The agent's HTTP API, exactly per contracts/openapi/agent-internal.yaml (1.2.0): loopback only, ONE caller (the
+"""The agent's HTTP API, exactly per contracts/openapi/agent-internal.yaml (1.3.0): loopback only, ONE caller (the
 gateway), authentication mandatory on every operation including /v1/health (auth.py).
 
   POST /v1/chat                       SSE turn (role from the authenticated gateway; inline images; no audio/refs)
@@ -29,6 +29,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from .auth import ApiAuth, AuthMiddleware
+from .scope import MISSING, make_scope
 from .service import Agent
 
 log = logging.getLogger("agent.api")
@@ -45,6 +46,10 @@ CHAT_SCHEMA = {
     "properties": {
         "user_id": {"type": "string", "minLength": 1, "maxLength": 64}, "role": ROLE,
         "session_id": {"type": "string", "maxLength": 64}, "text": {"type": "string", "maxLength": 4000},
+        "allowed_rooms": {"type": ["array", "null"], "maxItems": 64, "uniqueItems": True,
+                          "items": {"type": "string", "minLength": 1, "maxLength": 48}},
+        "allowed_scenes": {"type": ["array", "null"], "maxItems": 200, "uniqueItems": True,
+                           "items": {"type": "string", "minLength": 1, "maxLength": 64}},
         "images": {"type": "array", "maxItems": 4, "items": {
             "type": "object", "additionalProperties": False, "required": ["ref", "media_type", "data_b64"],
             "properties": {"ref": {"type": "string", "maxLength": 64},
@@ -129,7 +134,9 @@ def create_app(agent: Agent, auth: ApiAuth | None) -> Starlette:
             return err(400, "bad_request", msg)
         if agent.chat.busy():
             return err(429, "llm_busy", "the assistant is busy", {"Retry-After": "5"})
-        ctx = agent.new_request(body["user_id"], body["session_id"], text, body["role"], len(images))
+        # Fail closed (scope.py): a missing field is [] for member/guest; null is unrestricted only for admin/member.
+        scope = make_scope(body["role"], body.get("allowed_rooms", MISSING), body.get("allowed_scenes", MISSING))
+        ctx = agent.new_request(body["user_id"], body["session_id"], text, body["role"], len(images), scope)
 
         async def gen():
             try:
