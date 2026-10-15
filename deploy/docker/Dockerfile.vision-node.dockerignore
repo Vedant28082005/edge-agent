@@ -1,0 +1,16 @@
+**/.venv
+**/__pycache__
+**/tests
+**/*.pyc
+**/data
+**/.env
+**/*.key
+**/*.crt
+**/*.pem
+**/*.secret
+**/*.sqlite*
+deploy/mosquitto
+docs
+firmware
+tools
+.git

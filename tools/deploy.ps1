@@ -5,7 +5,7 @@
 .PARAMETER Target
   brain | vision | jetson
 .PARAMETER Images
-  brain only: copy the arm64 image tarballs built by `tools\build-images.ps1 -Save` (deploy\dist) to the node,
+  brain and vision: copy the arm64 image tarballs built by `tools\build-images.ps1 -Save` (deploy\dist) to the node,
   `docker load` them, tag them edge-agent/<svc>:<Tag> and delete the tarballs. Nothing is built or pulled on the Pi.
 .PARAMETER Tag
   Image tag used with -Images and -Up (default dev; must match build-images.ps1 -Tag).
@@ -38,12 +38,16 @@ $remote = $n.Dir
 
 # What goes where (relative to repo root). Nothing secret is in this list.
 $services = @{ brain = @(); vision = @('vision-node'); jetson = @('yolo-node') }   # brain services are images, see -Images
-$brainImages = @('device-hub', 'gateway', 'agent')
-if ($Images -and $Target -ne 'brain') { throw '-Images applies to the brain target only' }
+$imageSets = @{ brain = @('device-hub', 'gateway', 'agent'); vision = @('vision-node') }
+if ($Images -and -not $imageSets.ContainsKey($Target)) { throw '-Images applies to the brain and vision targets only' }
 $items = @('contracts')
 if ($Target -eq 'brain') {
     $items += 'deploy\compose.yml', 'deploy\mosquitto\mosquitto.conf', 'deploy\mosquitto\node-role.template.json',
               'deploy\chrony', 'deploy\config', 'deploy\systemd', 'tools\setup-pi-brain.sh'
+}
+if ($Target -eq 'vision') {
+    # compose + native-service units + non-secret config; the image ships via -Images; the verifier/secret setup is by hand (deploy/README.md)
+    $items += 'deploy\compose.vision.yml', 'deploy\systemd', 'deploy\config\vision-node.json'
 }
 foreach ($s in $services[$Target]) {
     if (Test-Path (Join-Path $root "services\$s")) { $items += "services\$s" }
@@ -60,6 +64,7 @@ function Invoke-Native([string]$exe, [string[]]$arguments) {
 Write-Host "Deploying '$Target' to $dest`:$remote"
 $dirs = @("$remote/services", "$remote/tools")
 if ($Target -eq 'brain') { $dirs += "$remote/deploy/mosquitto" }
+if ($Target -eq 'vision') { $dirs += "$remote/deploy/config" }
 Invoke-Native 'ssh' @($dest, "mkdir -p $($dirs -join ' ')")
 
 foreach ($i in $items) {
@@ -76,7 +81,7 @@ if ($Images) {
     # Pre-flight: every tarball must exist (a dry run only warns).
     $dist = Join-Path $root 'deploy\dist'
     Invoke-Native 'ssh' @($dest, "mkdir -p $remote/images")
-    foreach ($svc in $brainImages) {
+    foreach ($svc in $imageSets[$Target]) {
         $tar = Join-Path $dist "edge-agent-$svc-$Tag-arm64.tar"
         if (-not (Test-Path $tar)) {
             if ($DryRun) { Write-Warning "missing $tar (run tools\build-images.ps1 -Tag $Tag -Save first)" }
@@ -90,6 +95,8 @@ if ($Images) {
 if ($Up) {
     if ($Target -eq 'brain') {
         Invoke-Native 'ssh' @($dest, "cd $remote/deploy && EDGE_TAG=$Tag docker compose up -d --remove-orphans")
+    } elseif ($Target -eq 'vision') {
+        Invoke-Native 'ssh' @($dest, "cd $remote/deploy && EDGE_TAG=$Tag docker compose -f compose.vision.yml up -d --remove-orphans")
     } else {
         Invoke-Native 'ssh' @($dest, "cd $remote/services/$($services[$Target][0]) && docker compose up -d")
     }

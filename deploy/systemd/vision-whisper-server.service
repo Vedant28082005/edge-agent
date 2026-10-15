@@ -1,0 +1,39 @@
+# Native whisper.cpp server (base.en) on pi-vision. UNVERIFIED on a real Pi (flags follow whisper.cpp's `whisper-server`;
+# check --help of your build). Binds 127.0.0.1 only; reached by vision-node over loopback. Configuration in
+# /etc/edge-agent/vision-whisper.env (template: vision-whisper.env.template). The model file is not shipped.
+[Unit]
+Description=whisper.cpp server (edge-agent STT, base.en)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/edge-agent/vision-whisper.env
+ExecStartPre=/usr/bin/test -r ${WHISPER_MODEL}
+# No --convert: vision-node sends 16 kHz mono WAV, so whisper-server never needs ffmpeg or a temp file.
+# stdout AND stderr are discarded: whisper.cpp prints transcripts and file names to them.
+ExecStart=/usr/local/bin/whisper-server --model ${WHISPER_MODEL} --host 127.0.0.1 --port ${WHISPER_PORT} --threads ${WHISPER_THREADS} --language en $WHISPER_EXTRA_ARGS
+StandardOutput=null
+StandardError=null
+User=edge-vision
+Group=edge-vision
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=0
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/edge-agent /var/lib/edge-agent/models
+
+[Install]
+WantedBy=multi-user.target

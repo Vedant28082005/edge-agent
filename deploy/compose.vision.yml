@@ -1,0 +1,39 @@
+# pi-vision (Pi 5 4GB): vision-node only. The VLM (llama-server + Qwen3-VL-2B + mmproj) and whisper.cpp run NATIVELY under
+# systemd (deploy/systemd/vision-*.service), bound to 127.0.0.1; vision-node reaches them over loopback, so the container
+# uses the host network. It listens on VISION_BIND ONLY (the Tailscale address; the tailnet ACL lets pi-brain reach :8300),
+# never 0.0.0.0, never the LAN. Run from deploy/ on the Pi:  VISION_BIND=100.x.y.z docker compose -f compose.vision.yml up -d
+# (put `VISION_BIND=...` in deploy/.env once; it is an address, not a secret.)
+# Memory limit is [est]: not measured on the Pi. The VLM and whisper are NOT in this limit (native processes).
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "2m", max-file: "2"}       # the node logs operation/status/latency only, never content
+
+services:
+  vision-node:
+    image: edge-agent/vision-node:${EDGE_TAG:-latest}
+    build: {context: .., dockerfile: deploy/docker/Dockerfile.vision-node}
+    restart: unless-stopped
+    user: "10104:10104"
+    network_mode: host                           # loopback to llama-server/whisper; binds VISION_BIND only (the app refuses 0.0.0.0)
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]           # not used by the service (it never writes a file); python/ffmpeg may expect /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m                              # [est]
+    pull_policy: never                           # images come from tools\deploy.ps1 (docker load), never a registry
+    logging: *logging
+    environment:
+      VISION_BIND: ${VISION_BIND:?set VISION_BIND to this node's Tailscale address in deploy/.env}
+    command: ["--config", "/etc/edge-agent/config/vision-node.json", "--host", "${VISION_BIND}"]
+    healthcheck:
+      test: ["CMD-SHELL", "python /app/healthcheck.py 8300 /health 200 $$VISION_BIND"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - ${CONFIG_DIR:-/etc/edge-agent/config}/vision-node.json:/etc/edge-agent/config/vision-node.json:ro
+      # the verifier of the agent's vision-node-api secret (a hash; the node holds no secret and no other caller's verifier):
+      - ${SECRETS_DIR:-/etc/edge-agent/secrets}/verifiers:/etc/edge-agent/secrets/verifiers:ro
+      - ${MODELS_DIR:-/var/lib/edge-agent/models}/yolov8n.onnx:/var/lib/edge-agent/models/yolov8n.onnx:ro

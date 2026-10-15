@@ -33,7 +33,8 @@ $root = Split-Path -Parent $PSScriptRoot
 $services = @(
     @{ Name = 'device-hub'; Uid = 10101; Args = @('--mock', '--insecure-no-auth') },
     @{ Name = 'gateway';    Uid = 10102; Args = @('--mock') },
-    @{ Name = 'agent';      Uid = 10103; Args = @('--mock', '--insecure-no-auth') }
+    @{ Name = 'agent';      Uid = 10103; Args = @('--mock', '--insecure-no-auth') },
+    @{ Name = 'vision-node'; Uid = 10104; Args = @('--mock', '--insecure-no-auth') }
 )
 
 function Invoke-Docker([string[]]$a) {

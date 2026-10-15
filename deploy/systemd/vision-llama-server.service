@@ -1,0 +1,40 @@
+# Native llama.cpp server for the VLM on pi-vision (Qwen3-VL-2B + mmproj). UNVERIFIED on a real Pi (flags follow current
+# llama.cpp; check `llama-server --help` of the build you install). Installed to /etc/systemd/system/ on pi-vision;
+# configuration in /etc/edge-agent/vision-llama.env (template: vision-llama.env.template). No model is shipped.
+# Reached ONLY by vision-node over loopback: it binds 127.0.0.1, so neither the LAN nor the tailnet can reach it.
+[Unit]
+Description=llama-server (edge-agent VLM, Qwen3-VL-2B)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/edge-agent/vision-llama.env
+ExecStartPre=/usr/bin/test -r ${VLM_MODEL}
+ExecStartPre=/usr/bin/test -r ${VLM_MMPROJ}
+# --parallel 1: one slot (the node serialises jobs anyway). No slot-save path, no prompt log, no web UI: nothing about a
+# request is kept. stdout is discarded because the server can log request details at higher verbosity; stderr (errors) goes to the journal.
+ExecStart=/usr/local/bin/llama-server --model ${VLM_MODEL} --mmproj ${VLM_MMPROJ} --host 127.0.0.1 --port ${VLM_PORT} --ctx-size ${VLM_CTX} --threads ${VLM_THREADS} --parallel 1 --temp 0 $VLM_EXTRA_ARGS
+StandardOutput=null
+User=edge-vision
+Group=edge-vision
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=0
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/edge-agent /var/lib/edge-agent/models
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+{
+  "node": "pi-vision",
+  "http": {"port": 8300},
+  "auth": {"verifier_file": "/etc/edge-agent/secrets/verifiers/agent.sha256"},
+  "llama": {"url": "http://127.0.0.1:8081", "model_name": "qwen3-vl-2b-q4"},
+  "whisper": {"url": "http://127.0.0.1:8082", "model_name": "whisper-base.en"},
+  "yolo": {"model_path": "/var/lib/edge-agent/models/yolov8n.onnx", "model_name": "yolov8n"},
+  "limits": {"min_mem_mb": 400, "max_waiting": 4, "node_cap_ms": 25000, "cache_ttl_s": 30}
+}
