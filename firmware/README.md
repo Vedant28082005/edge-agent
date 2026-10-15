@@ -4,8 +4,9 @@ Arduino-ESP32 + FreeRTOS node firmware, built with PlatformIO for `esp32dev`. On
 (`esp32-core/`), one short declarative sketch per board (`examples/`). Contract: `contracts/mqtt.md`,
 `contracts/announce.schema.json` (schema 2), `contracts/capabilities.md`, `docs/ARCHITECTURE.md` section 4.3.
 
-Scope of this session: no BLE provisioning (S2b). Configuration goes into NVS through a serial shell or
-`tools\provision-serial.ps1`. Nothing here flashes or uploads anything.
+Configuration goes into NVS through BLE provisioning (S2b, see `BLE-PROVISIONING.md`: PoP, 5-min window, lockout, button),
+or through the serial shell / `tools\provision-serial.ps1`. A board needs its per-board PoP (`pop set <code>` over serial, once)
+before BLE opens. Nothing here flashes or uploads anything.
 
 ## Run steps (Windows 11, PowerShell 5.1)
 

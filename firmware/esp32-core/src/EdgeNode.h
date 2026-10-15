@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <string>
 #include "edge/Backoff.h"
+#include "edge/BleProv.h"
 #include "edge/CmdDedup.h"
 #include "edge/Drivers.h"
 #include "edge/NodeConfig.h"
@@ -52,6 +53,11 @@ class EdgeNode {
   // Seconds without the hub connection before every failsafe_value is applied (0 = keep last values).
   EdgeNode& failsafeAfter(uint32_t seconds) { model_.failsafeAfterS = seconds; return *this; }
   EdgeNode& heartbeat(uint32_t seconds) { model_.heartbeatS = seconds; return *this; }
+  // GPIO of the provisioning button (active low, internal pull-up; default 0 = BOOT on devkits). Held 3 s: open
+  // the BLE provisioning window; held 10 s: factory reset (wipe the stored config, keep the PoP).
+  EdgeNode& provisionButton(int pin) { provButtonPin_ = pin; return *this; }
+  // Policy knobs (tests, bring-up): defaults are 5 min window, 5 failures, 5 min lock, PoP required.
+  EdgeNode& provisionPolicy(const ProvPolicy& p) { provPolicy_ = p; return *this; }
   EdgeNode& statusLed(int pin, bool activeHigh = true) { model_.ledPin = pin; model_.ledActiveHigh = activeHigh; return *this; }
 
   NodeModel& model() { return model_; }
@@ -68,6 +74,8 @@ class EdgeNode {
 #endif
 
  private:
+  int provButtonPin_ = 0;
+  ProvPolicy provPolicy_;
   NodeModel model_;
   NodeCore core_;
 
@@ -76,6 +84,9 @@ class EdgeNode {
   static void netTaskTramp(void* p);
   static void sensorTaskTramp(void* p);
   static void actuatorTaskTramp(void* p);
+  static void bleTaskTramp(void* p);
+  void bleTask();
+  bool handlePopLine(const std::string& line, std::string& reply);
   void netTask();
   void sensorTask();
   void actuatorTask();
@@ -102,6 +113,8 @@ class EdgeNode {
   void* store_ = nullptr;    // NvsConfigStore*
   void* shell_ = nullptr;    // ConfigShell*
   void* client_ = nullptr;   // esp_mqtt_client_handle_t
+  void* prov_ = nullptr;     // BleProv*
+  void* bleEsp_ = nullptr;   // BleProvEsp*
   volatile bool mqttUp_ = false;
   volatile bool mqttFailed_ = false;
   volatile bool unprovPending_ = false;

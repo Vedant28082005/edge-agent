@@ -11,6 +11,7 @@
 #include <time.h>
 #include "../EdgeNode.h"
 #include "NvsConfigStore.h"
+#include "BleProvEsp.h"
 
 namespace edge {
 
@@ -84,6 +85,17 @@ bool EdgeNode::begin() {
        (unsigned)model_.endpoints.size(), (unsigned)ann.size());
   if (!cfgOk_) logf("not configured: use the serial shell ('help'), local controls and safety timers are running");
 
+  {
+    auto* st2 = static_cast<NvsConfigStore*>(store_);
+    auto* prov = new BleProv(mbedProvCrypto(), *st2, nodeId_, loadPop(), model_.hw, model_.fw, provPolicy_);
+    prov_ = prov;
+    bleEsp_ = new BleProvEsp(*prov, nodeId_);
+    if (provPolicy_.requirePop && loadPop().empty())
+      logf("no provisioning PoP stored: BLE provisioning stays OFF (serial: 'pop set <label code>')");
+    pinMode(provButtonPin_, INPUT_PULLUP);
+    prov->boot(nowMs(), cfgOk_);
+  }
+  xTaskCreatePinnedToCore(bleTaskTramp, "edge-ble", 6144, this, 2, nullptr, 0);
   xTaskCreatePinnedToCore(actuatorTaskTramp, "edge-act", 4096, this, 3, nullptr, 1);
   xTaskCreatePinnedToCore(sensorTaskTramp, "edge-sens", 4096, this, 1, nullptr, 1);
   xTaskCreatePinnedToCore(netTaskTramp, "edge-net", 8192, this, 2, nullptr, 0);
@@ -102,6 +114,7 @@ void EdgeNode::loop() {
         std::string reply;
         bool reboot = false;
         if (lineOverflow_) reply = "err too_long";
+        else if (handlePopLine(line_, reply)) {}
         else reply = static_cast<ConfigShell*>(shell_)->handleLine(line_, reboot);
         line_.clear();
         lineOverflow_ = false;
@@ -113,6 +126,62 @@ void EdgeNode::loop() {
     }
   }
   vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+// "pop set <code>" / "pop status": the per-board BLE proof of possession (the label secret). Never echoed.
+bool EdgeNode::handlePopLine(const std::string& line, std::string& reply) {
+  if (line.compare(0, 3, "pop") != 0 || (line.size() > 3 && line[3] != ' ')) return false;
+  if (line == "pop status") { reply = loadPop().empty() ? "pop: unset" : "pop: set"; return true; }
+  if (line.compare(0, 8, "pop set ") == 0) {
+    if (!loadPop().empty()) { reply = "err pop_already_set"; return true; }  // set once; a factory reset keeps it
+    reply = storePop(line.substr(8)) ? "ok (restart to apply)" : "err bad_pop_format";
+    return true;
+  }
+  reply = "err usage: pop set <code> | pop status";
+  return true;
+}
+
+// ---- BLE task: button, window, GATT on/off -------------------------------------------------------------
+
+void EdgeNode::bleTaskTramp(void* p) { static_cast<EdgeNode*>(p)->bleTask(); }
+
+void EdgeNode::bleTask() {
+  auto* prov = static_cast<BleProv*>(prov_);
+  auto* ble = static_cast<BleProvEsp*>(bleEsp_);
+  HoldDetector hold(provPolicy_.buttonHoldMs, provPolicy_.factoryHoldMs);
+  bool wasAdv = false;
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+    uint32_t now = nowMs();
+    HoldDetector::Event ev = hold.feed(digitalRead(provButtonPin_) == LOW, now);
+    ble->lock();
+    if (ev == HoldDetector::Hold3s) logf("provisioning button: %s", prov->buttonHold(now) ? "window opened" : "refused");
+    if (ev == HoldDetector::Hold10s) {
+      logf("provisioning button: factory reset");
+      bool ok = prov->factoryReset(now);
+      ble->unlock();
+      if (ok) { Serial.flush(); delay(200); ESP.restart(); }
+      continue;
+    }
+    prov->tick(now);
+    bool adv = prov->advertising();
+    bool stored = prov->takeStored();
+    ble->unlock();
+    if (stored) {  // credentials are in NVS: BLE off, reboot, join Wi-Fi (success is not reported over BLE)
+      vTaskDelay(pdMS_TO_TICKS(800));  // let the `stored` notification leave
+      ble->stop();
+      logf("provisioned: restarting");
+      Serial.flush();
+      delay(200);
+      ESP.restart();
+    }
+    if (adv && !ble->running()) ble->start();
+    if (!adv && ble->running()) ble->stop();
+    if (adv != wasAdv) {
+      wasAdv = adv;
+      if (!cfgOk_) setPhase(adv ? NetPhase::Provisioning : NetPhase::Unconfigured);
+    }
+  }
 }
 
 // ---- actuator task: commands, local buttons, safety timers -----------------------------------------
@@ -186,8 +255,7 @@ void EdgeNode::netTask() {
   for (;;) {
     if (unprovPending_) unprovisionNow();
     if (!cfgOk_) {
-      setPhase(NetPhase::Unconfigured);
-      vTaskDelay(pdMS_TO_TICKS(500));
+      vTaskDelay(pdMS_TO_TICKS(500));  // phase (Unconfigured / Provisioning) is owned by begin() and the BLE task
       continue;
     }
     setPhase(NetPhase::Wifi);

@@ -8,6 +8,7 @@
   "platforms": ["espressif32", "native"],
   "dependencies": [
     {"name": "ArduinoJson", "owner": "bblanchon", "version": "^7.2.0"},
+    {"name": "NimBLE-Arduino", "owner": "h2zero", "version": "1.4.3", "platforms": "espressif32"},
     {"name": "DHT sensor library", "owner": "adafruit", "version": "1.4.6", "platforms": "espressif32"},
     {"name": "Adafruit Unified Sensor", "owner": "adafruit", "version": "1.1.14", "platforms": "espressif32"}
   ],

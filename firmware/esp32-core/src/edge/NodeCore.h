@@ -9,7 +9,7 @@
 
 namespace edge {
 
-enum class NetPhase : uint8_t { Unconfigured, Wifi, Ntp, Mqtt, Run, Error };
+enum class NetPhase : uint8_t { Unconfigured, Provisioning, Wifi, Ntp, Mqtt, Run, Error };
 
 class NodeCore {
  public:
