@@ -5,6 +5,8 @@ burns an approval) -> publish cmd -> wait for ack (3 s) -> read back and compare
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -22,6 +24,7 @@ from .util import BY_RE, Clock, ENDPOINT_ID_RE, action_hash, safe_repr, sanitize
 
 log = logging.getLogger("device_hub.executor")
 
+CAP_KEYS = ("id", "kind", "type", "min", "max", "values", "unit", "settle_s")
 DEVICE_PASSTHROUGH = {"unknown_endpoint", "unknown_capability", "out_of_range", "bad_type"}
 
 
@@ -57,6 +60,7 @@ class Executor:
         self.gateway = gateway
         self.cfg = cfg
         self.clock = clock
+        self.scenes = None      # set by Hub once SceneService exists (read-only listing for list_devices)
 
     # ------------------------------------------------------------------------------------------ queries
     def list_devices(self, room: str | None = None, etype: str | None = None) -> dict:
@@ -69,10 +73,31 @@ class Executor:
             devices.append({
                 "endpoint_id": ep["endpoint_id"], "name": ep["name"], "room": ep["room"], "tags": ep["tags"],
                 "type": ep["type"], "online": ep["online"], "risk": ep["risk"],
-                "capabilities": [{k: v for k, v in c.items() if k in ("id", "kind", "type", "min", "max", "values", "unit")}
+                "capabilities": [{k: v for k, v in c.items() if k in CAP_KEYS}
                                  for c in ep["capabilities"]],
             })
-        return {"devices": devices}
+        return {"registry_version": self.registry_version(), "devices": devices, "scenes": self.scene_listing()}
+
+    def scene_listing(self) -> list[dict]:
+        """Read-only scene list for list_devices: id, name and `broken` only, never actions."""
+        out = []
+        for sc in (self.scenes.list_scenes() if self.scenes is not None else []):
+            item = {"scene_id": sc["scene_id"], "name": sc["name"]}
+            if sc["broken"]:
+                item["broken"] = True
+            out.append(item)
+        return out[:200]
+
+    def registry_version(self) -> int:
+        """Stable content hash (48-bit int) of everything list_devices describes plus the scene listing, ignoring
+        live state and online flags. Changes on any registry or scene change; identical content gives the same value."""
+        eps = [{"i": ep["endpoint_id"], "n": ep["name"], "r": ep["room"], "t": ep["tags"], "y": ep["type"],
+                "k": ep["risk"], "e": ep["enabled"],
+                "c": [{k: v for k, v in c.items() if k in CAP_KEYS} for c in ep["capabilities"]]}
+               for ep in self.registry.list_endpoints(include_disabled=True)]
+        eps.sort(key=lambda e: e["i"])
+        blob = json.dumps({"endpoints": eps, "scenes": self.scene_listing()}, sort_keys=True, separators=(",", ":"))
+        return int.from_bytes(hashlib.sha256(blob.encode("utf-8")).digest()[:6], "big")
 
     def get_state(self, endpoint_id: str | None = None, room: str | None = None) -> dict:
         if (endpoint_id is None) == (room is None):

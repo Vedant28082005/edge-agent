@@ -276,7 +276,7 @@ def test_unknown_room_and_other_codes(home):
     home.hub.admin.patch_endpoint(home.ids["light"], {"room": "Study"}, "t")
     home.hub.admin.patch_endpoint(home.ids["temp"], {"room": "Study"}, "t")
     assert ex.list_devices(room="Hall")["devices"] and "Bedroom" in home.hub.registry.rooms()
-    assert ex.list_devices(room="Bedroom") == {"devices": []}                  # existing room, no endpoints: empty, not an error
+    assert ex.list_devices(room="Bedroom")["devices"] == []                  # existing room, no endpoints: empty, not an error
     assert ex.get_state(room="Bedroom") == {"states": []}
     assert ex.get_state(room="Garage")["error"] == "unknown_room"
     assert ex.read_sensor(home.ids["temp"], "power")["error"] == "unknown_capability"
