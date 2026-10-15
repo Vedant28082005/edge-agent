@@ -6,7 +6,7 @@ import asyncio
 import json
 
 import pytest
-from conftest import collect, make_env, names, one
+from conftest import GUEST_SCOPE, collect, make_env, names, one
 from test_confirmation import approve_when_asked
 
 from agent.util import action_hash
@@ -170,7 +170,7 @@ async def test_guest_gets_a_denial_and_nothing_runs_or_prompts(tmp_path):
     e = await fast_env(tmp_path)
     try:
         for text in ("turn on the bedroom fan", "unlock the front door"):
-            ctx, ev = await e.chat(text, "gina", "s1", role="guest")
+            ctx, ev = await e.chat(text, "gina", "s1", role="guest", scope=GUEST_SCOPE)
             f = one(ev, "final")
             assert f["route"] == "fast" and "Guests can't control devices" in f["text"]
             assert "confirmation_request" not in names(ev)
@@ -201,7 +201,7 @@ async def test_sensor_question_is_answered_by_read_sensor_without_the_llm(tmp_pa
     try:
         ctx, ev = await e.chat("what is the temperature in the bedroom?")
         f = one(ev, "final")
-        assert f["route"] == "fast" and "24.5" in f["text"] and "Bedroom" in f["text"] and e.llm.requests == []
+        assert f["route"] == "sensor" and "24.5" in f["text"] and "Bedroom" in f["text"] and e.llm.requests == []
         assert [c["args"] for c in e.fake.calls if c["tool"] == "read_sensor"] == [{"endpoint_id": "ep_a1000003", "capability": "temperature"}]
         t = last_trace(e)
         assert (t["route"], t["source"]) == ("sensor", "sensor")
@@ -251,7 +251,7 @@ async def test_a_registered_vision_backend_is_used_for_presence_and_costed(tmp_p
         # images are validated and dropped at the API layer, so only their COUNT reaches the turn (contract gap)
         ctx = e.agent.new_request("alice", "s1", "is there a person at the door?", images=1)
         ev = await collect(ctx)
-        assert one(ev, "final")["route"] == "vision" and "one person" in one(ev, "final")["text"].lower()
+        assert one(ev, "final")["route"] == "yolo" and "one person" in one(ev, "final")["text"].lower()
         t = last_trace(e)
         assert t["route"] == "yolo" and t["source"] == "yolo_pi" and e.llm.requests == []
         assert e.agent.sched.stats()["costs"]["yolo_pi"]["ms"] == 120.0
@@ -338,9 +338,10 @@ async def test_error_turns_still_emit_a_trace(tmp_path):
         await e.close()
 
 
-async def test_scene_names_from_config_enable_the_scene_fast_path(tmp_path):
-    e = await fast_env(tmp_path, scene_names=["Good night"])
+async def test_scenes_from_list_devices_enable_the_scene_fast_path(tmp_path):
+    e = await fast_env(tmp_path)
     try:
+        assert e.agent.registry.scene_names() == ("Good night",) and e.agent.registry.list_version is not None
         ctx, ev = await e.chat("good night")
         assert one(ev, "final")["route"] == "fast" and e.llm.requests == []
         runs = [c for c in e.fake.calls if c["tool"] == "run_scene"]

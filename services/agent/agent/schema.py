@@ -31,7 +31,7 @@ def _call(tool: str, args: dict, required: list[str]) -> dict:
                                     "properties": args}}}
 
 
-def build_plan_schema(reg: DeviceRegistry, scene_names: tuple[str, ...] = ()) -> dict:
+def build_plan_schema(reg: DeviceRegistry, scene_names: tuple[str, ...] | None = None) -> dict:
     variants: list[dict] = []
     # set_state: one variant per (capability, value schema), enum of endpoints having it
     groups: dict[tuple[str, str], tuple[dict, list[str]]] = {}
@@ -58,6 +58,8 @@ def build_plan_schema(reg: DeviceRegistry, scene_names: tuple[str, ...] = ()) ->
         lprops: dict[str, Any] = {"room": {"enum": reg.rooms()},
                                   "type": {"enum": sorted({d.type for d in reg.devices.values()})}}
         variants.append(_call("list_devices", lprops, []))
+    if scene_names is None:
+        scene_names = reg.scene_names()              # from list_devices.scenes (already scoped for a scoped view)
     scene = {"enum": list(scene_names)} if scene_names else {"type": "string", "pattern": SCENE_RE.pattern, "maxLength": 48}
     variants.append(_call("run_scene", {"scene": scene}, ["scene"]))
     calls: dict = {"type": "array", "maxItems": MAX_CALLS, "items": {"anyOf": variants}}
@@ -90,7 +92,7 @@ def strip_forbidden(args: dict) -> tuple[dict, list[str]]:
     return {k: v for k, v in args.items() if k not in FORBIDDEN_ARG_KEYS}, removed
 
 
-def validate_call(reg: DeviceRegistry, tool: Any, args: Any, scene_names: tuple[str, ...] = ()) -> tuple[str | None, dict]:
+def validate_call(reg: DeviceRegistry, tool: Any, args: Any, scene_names: tuple[str, ...] | None = None) -> tuple[str | None, dict]:
     """(error_code | None, cleaned args). Same rules the hub applies, checked against the live registry BEFORE anything
     reaches hardware. Error codes mirror the hub's where one exists."""
     if tool not in TOOLS:
@@ -148,8 +150,12 @@ def validate_call(reg: DeviceRegistry, tool: Any, args: Any, scene_names: tuple[
     if tool == "run_scene":
         if set(a) != {"scene"} or not isinstance(a["scene"], str):
             return "bad_args", {}
-        if scene_names:
+        if scene_names:                                  # explicit closed list (tests, callers that know better than the cache)
             return (None, a) if a["scene"] in scene_names else ("unknown_scene", {})
+        if reg.find_scene(a["scene"]) is not None:
+            return None, a
+        # Not in our (possibly stale) scene listing: a scene created since the last reload is still the hub's call to make,
+        # so this stays a shape check. Scoped callers never get here: the executor's scope check refuses it first.
         return (None, a) if SCENE_RE.match(a["scene"]) else ("bad_args", {})
     # list_devices
     if not only("room", "type"):

@@ -12,7 +12,7 @@ TRACE_EVENT = "sched.trace"
 @dataclass
 class TurnTrace:
     req_id: str
-    route: str = "llm"                       # fast | sensor | yolo | vlm | llm | denied  (the SSE `route` is fast|llm|vision)
+    route: str = "llm"                       # fast | sensor | yolo | vlm | llm | denied  (the SSE `route` is fast|llm|sensor|yolo|vlm)
     sse_route: str = "llm"
     source: str = ""                         # cost-table source that answered: sensor | yolo_pi | ... | llm | fast_path
     candidates: list = field(default_factory=list)   # fast: [(endpoint|scene, score)]; router: [{source, cost_ms, flag, available, reason}]

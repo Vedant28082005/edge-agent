@@ -106,7 +106,7 @@ async def run_config(name: str, flags: dict, tmp: Path) -> dict:
     server = LocalServer(fake.app())
     url = await server.start()
     cfg = AgentConfig(hub_url=url, hub_secret_file=str(sf), db_path=":memory:", settle_wait_s=2.0, confirmation_ttl_s=5.0,
-                      scene_names=["Good night"], sched=dict(flags))
+                      sched=dict(flags))
     clock = Clock()
     llm = SimLLM(clock)
     agent = Agent.from_config(cfg, llm)

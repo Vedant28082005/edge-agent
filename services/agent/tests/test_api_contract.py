@@ -1,4 +1,4 @@
-"""The gateway-facing API of contracts/openapi/agent-internal.yaml (1.2.0)."""
+"""The gateway-facing API of contracts/openapi/agent-internal.yaml (1.3.0)."""
 import asyncio
 import base64
 import json
@@ -13,7 +13,7 @@ from agent.app import create_app
 from agent.auth import ApiAuth
 from agent.mock import LocalServer
 from agent.util import action_hash
-from conftest import SECRET, collect, names, one
+from conftest import GUEST_SCOPE, SECRET, collect, names, one
 
 GW = "gateway-secret-for-tests-0123456789"
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 64).decode()
@@ -30,7 +30,9 @@ def api(env, tmp_path):
 
 
 def chat_body(**kw):
-    return {"user_id": "alice", "role": "member", "session_id": "s1", "text": "turn on the bedroom fan", **kw}
+    # allowed_rooms / allowed_scenes null = unrestricted (agent-internal.yaml 1.3.0); a missing field would mean "nothing allowed"
+    return {"user_id": "alice", "role": "member", "session_id": "s1", "text": "turn on the bedroom fan",
+            "allowed_rooms": None, "allowed_scenes": None, **kw}
 
 
 async def pending(env, n=1):
@@ -152,7 +154,7 @@ async def test_role_comes_from_the_gateway_not_from_the_user_id(api):
     assert api.agent.store.recent("carol", "g") == []                          # nothing persisted for a guest
     await api.chat("turn on the bedroom fan", user="guest", session="g", role="member")
     assert len(api.agent.store.recent("guest", "g")) == 2                      # persisted: id alone means nothing
-    ctx, ev = await api.chat("unlock the front door", user="dave", role="guest")
+    ctx, ev = await api.chat("unlock the front door", user="dave", role="guest", scope=GUEST_SCOPE)
     assert "confirmation_request" not in names(ev) and "guests can't" in one(ev, "final")["text"]
     ctx = api.agent.new_request("erin", "s", "unlock the front door", "member")
     await pending(api)
@@ -247,6 +249,7 @@ async def test_decision_body_validation(api):
 
 async def test_approved_unknown_request_runs_the_exact_action_retry_path(api):
     """A Retry request exists only at the gateway; its approval carries the full action and the agent executes exactly that."""
+    await api.chat("hello", user="alice")                       # the agent remembers alice's scope from her latest chat
     tok = api.fake.mint("alice", LOCK)
     r = await decision(api, "cr_from_gateway_retry", "approved", LOCK, token=tok)
     assert r.status_code == 202
@@ -392,3 +395,44 @@ async def test_memories_reach_the_prompt_tail_for_members_not_guests(api):
     member_req, guest_req = api.llm.requests[-2], api.llm.requests[-1]
     assert "likes the fan on low" in member_req[-1]["content"] and "likes the fan on low" not in json.dumps(guest_req)
     assert "likes the fan on low" not in member_req[0]["content"]                   # tail only, never the cached prefix
+
+
+# ------------------------------------------------------------------------------------------------ 1.3.0 scope fields
+async def test_chat_scope_fields_are_validated_and_parsed_fail_closed(api):
+    seen = []
+    orig = api.agent.new_request
+
+    def spy(user, sess, text, role="member", images=0, scope=None):
+        seen.append((role, scope))
+        return orig(user, sess, text, role, images, scope)
+
+    api.agent.new_request = spy
+    base = {k: v for k, v in chat_body().items() if k not in ("allowed_rooms", "allowed_scenes")}
+    base["text"] = "hello there"
+    for body in ({**base, "allowed_rooms": ["a", "a"]}, {**base, "allowed_rooms": [1]}, {**base, "allowed_rooms": "Bedroom"},
+                 {**base, "allowed_rooms": [""]}, {**base, "allowed_rooms": ["x" * 49]},
+                 {**base, "allowed_rooms": [str(i) for i in range(65)]}, {**base, "allowed_scenes": [str(i) for i in range(201)]},
+                 {**base, "allowed_scenes": ["s" * 65]}, {**base, "allowed_scenes": {}}):
+        assert (await api.client.post("/v1/chat", json=body)).status_code == 400
+    assert seen == []
+    cases = [({}, "member", (frozenset(), frozenset())),                                  # missing = nothing
+             ({"allowed_rooms": None, "allowed_scenes": None}, "member", (None, None)),   # explicit null = unrestricted
+             ({"allowed_rooms": None, "allowed_scenes": None}, "admin", (None, None)),
+             ({"allowed_rooms": None, "allowed_scenes": None}, "guest", (frozenset(), frozenset())),   # never for a guest
+             ({"allowed_rooms": ["Bedroom"]}, "guest", (frozenset({"Bedroom"}), frozenset())),
+             ({"allowed_rooms": ["Bedroom"], "allowed_scenes": ["sc_9a8b7c6d"]}, "member",
+              (frozenset({"Bedroom"}), frozenset({"sc_9a8b7c6d"})))]
+    for extra, role, (rooms, scenes) in cases:
+        seen.clear()
+        r = await api.client.post("/v1/chat", json={**base, "role": role, **extra})
+        assert r.status_code == 200, (extra, role)
+        assert len(seen) == 1 and seen[0][0] == role and (seen[0][1].rooms, seen[0][1].scenes) == (rooms, scenes), (extra, role)
+
+
+async def test_a_member_chat_without_scope_fields_cannot_touch_any_device_end_to_end(api):
+    api.agent.llm.constrained = False
+    api.agent.llm.script.append((".", {"calls": [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000002", "capability": "power", "value": True}}], "say": "ok"}))
+    body = {k: v for k, v in chat_body().items() if k not in ("allowed_rooms", "allowed_scenes")}
+    r = await api.client.post("/v1/chat", json=body)
+    assert r.status_code == 200 and '"error":"out_of_scope"' in r.text
+    assert not [c for c in api.fake.calls if c["tool"] == "set_state"]

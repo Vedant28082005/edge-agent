@@ -86,7 +86,7 @@ TABLE = [
     ("turn on the bedroom fan", "guest", DENIED, "guest_cannot_control"),
     ("lock the front door", "guest", DENIED, "guest_cannot_control"),
     ("set the living room light to 40%", "guest", DENIED, "guest_cannot_control"),
-    ("run the movie scene", "guest", FALLTHROUGH, "guest_scene_scope_unknown"),
+    ("run the movie scene", "guest", FALLTHROUGH, "guest_scene_denied"),
     ("what's the temperature", "guest", FALLTHROUGH, "question"),
     ("turn on the garage light", "guest", FALLTHROUGH, "low_confidence"),            # nothing to deny, nothing to run
 ]

@@ -28,7 +28,6 @@ class AgentConfig:
     settle_wait_s: float = 150.0              # how long a stream stays open after `final` for settle events
     max_text_chars: int = 4000
     max_queued_turns: int = 2
-    scene_names: list[str] = field(default_factory=list)   # no tool lists scenes; optional admin-provided names
     include_state_events: bool = False
     sched: dict = field(default_factory=dict)   # scheduler: see sched/config.py (flags, thresholds, cost table)
 
@@ -38,6 +37,7 @@ def load_config(path: str | None) -> AgentConfig:
     if path:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         known = {f.name for f in fields(AgentConfig)}
+        data.pop("scene_names", None)          # retired: scenes now come from list_devices (device-hub 1.4.0)
         for k, v in data.items():
             if k not in known:
                 raise ValueError(f"unknown config key: {k}")

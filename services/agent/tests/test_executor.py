@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from conftest import make_env, names, one
+from conftest import GUEST_SCOPE, make_env, names, one
 from agent.llm import LlmResult
 
 
@@ -225,7 +225,7 @@ async def test_guest_llm_proposed_set_state_and_run_scene_are_denied_and_logged(
     """Fail closed on the executor itself: even a (hallucinated or injected) LLM plan by a guest cannot move anything,
     on a normal-risk device, with a clear denial result and one action-log row per call."""
     script(env, [setstate("ep_a1000002", "power", True), {"tool": "run_scene", "args": {"scene": "Good night"}}])
-    ctx, ev = await env.chat("turn on the bedroom fan", user="visitor", role="guest")
+    ctx, ev = await env.chat("turn on the bedroom fan", user="visitor", role="guest", scope=GUEST_SCOPE)
     assert not [c for c in env.fake.calls if c["tool"] in ("set_state", "run_scene")]       # nothing reached the hub
     res = [d for n, d in ev if n == "tool_result"]
     assert len(res) == 2 and all(r["ok"] is False and r["result"]["error"] == "not_allowed"

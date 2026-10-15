@@ -108,8 +108,14 @@ def test_non_perception_goes_straight_to_the_llm():
     assert d.kind == OTHER_Q and d.chosen == "llm" and d.ladder == ["llm"]
 
 
-def test_guest_gets_no_sensor_route():
-    d = router().route("what is the temperature in the bedroom", registry(), role="guest")
+def test_guest_sensor_route_is_limited_to_the_scoped_registry():
+    """The router sees the caller's scoped registry (1.3.0): a guest reads sensors in assigned rooms, never elsewhere."""
+    from agent.scope import make_scope
+    inside = registry().scoped(make_scope("guest", ["Bedroom"], []))
+    d = router().route("what is the temperature in the bedroom", inside, role="guest")
+    assert d.chosen == "sensor" and d.sensor == ("ep_b0000003", "temperature")
+    outside = registry().scoped(make_scope("guest", ["Kitchen"], []))
+    d = router().route("what is the temperature in the bedroom", outside, role="guest")
     assert d.chosen == "llm" and d.sensor is None
 
 

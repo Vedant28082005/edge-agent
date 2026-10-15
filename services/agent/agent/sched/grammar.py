@@ -7,14 +7,15 @@ backend interface that puts either form into a llama-server request.
 * `schema_to_gbnf` compiles that schema (the subset it uses) to a GBNF grammar, for servers/builds where `response_format`
   is not available and for the golden-grammar tests. Floats are not range-bounded in GBNF (the executor re-validates).
   UNVERIFIED against a real llama-server in this session; `tests/test_llama_real.py` (EDGE_TEST_GGUF) is the gate.
-* `ConstraintCache` rebuilds only when the registry CONTENT relevant to decoding changes (ids, capabilities, ranges,
-  enums, rooms, scene names), not on every reload, so a `registry_changed` that edits only a label keeps the compiled
-  artefacts. The hub's registry version is recorded for the trace but is not the key: `list_devices` does not return it
-  (contract gap), only `registry_changed` events carry it."""
+* `ConstraintCache` rebuilds only when its key changes (the hub's registry version, else the registry CONTENT relevant
+  to decoding: ids, capabilities, ranges, enums, rooms, scene names), so without a version a label-only edit keeps the compiled
+  artefacts. When `list_devices` carries the hub's `registry_version` (device-hub 1.4.0) that number is the key instead;
+  the content hash is the fallback for a hub that does not send it."""
 from __future__ import annotations
 
 import hashlib
 import json
+from collections import OrderedDict
 from typing import Any, Protocol
 
 from ..devices import DeviceRegistry
@@ -23,20 +24,27 @@ from ..util import jcs
 
 
 # --------------------------------------------------------------------------------------------- cache key
-def registry_decoding_key(reg: DeviceRegistry, scene_names: tuple[str, ...] = ()) -> str:
-    """Hash of everything the decoding schema depends on. Names, tags and `online` are NOT part of it (the schema only
-    names endpoint ids), so a rename does not rebuild the schema; it does rebuild the prompt prefix."""
-    shape = {
-        "devices": sorted(
-            [d.endpoint_id, d.type,
-             sorted([c.id, c.kind, c.type, c.min, c.max, list(c.values)] for c in d.caps)]
-            for d in reg.devices.values()),
-        "rooms": reg.rooms(), "scenes": list(scene_names)}
+def registry_decoding_key(reg: DeviceRegistry, scene_names: tuple[str, ...] | None = None, scope_key: str = "") -> str:
+    """Cache key of the decoding schema. When `list_devices` carried the hub's `registry_version` the key is that number
+    (plus the scope and the scene listing, which a version bump need not cover): O(1) in the device count and exactly as
+    fresh as the hub's own change counter. Without one it falls back to a hash of everything the schema depends on (ids,
+    capabilities, ranges, enums, rooms, scenes): names, tags and `online` are NOT part of it, so a rename does not rebuild."""
+    scenes = (list(scene_names) if scene_names is not None
+              else [[s.scene_id, s.name] for s in sorted(reg.scenes.values(), key=lambda s: s.scene_id) if not s.broken])
+    if reg.list_version is not None:
+        shape: dict = {"v": reg.list_version, "scope": scope_key, "scenes": scenes}
+    else:
+        shape = {
+            "devices": sorted(
+                [d.endpoint_id, d.type,
+                 sorted([c.id, c.kind, c.type, c.min, c.max, list(c.values)] for c in d.caps)]
+                for d in reg.devices.values()),
+            "rooms": reg.rooms(), "scenes": scenes, "scope": scope_key}
     try:
         text = jcs(shape)
     except (TypeError, ValueError):
         text = json.dumps(shape, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(text.encode()).hexdigest()[:16]
+    return ("v" if reg.list_version is not None else "c") + hashlib.sha256(text.encode()).hexdigest()[:15]
 
 
 # --------------------------------------------------------------------------------------------- JSON schema -> GBNF
@@ -167,30 +175,38 @@ class ConstraintSchema(dict):
 
 
 class ConstraintCache:
-    """Builds the schema + grammar when the registry's decoding-relevant content changes, otherwise returns the cached
-    object (the same object, so identity doubles as a cheap "unchanged" check for callers)."""
+    """Builds the schema + grammar when the cache key changes (see `registry_decoding_key`), otherwise returns the cached
+    object (the same object, so identity doubles as a cheap "unchanged" check for callers). One entry per scope key
+    (a restricted caller decodes against a schema that names only its own endpoints and scenes); a small LRU."""
+    MAX_SCOPES = 16
 
     def __init__(self) -> None:
-        self._cur: ConstraintSchema | None = None
+        self._by_scope: OrderedDict[str, ConstraintSchema] = OrderedDict()
         self.builds = 0
         self.hits = 0
 
-    def get(self, reg: DeviceRegistry, scene_names: tuple[str, ...] = ()) -> ConstraintSchema:
-        key = registry_decoding_key(reg, scene_names)
-        if self._cur is not None and self._cur.key == key:
+    def get(self, reg: DeviceRegistry, scene_names: tuple[str, ...] | None = None, scope_key: str = "") -> ConstraintSchema:
+        key = registry_decoding_key(reg, scene_names, scope_key)
+        cur = self._by_scope.get(scope_key)
+        if cur is not None and cur.key == key:
             self.hits += 1
-            self._cur.hub_version = reg.version
-            return self._cur
+            cur.hub_version = reg.version
+            self._by_scope.move_to_end(scope_key)
+            return cur
         sch = ConstraintSchema(build_plan_schema(reg, scene_names))
         sch.key, sch.hub_version = key, reg.version
         sch.gbnf = schema_to_gbnf(sch)
-        self._cur = sch
+        self._by_scope[scope_key] = sch
+        self._by_scope.move_to_end(scope_key)
+        while len(self._by_scope) > self.MAX_SCOPES:
+            self._by_scope.popitem(last=False)
         self.builds += 1
         return sch
 
     @property
     def current(self) -> ConstraintSchema | None:
-        return self._cur
+        """The unrestricted schema, if built (stats)."""
+        return self._by_scope.get("")
 
 
 # --------------------------------------------------------------------------------------------- backends

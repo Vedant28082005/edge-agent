@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from .executor import Metrics
 from .llm import Llm, LlmResult
 from .schema import MAX_CALLS, SAY_MAX
+from .scope import UNRESTRICTED, Scope
 from .util import clean_user_text
 
 log = logging.getLogger("agent.planner")
@@ -71,8 +72,8 @@ class Planner:
     def __init__(self, llm: Llm, schema_provider, metrics: Metrics) -> None:
         self.llm, self._schema, self.metrics = llm, schema_provider, metrics
 
-    async def plan(self, messages: list[dict]) -> Plan:
-        schema = self._schema() if self.llm.constrained else None
+    async def plan(self, messages: list[dict], scope: Scope = UNRESTRICTED) -> Plan:
+        schema = self._schema(scope) if self.llm.constrained else None
         res: LlmResult = await self.llm.complete(messages, schema)
         plan = parse_plan(res.content)
         plan.timings = res.timings
