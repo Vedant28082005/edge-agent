@@ -1,0 +1,7 @@
+{
+  "event": "token",
+  "data": {
+    "req_id": "q1",
+    "text": "x"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "user_id": "u_g",
+  "role": "guest",
+  "session_id": "s1",
+  "allowed_rooms": [
+    1,
+    2
+  ]
+}

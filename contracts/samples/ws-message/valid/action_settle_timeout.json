@@ -1,0 +1,9 @@
+{
+  "type": "action_settle_timeout",
+  "call_id": "c1",
+  "endpoint_id": "ep_3fa91c02",
+  "capability": "position",
+  "value": 40,
+  "observed": null,
+  "settle_s": 30
+}

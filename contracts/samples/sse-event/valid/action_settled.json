@@ -1,0 +1,13 @@
+{
+  "event": "action_settled",
+  "data": {
+    "seq": 3,
+    "req_id": "q1",
+    "call_id": "c1",
+    "endpoint_id": "ep_3fa91c02",
+    "capability": "position",
+    "value": 40,
+    "observed": 40,
+    "elapsed_ms": 5000
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "type": "notification",
+  "level": "action_settled",
+  "text": "ok",
+  "call_id": "c1"
+}

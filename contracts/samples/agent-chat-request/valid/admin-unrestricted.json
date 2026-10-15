@@ -1,0 +1,8 @@
+{
+  "user_id": "u_a",
+  "role": "admin",
+  "session_id": "s1",
+  "allowed_rooms": null,
+  "allowed_scenes": null,
+  "text": "hi"
+}
