@@ -1,7 +1,7 @@
 import { fireEvent, screen, within, waitFor } from "@testing-library/react";
 import { server } from "../test/server";
 import { route } from "../test/contract";
-import { baseRoutes } from "../test/fixtures";
+import { baseRoutes, blind } from "../test/fixtures";
 import { openApp, push } from "./helpers";
 
 // jsdom does not step range inputs from the keyboard: change the value, then release (the control commits on release).
@@ -44,7 +44,8 @@ describe("devices", () => {
     moveSlider("position", 1);
     await waitFor(() => expect(sent).toEqual({ capability: "position", value: 1 }));
     await waitFor(() => expect(screen.getByRole("status", { name: "motion progress" })).toHaveTextContent("accepted → settling"));
-    push(ws, { type: "action_settled", endpoint_id: "ep_00000002", capability: "position", value: 1, observed: 1, elapsed_ms: 4200 });
+    expect(screen.getByRole("status", { name: "motion progress" })).toHaveTextContent("settling (up to 30s)"); // Capability.settle_s
+    push(ws, { type: "action_settled", call_id: "c1", endpoint_id: "ep_00000002", capability: "position", value: 1, observed: 1, elapsed_ms: 4200 });
     expect(await screen.findByText(/accepted → settling → settled \(4\.2s\)/)).toBeInTheDocument();
   });
 
@@ -53,18 +54,37 @@ describe("devices", () => {
     const { ws } = await openApp();
     moveSlider("position", 1);
     await screen.findByText(/accepted → settling/);
-    push(ws, { type: "action_settle_timeout", endpoint_id: "ep_00000002", capability: "position", value: 1, observed: null, settle_s: 30 });
+    push(ws, { type: "action_settle_timeout", call_id: "c1", endpoint_id: "ep_00000002", capability: "position", value: 1, observed: null, settle_s: 30 });
     expect(await screen.findByText(/settle timeout \(did not reach target in 30s, observed none\)/)).toBeInTheDocument();
   });
 
+  it("stops claiming motion once the capability's settle_s has passed without a result", async () => {
+    const quick = { ...blind, capabilities: [{ ...blind.capabilities[0], settle_s: 1 }] };
+    server.use(route("post", "/devices/{endpoint_id}/set", () => ({ json: { ok: true, status: "moving" } })), ...baseRoutes("admin", [quick]));
+    await openApp();
+    moveSlider("position", 1);
+    expect(await screen.findByText(/settling \(up to 1s\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/settling \(no result after 1s\)/, undefined, { timeout: 2500 })).toBeInTheDocument();
+  });
+
+  it("a confirmation_required body without the server summary is an error, not a client-written prompt", async () => {
+    server.use(route("post", "/devices/{endpoint_id}/set", () => ({ status: 409, json: { error: "confirmation_required" } })), ...baseRoutes());
+    const { user } = await openApp();
+    await user.selectOptions(screen.getByRole("combobox", { name: "lock" }), "unlocked");
+    expect(await screen.findByRole("alert")).toHaveTextContent("needs your confirmation");
+    expect(screen.queryByRole("group", { name: "Confirmation required" })).not.toBeInTheDocument();
+  });
+
   it("direct confirm flow: 409 confirmation_required, gateway mints token, the retried set carries it", async () => {
+    const action = { type: "set_state", endpoint_id: "ep_00000003", capability: "lock", value: "unlocked" };
+    const hash = "a".repeat(64);
     const sets: Array<Record<string, unknown>> = [];
     let minted: unknown;
     server.use(
             route("post", "/devices/{endpoint_id}/set", async ({ request }) => {
         const b = (await request.json()) as Record<string, unknown>;
         sets.push(b);
-        return b.confirmation_token ? { json: { ok: true, status: "done" } } : { status: 409, json: { error: "confirmation_required" } };
+        return b.confirmation_token ? { json: { ok: true, status: "done" } } : { status: 409, json: { error: "confirmation_required", summary: "Unlock Front door?", action, action_hash: hash, expires_in_s: 60 } };
       }),
       route("post", "/confirmations", async ({ request }) => {
         minted = await request.json();
@@ -74,10 +94,14 @@ describe("devices", () => {
     );
     const { user } = await openApp();
     await user.selectOptions(screen.getByRole("combobox", { name: "lock" }), "unlocked");
-    await user.click(await screen.findByRole("button", { name: "Confirm" }));
+    const card = await screen.findByRole("group", { name: "Confirmation required" });
+    expect(card.querySelector("p")?.textContent).toBe("Unlock Front door?"); // the server summary, no client wording around it
+    expect(document.body.textContent).not.toContain(hash);
+    await user.click(within(card).getByRole("button", { name: "Confirm" }));
     await waitFor(() => expect(sets).toHaveLength(2));
     expect(sets[1]).toEqual({ capability: "lock", value: "unlocked", confirmation_token: "tok-from-gateway" });
-    expect(minted).toEqual({ action: { type: "set_state", endpoint_id: "ep_00000003", capability: "lock", value: "unlocked" } });
+    expect(minted).toEqual({ action }); // exactly as the server sent it
+    expect(document.body.textContent).not.toContain(hash);
     expect(document.body.textContent).not.toContain("tok-from-gateway");
   });
 });

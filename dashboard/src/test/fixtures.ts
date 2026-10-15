@@ -13,7 +13,7 @@ export const lamp: Endpoint = {
 };
 export const blind: Endpoint = {
   endpoint_id: "ep_00000002", name: "Blind", room: "bedroom", type: "cover", online: true, enabled: true, risk: "normal",
-  capabilities: [{ id: "position", kind: "actuator", type: "int", min: 0, max: 100, unit: "%" }],
+  capabilities: [{ id: "position", kind: "actuator", type: "int", min: 0, max: 100, unit: "%", settle_s: 30 }],
   state: { position: 0 },
 };
 export const door: Endpoint = {

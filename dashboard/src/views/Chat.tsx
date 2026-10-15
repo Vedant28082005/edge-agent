@@ -14,8 +14,6 @@ const short = (v: unknown, n = 80) => {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 };
 
-const FORWARD = new Set(["confirmation_request", "confirmation_declined", "confirmation_expired", "action_settled", "action_settle_timeout"]);
-
 export function Chat() {
   const live = useLive();
   const [msgs, setMsgs] = useState<Msg[]>([]);
@@ -33,19 +31,24 @@ export function Chat() {
     });
 
   const onEvent = (e: SseEvent) => {
-    const d = e.data as Record<string, any>;
-    if (FORWARD.has(e.event)) live.dispatch({ type: e.event, ...d } as unknown as WsMessage);
     switch (e.event) {
-      case "status": patchLast((m) => { m.status = String(d.text ?? ""); }); break;
-      case "token": patchLast((m) => { m.text += String(d.text ?? ""); }); break;
-      case "tool_call": patchLast((m) => { m.tools.push({ call_id: String(d.call_id), tool: String(d.tool), args: d.args }); }); break;
-      case "tool_result": patchLast((m) => {
+      case "confirmation_request": case "confirmation_declined": case "confirmation_expired":
+      case "action_settled": case "action_settle_timeout": {
+        const { seq: _seq, req_id: _req, ...rest } = e.data; // the SSE envelope is not part of the WsMessage shape
+        void _seq; void _req;
+        live.dispatch({ type: e.event, ...rest } as WsMessage);
+        break;
+      }
+      case "status": { const d = e.data; patchLast((m) => { m.status = d.text; }); break; }
+      case "token": { const d = e.data; patchLast((m) => { m.text += d.text; }); break; }
+      case "tool_call": { const d = e.data; patchLast((m) => { m.tools.push({ call_id: d.call_id, tool: d.tool, args: d.args }); }); break; }
+      case "tool_result": { const d = e.data; patchLast((m) => {
         const t = m.tools.find((x) => x.call_id === d.call_id);
-        if (t) { t.result = d.result; t.ok = Boolean(d.ok); } else m.tools.push({ call_id: String(d.call_id), tool: String(d.tool), args: undefined, result: d.result, ok: Boolean(d.ok) });
-      }); break;
-      case "final": patchLast((m) => { m.text = String(d.text ?? m.text); m.final = true; m.status = undefined; m.route = d.route; m.latency_ms = d.latency_ms; }); break;
-      case "async_result": patchLast((m) => { m.text += `${m.text ? "\n" : ""}${String(d.text ?? "")}`; }); break;
-      case "error": patchLast((m) => { m.error = explain(String(d.code ?? "error")); m.final = true; }); break;
+        if (t) { t.result = d.result; t.ok = d.ok; } else m.tools.push({ call_id: d.call_id, tool: d.tool, args: undefined, result: d.result, ok: d.ok });
+      }); break; }
+      case "final": { const d = e.data; patchLast((m) => { m.text = d.text; m.final = true; m.status = undefined; m.route = d.route; m.latency_ms = d.latency_ms; }); break; }
+      case "async_result": { const d = e.data; patchLast((m) => { m.text += (m.text ? "\n" : "") + d.text; }); break; }
+      case "error": { const d = e.data; patchLast((m) => { m.error = explain(d.code); m.final = true; }); break; }
     }
   };
 
