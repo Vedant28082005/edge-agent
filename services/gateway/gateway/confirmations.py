@@ -12,7 +12,8 @@ import re
 from . import policy
 from .auth import AuthService, User
 from .db import DB
-from .events import Broadcaster, Event
+from .actionlog import ActionLog
+from .events import Broadcaster, Event, confirmation_request_event
 from .security import SECRETS, new_id, new_token, sha256_hex
 from .upstream import AgentClient, HubClient, UpstreamError
 
@@ -48,9 +49,62 @@ def canonical_action(a) -> dict | None:
     return None
 
 
+def label(x, n: int = 48) -> str:
+    """Admin-set registry labels shown to users: control characters out, whitespace collapsed, bounded."""
+    return " ".join("".join(c if c.isprintable() else " " for c in str(x or "")).split())[:n]
+
+
+def summary_for(action: dict, ep_name: str = "", scene_name: str = "", risky_names: list[str] | None = None) -> str:
+    """Server-built prompt text for a `risk: confirm` action (clients show it verbatim, no client wording). Built only from
+    registry labels (admin-set, sanitized) and the action's own scalar value, never from free text of a device or a user."""
+    if action.get("type") == "run_scene":
+        names = ", ".join(label(n, 30) for n in (risky_names or [])[:5])
+        base = f"Run scene {label(scene_name) or label(action.get('scene_id'), 24)}?"
+        return (base + (f" Needs approval for: {names}." if names else ""))[:200]
+    name, cap, val = label(ep_name) or "device", action.get("capability"), action.get("value")
+    if cap == "lock" and val in ("locked", "unlocked"):
+        return f"{'Unlock' if val == 'unlocked' else 'Lock'} {name}?"[:200]
+    if isinstance(val, bool):
+        return f"Turn {name} {'on' if val else 'off'}?"[:200]
+    return f"Set {name} {label(cap, 24)} to {label(val, 24)}?"[:200]
+
+
 class Confirmations:
-    def __init__(self, db: DB, hub: HubClient, agent: AgentClient, bc: Broadcaster, users: AuthService, ttl_s: int = 60) -> None:
+    def __init__(self, db: DB, hub: HubClient, agent: AgentClient, bc: Broadcaster, users: AuthService, ttl_s: int = 60,
+                 actions: ActionLog | None = None) -> None:
         self.db, self.hub, self.agent, self.bc, self.users, self.ttl = db, hub, agent, bc, users, ttl_s
+        self.actions = actions or ActionLog(db)
+
+    def request_event(self, request_id: str) -> Event:
+        """The WsMessage `confirmation_request` for a stored request (canonical action, bounded fields)."""
+        row = self.db.one("SELECT * FROM confirm_requests WHERE request_id=?", (request_id,))
+        return confirmation_request_event(row["user_id"], row["request_id"], row["summary"], json.loads(row["action_json"]),
+                                          row["action_hash"], max(1, row["expires_at"] - row["created"]))
+
+    def _log_outcome(self, row, status: str) -> None:
+        a = json.loads(row["action_json"])
+        self.actions.record(row["user_id"], "agent", a["type"], status,
+                            node_id=self.bc.node_of.get(a.get("endpoint_id")), endpoint_id=a.get("endpoint_id"),
+                            scene_id=a.get("scene_id"), capability=a.get("capability"), value=a.get("value"))
+
+    async def describe(self, user: User, action: dict, for_display: bool = False) -> tuple[dict, str, str]:
+        """(canonical action, hub action hash, server-built summary) for a `risk: confirm` action the caller just hit, from the
+        hub's own view (the same source as approve). Raises ConfirmError on any hub failure: callers fail closed."""
+        canon, h = await self._resolve(user, action, for_display)
+        if canon["type"] == "set_state":
+            ep = await self._hub_json("GET", f"/devices/{canon['endpoint_id']}")
+            return canon, h, summary_for(canon, ep.get("name", ""))
+        scene = await self._hub_json("GET", f"/scenes/{canon['scene_id']}")
+        names = []
+        if canon["actions"]:
+            try:
+                status, devs = await self.hub.hub("GET", "/devices")
+            except UpstreamError:
+                status, devs = 0, None
+            if status == 200 and isinstance(devs, list):
+                by = {d.get("endpoint_id"): d.get("name", "") for d in devs if isinstance(d, dict)}
+                names = list(dict.fromkeys(by.get(a["endpoint_id"], "") for a in canon["actions"]))
+        return canon, h, summary_for(canon, scene_name=scene.get("name", ""), risky_names=[n for n in names if n])
 
     # ------------------------------------------------------------------ requests (chat stream or GET /v1/events)
     def register_request(self, user_id: str, session_id: str | None, ev: dict) -> bool:
@@ -91,6 +145,7 @@ class Confirmations:
                                (row["request_id"],)).rowcount:
                 continue
             self.db.audit(row["user_id"], "confirm.expired", row["request_id"], {"reason": reason})
+            self._log_outcome(row, "expired")
             self.bc.publish(Event("confirmation_expired", {"request_id": row["request_id"], "summary": row["summary"],
                                                            "reason": reason}, user_id=row["user_id"]))
             await self._handoff(row, "expired")
@@ -135,12 +190,12 @@ class Confirmations:
             raise ConfirmError(502, "upstream_error")
         return body
 
-    async def _resolve(self, user: User, action: dict) -> tuple[dict, str]:
+    async def _resolve(self, user: User, action: dict, for_display: bool = False) -> tuple[dict, str]:
         """(canonical action, hash) from the hub's own view, enforcing the user's room access. Accepts the direct-flow
         shape {type: run_scene, scene} and the stored {type: run_scene, scene_id, actions}."""
         if action.get("type") == "set_state":
             ep = await self._hub_json("GET", f"/devices/{action['endpoint_id']}")
-            if not user.is_admin and not policy.endpoint_visible(user, ep):
+            if not for_display and not user.is_admin and not policy.endpoint_visible(user, ep):
                 raise ConfirmError(403, "forbidden")
             h = await self._hub_json("POST", f"/devices/{action['endpoint_id']}/action",
                                      json={"capability": action["capability"], "value": action["value"]})
@@ -150,7 +205,7 @@ class Confirmations:
             return canon, h["action_hash"]
         sid = action.get("scene_id") or action["scene"]
         scene = await self._hub_json("GET", f"/scenes/{sid}")
-        if user.role == "guest" or not policy.can_run_scene(user, scene, self.assigned(user)):
+        if not for_display and (user.role == "guest" or not policy.can_run_scene(user, scene, self.assigned(user))):
             raise ConfirmError(403, "forbidden")
         c = await self._hub_json("GET", f"/scenes/{scene['scene_id']}/confirmation")
         canon = canonical_action(c.get("action"))
@@ -211,6 +266,7 @@ class Confirmations:
                            (request_id,)).rowcount:
             raise self._conflict("declined")
         self.db.audit(user.user_id, "confirm.declined", request_id)
+        self._log_outcome(row, "declined")
         self.bc.publish(Event("confirmation_declined", {"request_id": request_id, "summary": row["summary"]}, user_id=user.user_id))
         await self._handoff(row, "declined")                        # best effort; the decline is recorded here either way
 
@@ -235,8 +291,7 @@ class Confirmations:
                         (new_id_, user.user_id, row["kind"], json.dumps(disp, sort_keys=True), live_hash, row["summary"],
                          row["session_id"], "pending", now, now + self.ttl, request_id))
         self.db.audit(user.user_id, "confirm.retried", new_id_, {"of": request_id})
-        self.bc.publish(Event("confirmation_request", {"request_id": new_id_, "summary": row["summary"], "action": disp,
-                                                       "action_hash": live_hash, "expires_in_s": self.ttl}, user_id=user.user_id))
+        self.bc.publish(confirmation_request_event(user.user_id, new_id_, row["summary"], disp, live_hash, self.ttl))
         return new_id_
 
     # ------------------------------------------------------------------ internal: consume

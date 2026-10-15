@@ -51,6 +51,7 @@ def _ep(i, type_, name, room, caps, state, risk="normal", enabled=True, online=T
 
 
 POWER = {"id": "power", "kind": "actuator", "type": "bool"}
+POSITION = {"id": "position", "kind": "actuator", "type": "int", "min": 0, "max": 100, "unit": "%", "settle_s": 30}
 LOCK = {"id": "lock", "kind": "actuator", "type": "enum", "values": ["locked", "unlocked"]}
 
 
@@ -66,6 +67,7 @@ class FakeHub:
             _ep(3, "lock", "Front door", "Hall", [LOCK], {"lock": "locked"}, risk="confirm"),
             _ep(4, "light", "Kitchen light", "Kitchen", [POWER], {"power": False}),
             _ep(5, "light", "Old lamp", "Bedroom", [POWER], {"power": False}, enabled=False),
+            _ep(6, "cover", "Blinds", "Bedroom", [POSITION], {"position": 0}),
         ]}
         self.scenes: dict[str, dict] = {}
         self.add_scene("sc_00000001", "Good night", "u_seed", [
@@ -177,6 +179,9 @@ class FakeHub:
                 a = {"type": "set_state", "endpoint_id": eid, "capability": b["capability"], "value": b["value"]}
                 if not await self.consume(b.get("confirmation_token"), b.get("user_id", ""), action_hash(a)):
                     return {"ok": False, "error": "confirmation_required", "endpoint_id": eid}
+            if b["capability"] == "position":                       # motion: accepted and started, the result arrives as a settle event
+                return {"ok": True, "status": "moving", "verified": False, "endpoint_id": eid, "capability": "position",
+                        "value": b["value"]}
             ep["state"][b["capability"]] = b["value"]
             return {"ok": True, "status": "done", "verified": True, "endpoint_id": eid, "capability": b["capability"], "value": b["value"]}
 
@@ -285,7 +290,7 @@ class FakeHub:
         return app
 
 
-CHAT_KEYS = {"user_id", "role", "session_id", "text", "images"}
+CHAT_KEYS = {"user_id", "role", "session_id", "allowed_rooms", "allowed_scenes", "text", "images"}
 DECISION_KEYS = {"decision", "user_id", "role", "action", "action_hash", "confirmation_token"}
 
 
@@ -327,6 +332,14 @@ class FakeAgent:
             if not isinstance(b, dict) or set(b) - CHAT_KEYS or not {"user_id", "role", "session_id"} <= set(b) \
                     or len(b["session_id"]) > 64 or b["role"] not in ("admin", "member", "guest"):
                 return JSONResponse({"error": "bad_request", "message": "invalid ChatRequest"}, status_code=400)
+            for k, mx, ln in (("allowed_rooms", 64, 48), ("allowed_scenes", 200, 64)):
+                v = b.get(k, [] if b["role"] != "admin" else None)          # missing = [] for member/guest (fail closed)
+                if v is None:
+                    if b["role"] == "guest":
+                        return JSONResponse({"error": "bad_request", "message": "null scope for a guest"}, status_code=400)
+                elif not (isinstance(v, list) and len(v) <= mx and len(set(v)) == len(v)
+                          and all(isinstance(x, str) and 0 < len(x) <= ln for x in v)):
+                    return JSONResponse({"error": "bad_request", "message": "invalid scope"}, status_code=400)
             self.requests.append(b)
             text, rid, n = b.get("text") or "", f"req-{next(self._n)}", 0
 
@@ -344,6 +357,12 @@ class FakeAgent:
                     {"endpoint_id": "ep_00000003", "capability": "lock", "value": "unlocked"}]}
                 frames.append(f("confirmation_request", {"request_id": rid, "summary": "Open up?", "action": a,
                                                          "action_hash": action_hash(a), "expires_in_s": 60}))
+            elif "blinds" in text:
+                frames.append(f("tool_call", {"call_id": "c1", "tool": "set_state", "args": {
+                    "endpoint_id": "ep_00000006", "capability": "position", "value": 80}}))
+                frames.append(f("tool_result", {"call_id": "c1", "tool": "set_state", "ok": True, "result": {
+                    "ok": True, "status": "moving", "verified": False, "endpoint_id": "ep_00000006", "capability": "position",
+                    "value": 80}}))
             else:
                 frames.append(f("token", {"text": "ok"}))
             frames.append(f("final", {"text": "done", "route": "fast", "latency_ms": 5}))

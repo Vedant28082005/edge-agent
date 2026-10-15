@@ -18,7 +18,7 @@ def test_chat_forwards_gateway_identity_and_per_user_sessions(gw):
     ra, rb = gw.m.agent.requests
     assert ra["user_id"] == gw.uid("admin") and rb["user_id"] == gw.uid("member")
     assert (ra["role"], rb["role"]) == ("admin", "member")                                       # role from the gateway's own DB
-    assert set(ra) == {"user_id", "role", "session_id", "text"}                                  # exactly the ChatRequest fields
+    assert set(ra) == {"user_id", "role", "session_id", "text", "allowed_rooms", "allowed_scenes"}                                  # exactly the ChatRequest fields
     assert ra["session_id"] != rb["session_id"] and len(ra["session_id"]) <= 64                  # same client id, separate sessions
     # the client cannot choose the user
     assert gw.pub.post("/chat", json={"text": "hi", "user_id": "u_other"}, headers=gw.h("member")).status_code == 400

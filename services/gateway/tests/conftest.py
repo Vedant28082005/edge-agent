@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -14,7 +15,8 @@ from gateway.mock import Mock, build_mock  # noqa: E402
 from gateway.security import install_log_redaction  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[3]
-CONTRACTS = REPO / "contracts"
+# EDGE_CONTRACTS_DIR: run against another checkout of contracts/ (e.g. before the 2.11.0 contracts branch is merged here)
+CONTRACTS = Path(os.environ.get("EDGE_CONTRACTS_DIR") or REPO / "contracts")
 
 
 class Clock:

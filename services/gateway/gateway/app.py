@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Literal, Union
 
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, File, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, Stri
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import policy
+from .actionlog import STATUSES as ACTION_STATUSES
+from .actionlog import ActionLog
 from .auth import AuthError, User
 from .confirmations import ConfirmError
 from .context import Ctx
@@ -349,17 +351,37 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             raise ApiError(e.status, e.code)
 
     # ================================================================== devices
+    def shape_endpoint(e):
+        """Capability `settle_s` (gateway.yaml 2.11.0) only on actuators and only as announced (1..120 s); never anything else."""
+        caps = e.get("capabilities") if isinstance(e, dict) else None
+        if not isinstance(caps, list):
+            return e
+        out = []
+        for c in caps:
+            if isinstance(c, dict) and "settle_s" in c:
+                s = c["settle_s"]
+                if not (c.get("kind") == "actuator" and isinstance(s, (int, float)) and not isinstance(s, bool) and 1 <= s <= 120):
+                    c = {k: v for k, v in c.items() if k != "settle_s"}
+            out.append(c)
+        return {**e, "capabilities": out}
+
     @r.get("/devices")
     async def list_devices(room: str | None = None, type: str | None = None, u: User = Depends(authed)):
         params = {k: v for k, v in (("room", room), ("type", type)) if v}
         status, body = await hub("GET", "/devices", u, params=params)
         if status != 200 or not isinstance(body, list):
             return fwd(status, body)
-        return [e for e in body if policy.endpoint_visible(u, e)]
+        return [shape_endpoint(e) for e in body if policy.endpoint_visible(u, e)]
 
     @r.post("/devices/{endpoint_id}/set")
     async def set_device(endpoint_id: str, body: SetIn, u: User = Depends(authed)):
+        def note(status: str, ep: dict | None = None, error: str | None = None) -> None:
+            ctx.actions.record(u.user_id, "direct", "set_state", status, endpoint_id=endpoint_id,
+                               node_id=(ep or {}).get("node_id") or ctx.bc.node_of.get(endpoint_id),
+                               capability=body.capability, value=body.value, error=error)
+
         if u.role == "guest":
+            note("denied", error="forbidden")
             raise ApiError(403, "forbidden", "guests run assigned scenes only")
         if not EP_RE.match(endpoint_id):
             raise ApiError(404, "not_found")
@@ -369,6 +391,7 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         if status != 200 or not isinstance(ep, dict):
             return fwd(status, ep)
         if not policy.endpoint_visible(u, ep):
+            note("denied", ep, "forbidden")
             raise ApiError(403, "forbidden", "no access to this room")
         if body.confirmation_token:
             SECRETS.add(body.confirmation_token)
@@ -381,9 +404,21 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             return fwd(status, res)
         ctx.db.audit(u.user_id, "device.set", endpoint_id, {"capability": body.capability, "ok": bool(res.get("ok")),
                                                             "error": res.get("error")})
-        if not res.get("ok") and res.get("error") in ("confirmation_required", "offline"):
-            code = "endpoint_offline" if res["error"] == "offline" else "confirmation_required"
-            return jerr(409, code, "nothing was executed")
+        if not res.get("ok") and res.get("error") == "confirmation_required":
+            note("confirmation_required", ep, "confirmation_required")
+            # ConfirmationRequired (2.11.0): the server-built summary and the exact action + hash for POST /confirmations.
+            # Any lookup failure raises (502/504): nothing was executed either way.
+            action, ahash, summary = await ctx.confirm.describe(u, {
+                "type": "set_state", "endpoint_id": endpoint_id, "capability": body.capability, "value": body.value}, for_display=True)
+            return JSONResponse({"error": "confirmation_required", "summary": summary, "action": action, "action_hash": ahash,
+                                 "expires_in_s": cfg.confirm_ttl_s}, status_code=409)
+        if not res.get("ok") and res.get("error") == "offline":
+            note("failed", ep, "offline")
+            return jerr(409, "endpoint_offline", "nothing was executed")
+        if res.get("ok"):
+            note("moving" if res.get("status") == "moving" else "done", ep)
+        else:
+            note("failed", ep, res.get("error"))
         return res
 
     # ================================================================== scenes
@@ -463,6 +498,17 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         status, res = await hub("POST", f"/scenes/{scene['scene_id']}/run", u, json={
             "user_id": u.user_id, **({"confirmation_token": tok} if tok else {})})
         ctx.db.audit(u.user_id, "scene.run", scene["scene_id"], {"status": status})
+        sid, d = scene["scene_id"], res if isinstance(res, dict) else {}
+        if status == 409 and d.get("status") == "needs_confirmation":
+            ctx.actions.record(u.user_id, "scene", "run_scene", "confirmation_required", scene_id=sid, error="confirmation_required")
+            # SceneRunResult (2.11.0): same server-built summary and hub hash as the direct-set 409 and the agent's request
+            action, ahash, summary = await ctx.confirm.describe(u, {"type": "run_scene", "scene_id": sid}, for_display=True)
+            return JSONResponse({**d, "summary": summary, "action_hash": ahash}, status_code=409)
+        if status == 200 and d.get("executed"):
+            # one row per scene run: `done` = executed (per-endpoint motion settling is not tracked for scenes)
+            ctx.actions.record(u.user_id, "scene", "run_scene", "done", scene_id=sid)
+        elif status in (200, 409):
+            ctx.actions.record(u.user_id, "scene", "run_scene", "failed", scene_id=sid, error=d.get("error"))
         return fwd(status, res)
 
     # ================================================================== confirmations
@@ -490,11 +536,36 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             raise ApiError(504 if status == 504 else 502, "upstream_timeout" if status == 504 else "upstream_error", "agent error")
         return status, body
 
+    async def chat_scope(u: User) -> dict:
+        """`allowed_rooms` / `allowed_scenes` for the agent (agent-internal.yaml 1.3.0), from our own DB and the hub at request
+        time. Explicit null = unrestricted and ONLY for admin; members get lists; a guest gets its room scope, never null.
+        Fail closed: any lookup error refuses the chat (502) instead of sending a broader (or missing) scope."""
+        try:
+            if u.is_admin:
+                return {"allowed_rooms": None, "allowed_scenes": None}
+            rooms = sorted(x for x in u.rooms if isinstance(x, str) and 0 < len(x) <= 48)[:64]
+            assigned = ctx.confirm.assigned(u)
+            if u.role == "guest":
+                scenes = sorted(assigned)
+            elif u.role == "member":
+                status, scene_list = await ctx.hub.hub("GET", "/scenes", actor=u.user_id)
+                if status != 200 or not isinstance(scene_list, list):
+                    raise LookupError("scene list unavailable")
+                scenes = sorted(x["scene_id"] for x in scene_list if isinstance(x, dict) and isinstance(x.get("scene_id"), str)
+                                and policy.scene_visible(u, x, assigned))
+            else:
+                raise LookupError("unknown role")
+            return {"allowed_rooms": rooms, "allowed_scenes": [x for x in scenes if 0 < len(x) <= 64][:200]}
+        except Exception as e:                                   # noqa: BLE001 - every failure is a refusal
+            log.warning("chat scope lookup failed: %s", type(e).__name__)
+            raise ApiError(502, "upstream_error", "could not determine the chat scope") from None
+
     @r.post("/chat")
     async def chat(body: ChatIn, u: User = Depends(authed)):
         limit("chat", u)
         if not (body.text or body.audio_ref or body.image_refs):
             raise ApiError(400, "bad_request", "text, audio_ref or image_refs required")
+        scope = await chat_scope(u)                              # before media is taken: a refused chat burns no upload
         refs = [(body.audio_ref, "voice")] if body.audio_ref else []
         refs += [(x, "image") for x in body.image_refs or []]
         if not all(ctx.media.has(ref, u.user_id, kind) for ref, kind in refs) or len({x for x, _ in refs}) != len(refs):
@@ -509,9 +580,9 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             it = ctx.media.take(ref, u.user_id, "image")     # single use: gone from memory after this call
             images.append({"ref": ref, "media_type": it.content_type, "data_b64": base64.b64encode(it.data).decode()})
         client_sid = body.session_id or new_id("s_")
-        # agent-internal.yaml ChatRequest: exactly these fields; session ids are per user and at most 64 chars
+        # agent-internal.yaml 1.3.0 ChatRequest: exactly these fields; session ids are per user and at most 64 chars
         payload = {"user_id": u.user_id, "role": u.role, "session_id": "s_" + sha256_hex(f"{u.user_id}\0{client_sid}")[:48],
-                   **({"text": text} if text else {}), **({"images": images} if images else {})}
+                   **scope, **({"text": text} if text else {}), **({"images": images} if images else {})}
         cm = ctx.agent.stream("POST", "/v1/chat", json=payload, headers={"Accept": "text/event-stream"})
         try:
             resp = await cm.__aenter__()
@@ -535,13 +606,14 @@ def create_public_app(ctx: Ctx) -> FastAPI:
 
         async def gen():
             frame: list[str] = []
+            calls: dict[str, dict] = {}                              # call_id -> set_state/run_scene args seen in this stream
             try:
                 async for line in resp.aiter_lines():
                     yield (line + "\n").encode()
                     if line:
                         frame.append(line)
                         continue
-                    inspect(frame, u, client_sid)
+                    inspect(frame, u, client_sid, calls)
                     frame = []
             except Exception as e:                                  # mid-stream failure: end the stream
                 log.warning("chat stream ended early: %s", type(e).__name__)
@@ -551,23 +623,62 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         return StreamingResponse(gen(), media_type="text/event-stream", headers={
             "Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Session-Id": client_sid})
 
-    def inspect(frame: list[str], u: User, sid: str) -> None:
-        """Look at forwarded SSE frames: remember confirmation requests (and show them on the user's other sockets)."""
+    def inspect(frame: list[str], u: User, sid: str, calls: dict) -> None:
+        """Look at forwarded SSE frames (they are passed through untouched): remember confirmation requests (and show them on
+        the user's other sockets) and log the agent's set_state / run_scene results in the action log."""
         ev, data = None, []
         for ln in frame:
             if ln.startswith("event:"):
                 ev = ln[6:].strip()
             elif ln.startswith("data:"):
                 data.append(ln[5:].lstrip(" "))
-        if ev != "confirmation_request" or not data:
+        if ev not in ("confirmation_request", "tool_call", "tool_result") or not data:
             return
         try:
             d = json.loads("\n".join(data))
         except ValueError:
             return
-        if isinstance(d, dict) and ctx.confirm.register_request(u.user_id, sid, d):
-            ctx.bc.publish(Event("confirmation_request", {k: d.get(k) for k in
-                                 ("request_id", "summary", "action", "action_hash", "expires_in_s")}, user_id=u.user_id))
+        if not isinstance(d, dict):
+            return
+        if ev == "confirmation_request":
+            if ctx.confirm.register_request(u.user_id, sid, d):
+                ctx.bc.publish(ctx.confirm.request_event(d["request_id"]))
+            return
+        cid, tool = d.get("call_id"), d.get("tool")
+        if tool not in ("set_state", "run_scene") or not isinstance(cid, str):
+            return
+        if ev == "tool_call":
+            if len(calls) < 64 and isinstance(d.get("args"), dict):
+                calls[cid] = d["args"]
+            return
+        args, res = calls.pop(cid, {}), d.get("result")
+        if isinstance(res, dict):
+            log_agent_action(u, tool, args, res, cid)
+
+    def log_agent_action(u: User, tool: str, args: dict, res: dict, call_id: str) -> None:
+        err = res.get("error") if isinstance(res.get("error"), str) else None
+        if tool == "set_state":
+            ep = args.get("endpoint_id") if isinstance(args.get("endpoint_id"), str) else res.get("endpoint_id")
+            kw = {"endpoint_id": ep, "node_id": ctx.bc.node_of.get(ep), "capability": args.get("capability", res.get("capability")),
+                  "value": args.get("value", res.get("value"))}
+            executed = bool(res.get("ok"))
+            moving = res.get("status") == "moving"
+        else:
+            sc = args.get("scene") or args.get("scene_id") or res.get("scene")
+            kw = {"scene_id": sc if isinstance(sc, str) else None}
+            executed = bool(res.get("ok") and res.get("executed"))
+            moving = False                                          # scene rows are one `done` row (see run_scene)
+            if res.get("status") == "needs_confirmation":
+                err = "confirmation_required"
+        if executed:
+            status = "moving" if moving else "done"
+        elif err == "confirmation_required":
+            status = "confirmation_required"
+        elif err in ("out_of_scope", "forbidden", "denied"):
+            status = "denied"
+        else:
+            status = "failed"
+        ctx.actions.record(u.user_id, "agent", tool, status, error=None if executed else err, call_id=call_id, **kw)
 
     async def read_upload(f: UploadFile, limit_: int) -> bytes:
         data = await f.read(limit_ + 1)
@@ -686,7 +797,7 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             await sock.close(code=4429)
             return
         client = ctx.bc.add(user)
-        await sock.send_json({"type": "notification", "level": "info", "text": "connected", "role": user.role})
+        await sock.send_json({"type": "notification", "level": "info", "text": "connected"})
 
         async def pump():
             while not client.closed.is_set():
@@ -844,6 +955,31 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         ctx.bc.update_user(user_id, None)
         log_admin(u, "user_delete", user_id)
         return Response(status_code=204)
+
+    # ---- action log (read-only; the agent's turn traces are another store that this route never reads)
+    @r.get("/admin/action-log")
+    async def action_log(node_id: str | None = Query(default=None, pattern=NODE_RE.pattern),
+                         endpoint_id: str | None = Query(default=None, pattern=EP_RE.pattern),
+                         user_id: str | None = Query(default=None, max_length=64),
+                         status: Literal[ACTION_STATUSES] | None = None,
+                         ts_from: int | None = Query(default=None, alias="from", ge=0),
+                         ts_to: int | None = Query(default=None, alias="to", ge=0),
+                         limit_: int = Query(default=50, alias="limit", ge=1, le=200),
+                         cursor: str | None = Query(default=None, max_length=256),
+                         u: User = Depends(admin)):
+        if ts_from is not None and ts_to is not None and ts_from > ts_to:
+            raise ApiError(400, "bad_request", "from is after to")
+        after = None
+        if cursor is not None:
+            after = ActionLog.decode_cursor(cursor)
+            if after is None:
+                raise ApiError(400, "bad_request", "bad cursor")
+        page = ctx.actions.page(node_id=node_id, endpoint_id=endpoint_id, user_id=user_id, status=status, ts_from=ts_from,
+                                ts_to=ts_to, limit=limit_, after_id=after)
+        used = sorted(k for k, v in (("node_id", node_id), ("endpoint_id", endpoint_id), ("user_id", user_id), ("status", status),
+                                     ("from", ts_from), ("to", ts_to), ("cursor", cursor)) if v is not None)
+        log_admin(u, "action_log.read", "", {"filters": used, "n": len(page["items"])})
+        return page
 
     # ---- scene assignments (guests run assigned scenes only)
     async def scene_exists(scene_id: str) -> None:
