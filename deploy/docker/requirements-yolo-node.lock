@@ -1,0 +1,15 @@
+# Pinned for linux/aarch64, CPython 3.11 (resolved with pip --only-binary=:all: from services/yolo-node/requirements.txt, then pip freeze).
+# Regenerate: tools\build-images.ps1 -Relock   (never edit by hand; every entry is a wheel, no compilers needed)
+anyio==4.15.1
+click==8.5.0
+flatbuffers==25.12.19
+h11==0.16.0
+idna==3.20
+numpy==2.4.6
+onnxruntime==1.31.0
+packaging==26.3
+pillow==12.3.0
+protobuf==7.36.2
+starlette==1.8.0
+typing_extensions==4.16.0
+uvicorn==0.54.0

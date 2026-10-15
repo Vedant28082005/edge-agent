@@ -1,0 +1,32 @@
+# yolo-node CPU fallback on a vision host (Pi 5 or PC): onnxruntime backend. NOT part of the pi-brain stack
+# (compose.yml); run it on the node itself:  docker compose -p yolo-node -f compose.yolo-node.yml up -d
+# The Jetson Nano runs the TensorRT backend natively: deploy/systemd/yolo-node.service.
+#
+# Host layout (the agent's secret is generated on pi-brain; only its SHA-256 verifier is copied here, see services/yolo-node/README.md):
+#   YOLO_SECRETS_DIR   /etc/edge-agent/secrets  containing verifiers/agent.sha256 (mode 600, owner uid 10104)
+#   YOLO_MODELS_DIR    directory holding yolov8n.onnx (read-only mount)
+#   YOLO_BIND_ADDR     the node's Tailscale address: the port is published there and NEVER on 0.0.0.0 / the LAN
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "5m", max-file: "3"}
+
+services:
+  yolo-node:
+    image: edge-agent/yolo-node:${EDGE_TAG:-latest}
+    build: {context: .., dockerfile: deploy/docker/Dockerfile.yolo-node}
+    restart: unless-stopped
+    user: "10104:10104"
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]            # no image byte ever lands here: yolo-node writes no files at all
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 768m                               # [est]
+    logging: *logging
+    pull_policy: never
+    ports:
+      - "${YOLO_BIND_ADDR:?set YOLO_BIND_ADDR to the node's Tailscale address}:8400:8400"
+    volumes:
+      - ${CONFIG_DIR:-/etc/edge-agent/config}/yolo-node.json:/etc/edge-agent/config/yolo-node.json:ro
+      - ${YOLO_MODELS_DIR:-/var/lib/edge-agent/yolo-node/models}:/models:ro
+      - ${YOLO_SECRETS_DIR:-/etc/edge-agent/secrets}/verifiers:/etc/edge-agent/secrets/verifiers:ro

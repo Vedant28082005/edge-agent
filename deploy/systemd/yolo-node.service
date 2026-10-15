@@ -1,0 +1,47 @@
+# yolo-node on the Jetson Nano (JetPack 4.6), TensorRT backend. Installed to /etc/systemd/system/yolo-node.service.
+# Layout:  /opt/edge-agent/yolo-node/venv      Python 3.8 venv (starlette, uvicorn, numpy, Pillow: services/yolo-node/requirements.txt
+#                                              without onnxruntime); JetPack 4.6 ships Python 3.6, install python3.8 from apt
+#          /opt/edge-agent/yolo-node/app       a copy of services/yolo-node/yolo_node (this folder is the WorkingDirectory)
+#          /etc/edge-agent/yolo-node.json      deploy/config/yolo-node.jetson.json (host = the Jetson's Tailscale address)
+#          /etc/edge-agent/secrets/verifiers/agent.sha256   SHA-256 verifier of the agent's yolo-node-api.secret (mode 600, owner edge-yolo)
+#          /var/lib/edge-agent/yolo-node/models/*.engine    built on the Jetson with trtexec (an engine is not portable between GPUs)
+# The TensorRT engine runs in a child process under the SYSTEM python3 (3.6, owns the tensorrt/pycuda bindings): see
+# yolo_node/backends/trt_worker.py. Not verified on hardware yet.
+[Unit]
+Description=yolo-node (edge-agent object detection, TensorRT)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=edge-yolo
+Group=edge-yolo
+WorkingDirectory=/opt/edge-agent/yolo-node/app
+ExecStartPre=/usr/bin/test -r /etc/edge-agent/secrets/verifiers/agent.sha256
+ExecStart=/opt/edge-agent/yolo-node/venv/bin/python -m yolo_node --config /etc/edge-agent/yolo-node.json
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+# A bind to the Tailscale address fails until tailscaled is up; Restart= retries.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=0
+MemoryMax=900M
+
+# Sandboxing: read-only filesystem, no writable path at all (no image byte, frame or model cache is ever written).
+# CUDA needs /dev/nvhost-*, /dev/nvmap and friends, so PrivateDevices stays off; the camera needs /dev/video0.
+SupplementaryGroups=video
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/edge-agent /var/lib/edge-agent/yolo-node /opt/edge-agent/yolo-node
+
+[Install]
+WantedBy=multi-user.target

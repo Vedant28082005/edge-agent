@@ -1,0 +1,10 @@
+# Runtime. Python 3.8+ (the Jetson's TensorRT worker is a separate Python 3.6 process, see backends/trt_worker.py).
+# ARM64 manylinux wheels exist for all of these; no compiler needed. No GPU needed except for the trt backend.
+starlette>=0.37
+uvicorn>=0.30
+numpy>=1.24
+Pillow>=10.0
+# onnx backend (Pi 5 / PC / Jetson CPU fallback): not needed for --mock or the trt backend
+onnxruntime>=1.17
+# camera sources of type usb/csi/rtsp (optional; on the Jetson use the JetPack OpenCV build instead):
+# opencv-python-headless>=4.8
