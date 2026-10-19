@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { session } from "../api/client";
 import { streamChat } from "../api/sse";
 import type { SseEvent, WsMessage } from "../api/events";
 import { explain } from "../errors";
@@ -9,10 +10,39 @@ type Msg =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; final: boolean; route?: string; latency_ms?: number; status?: string; tools: Tool[]; error?: string };
 
-const short = (v: unknown, n = 80) => {
-  const s = typeof v === "string" ? v : JSON.stringify(v);
-  return s.length > n ? `${s.slice(0, n)}…` : s;
-};
+type ChipStatus = "done" | "running" | "failed" | "confirm";
+const STATUS_WORD: Record<ChipStatus, string> = { done: "done", running: "running", failed: "failed", confirm: "needs confirmation" };
+const STATUS_ICON: Record<ChipStatus, string> = { done: "✓", running: "…", failed: "✗", confirm: "…" };
+
+// Plain-word results only: no raw tool args, ids or payloads are ever rendered, only the tool name (a fixed,
+// known enum, not a secret) and a status word.
+function toolStatus(t: Tool): ChipStatus {
+  if (t.ok === undefined) return "running";
+  if (t.ok === false) return "failed";
+  const r = t.result as { error?: string } | undefined;
+  if (r && typeof r === "object" && r.error === "confirmation_required") return "confirm";
+  return "done";
+}
+
+function ToolChips({ tools }: { tools: Tool[] }) {
+  if (!tools.length) return null;
+  const shown = tools.slice(0, 4);
+  const extra = tools.length - shown.length;
+  return (
+    <ul className="chips" aria-label="Tool calls">
+      {shown.map((t) => {
+        const status = toolStatus(t);
+        return (
+          <li key={t.call_id} className={`chip chip-${status}`}>
+            <code>{t.tool}</code>
+            <span>{STATUS_ICON[status]} {STATUS_WORD[status]}</span>
+          </li>
+        );
+      })}
+      {extra > 0 && <li className="chip chip-more">+{extra} more</li>}
+    </ul>
+  );
+}
 
 export function Chat() {
   const live = useLive();
@@ -75,24 +105,10 @@ export function Chat() {
         {msgs.map((m, i) => m.kind === "user" ? (
           <div key={i} className="bubble user">{m.text}</div>
         ) : (
-          <div key={i} className="bubble bot">
-            {m.tools.length > 0 && (
-              <ul className="tools">
-                {m.tools.map((t) => (
-                  <li key={t.call_id} className={t.ok === false ? "bad" : ""}>
-                    <details>
-                      <summary>
-                        <code>{t.tool}</code> {t.args !== undefined && <span className="muted">{short(t.args, 60)}</span>}
-                        {" "}{t.ok === undefined ? "…" : t.ok ? "✓" : "✗"}
-                      </summary>
-                      <pre>{JSON.stringify({ args: t.args, result: t.result }, null, 2)}</pre>
-                    </details>
-                  </li>
-                ))}
-              </ul>
-            )}
+          <div key={i} className={`bubble assistant${m.final ? "" : " streaming"}`}>
+            <ToolChips tools={m.tools} />
             {m.status && !m.final && <div className="muted small">{m.status}</div>}
-            {m.text && <div className="reply">{m.text}</div>}
+            {m.text && <div className="reply">{m.text}{!m.final && <span className="caret" aria-hidden="true" />}</div>}
             {!m.final && !m.text && !m.status && <div className="muted small">thinking…</div>}
             {m.error && <div className="err" role="alert">{m.error}</div>}
             {m.final && m.route && <div className="muted small">{m.route}{m.latency_ms != null ? ` · ${m.latency_ms} ms` : ""}</div>}
@@ -100,7 +116,9 @@ export function Chat() {
         ))}
       </div>
       <form className="composer" onSubmit={(e) => { e.preventDefault(); void send(); }}>
-        <input aria-label="Message" value={text} maxLength={4000} onChange={(e) => setText(e.target.value)} placeholder="Ask or command…" />
+        <span className="reserved-slot" aria-hidden="true" />
+        <input aria-label="Message" value={text} maxLength={4000} onChange={(e) => setText(e.target.value)}
+          placeholder={session.role === "guest" ? "Ask a question…" : "Ask or command…"} />
         <button className="primary" disabled={busy || !text.trim()}>Send</button>
       </form>
     </section>
