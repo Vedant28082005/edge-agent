@@ -1,0 +1,169 @@
+{
+  "name": "Obsidian Platinum",
+  "version": 2,
+  "color": {
+    "dark": {
+      "bg": "#111110",
+      "surface": "#1c1b19",
+      "surface-2": "#26241f",
+      "surface-3": "#34312c",
+      "line": "#2e2c28",
+      "line-strong": "#45423c",
+      "control-line": "#77726a",
+      "ink": "#f2ede4",
+      "ink-2": "#b5afa4",
+      "ink-3": "#8c877d",
+      "accent": "#e2dfd8",
+      "on-accent": "#111110",
+      "platinum": "#e2dfd8",
+      "graphite": "#2e2c28",
+      "risk": "#ff8f87",
+      "risk-fill": "#c9373c",
+      "on-risk": "#ffffff",
+      "risk-soft": "#33171a",
+      "risk-line": "#6e2a2b",
+      "ok": "#5bc48a",
+      "ok-soft": "#14301f",
+      "warn": "#f2b544",
+      "warn-soft": "#3a2c10",
+      "info": "#8fb2ee",
+      "info-soft": "#19253a",
+      "focus": "#8fb2ee",
+      "scrim": "rgba(0,0,0,0.62)"
+    },
+    "light": {
+      "bg": "#f6f4ef",
+      "surface": "#ffffff",
+      "surface-2": "#efece5",
+      "surface-3": "#ffffff",
+      "line": "#e3dfd6",
+      "line-strong": "#cfcac0",
+      "control-line": "#8a847a",
+      "ink": "#1a1917",
+      "ink-2": "#4f4a42",
+      "ink-3": "#6b655b",
+      "accent": "#1f1e1b",
+      "on-accent": "#f6f4ef",
+      "platinum": "#d9d5cc",
+      "graphite": "#2a2825",
+      "risk": "#b42318",
+      "risk-fill": "#b42318",
+      "on-risk": "#ffffff",
+      "risk-soft": "#fdeceb",
+      "risk-line": "#efb4ae",
+      "ok": "#1f7a4a",
+      "ok-soft": "#e3f4ea",
+      "warn": "#8a5a00",
+      "warn-soft": "#fdf3dc",
+      "info": "#2b53a0",
+      "info-soft": "#e6eefb",
+      "focus": "#2b53a0",
+      "scrim": "rgba(26,25,23,0.38)"
+    }
+  },
+  "shadow": {
+    "dark": {
+      "shadow-float": "0 12px 32px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4)"
+    },
+    "light": {
+      "shadow-float": "0 12px 32px rgba(26,25,23,0.12), 0 2px 6px rgba(26,25,23,0.08)"
+    }
+  },
+  "font": {
+    "display": "\"Instrument Serif\", \"Iowan Old Style\", Georgia, serif",
+    "sans": "Inter, \"SF Pro Text\", system-ui, -apple-system, \"Segoe UI\", sans-serif"
+  },
+  "type": {
+    "display": {
+      "family": "display",
+      "fontSize": "40px",
+      "lineHeight": "44px",
+      "fontWeight": 400,
+      "letterSpacing": "-0.5px"
+    },
+    "title": {
+      "family": "display",
+      "fontSize": "28px",
+      "lineHeight": "32px",
+      "fontWeight": 400,
+      "letterSpacing": "-0.25px"
+    },
+    "numeral": {
+      "family": "display",
+      "fontSize": "44px",
+      "lineHeight": "44px",
+      "fontWeight": 400
+    },
+    "heading": {
+      "family": "sans",
+      "fontSize": "17px",
+      "lineHeight": "24px",
+      "fontWeight": 500
+    },
+    "body": {
+      "family": "sans",
+      "fontSize": "15px",
+      "lineHeight": "22px",
+      "fontWeight": 400
+    },
+    "label": {
+      "family": "sans",
+      "fontSize": "14px",
+      "lineHeight": "20px",
+      "fontWeight": 500
+    },
+    "meta": {
+      "family": "sans",
+      "fontSize": "13px",
+      "lineHeight": "18px",
+      "fontWeight": 400
+    },
+    "caption": {
+      "family": "sans",
+      "fontSize": "12px",
+      "lineHeight": "16px",
+      "fontWeight": 500,
+      "letterSpacing": "0.2px"
+    },
+    "value": {
+      "family": "sans",
+      "fontSize": "22px",
+      "lineHeight": "26px",
+      "fontWeight": 500
+    }
+  },
+  "space": {
+    "space-1": "4px",
+    "space-2": "8px",
+    "space-3": "12px",
+    "space-4": "16px",
+    "space-5": "20px",
+    "space-6": "24px",
+    "space-8": "32px",
+    "space-12": "48px"
+  },
+  "radius": {
+    "radius-sm": "8px",
+    "radius-md": "12px",
+    "radius-lg": "18px",
+    "radius-xl": "26px",
+    "radius-pill": "999px"
+  },
+  "size": {
+    "tap-min": "44px",
+    "icon-tile": "40px",
+    "bp-tablet": "600px",
+    "bp-desktop": "1024px"
+  },
+  "motion": {
+    "dur-press": "120ms",
+    "dur-switch": "180ms",
+    "dur-sheet": "240ms",
+    "ease-out": "cubic-bezier(0.2, 0, 0, 1)"
+  },
+  "z": {
+    "z-tabbar": "10",
+    "z-sheet": "20",
+    "z-toast": "30"
+  }
+}
