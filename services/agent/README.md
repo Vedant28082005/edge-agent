@@ -3,7 +3,7 @@
 HTTP on `127.0.0.1:8200` (loopback only). Event bus, registry-built prompt with a hard token budget and a stable cached
 prefix, planner + executor split, constrained decoding from the live registry, confirmation flow, SSE chat, SQLite
 persistence, and (S8) the scheduler in `agent/sched/` (below). **Not here:** memory extraction / persistent fact store,
-real vision/voice backends (images are accepted and dropped; the router's vision sources sit behind an interface). Read first: `CLAUDE.md`, `contracts/mcp-tools.md` (v5), `contracts/agent-events.md` (v6),
+voice (S8c adds the real vision-node / yolo-node clients behind `PerceptionBackend`, disabled by default). Read first: `CLAUDE.md`, `contracts/mcp-tools.md` (v5), `contracts/agent-events.md` (v6),
 `contracts/openapi/device-hub-internal.yaml` (1.1.0).
 
 ## Run (Windows, PowerShell 5.1)
@@ -71,11 +71,28 @@ All of it sits behind the five tools; nothing here can add one. Config: `AgentCo
 | Piece | File | Notes |
 |---|---|---|
 | Fast path | `resolver.py`, `text.py` | Deterministic: normalise, intent (on/off, set value, lock, open/close, scene), score every registry device by label/room/type/tag tokens (typo-tolerant), plan only if coverage x intent confidence >= `fast_threshold` (0.85) and the winner beats the runner-up by `fast_margin`; "all lights in X" groups (cap 8). Questions, negation, time/condition, compound and relative phrasing, unknown words ("kitchen fan" with no kitchen fan), out-of-range values fall through to the LLM. The resolver only sees the caller's scoped registry and scene list (`allowed_rooms`/`allowed_scenes`). Guests (S8b rule): `set_state` utterances are denied, scenes fall through. Execution = `Executor.run_calls`, the same path as an LLM plan |
-| Router | `router.py` | Perception questions: sensor (`read_sensor`), YOLO jetson/pi, VLM yes/no / short / JSON, LLM last. Cost table in config (`est`/`measured` flags), EWMA of observed latency, failure breaker (30 s), health gate (VLM < 400 MB, node down). Vision sources need a registered `PerceptionBackend`; none exists yet, so they are skipped |
+| Router | `router.py` | Perception questions: sensor (`read_sensor`), YOLO jetson/pi, VLM yes/no / short / JSON, LLM last. Cost table in config (`est`/`measured` flags), EWMA of observed latency, failure breaker (30 s), health gate (VLM < 400 MB, node down). Vision sources need a registered `PerceptionBackend` (below; the nodes are disabled by default, so by default they are skipped). A 429 `queue_full` is *busy*: the ladder moves up, no breaker, no EWMA sample |
+| Node clients | `nodes.py`, `images.py` | S8c. `VisionNodeClient` (vlm_yesno / vlm_short / vlm_json / `yolo_pi` fallback) and `YoloNodeClient` (`yolo_jetson`: upload or camera snapshot) per `vision-node-internal.yaml` / `yolo-node-internal.yaml` 1.0.0. Multipart upload of the caller's real image (first of up to 4; `InlineImage.ref` is mapped to the stricter `image_ref` pattern, bad characters become `_`, empty becomes `img<n>`), per-node `X-Service-Secret` read from its own file, timeouts, no redirects. Image bytes live in RAM for the turn (`ReqCtx.image_data`, dropped in `ChatService.on_user_message`), are never persisted or logged, and are excluded from `repr`. **All node output is untrusted**: responses are re-validated by hand against the closed contract schemas (any unknown field, bad type, range or character class drops the whole response and counts as a failure); YOLO answers are built in the client from validated detections using only COCO class names, never node text; `vlm_yesno` is `yes/no/unsure`; short/JSON text is shown as a quoted, labelled "unverified" data block. EWMA input = the node's `latency_ms - queue_ms` (round trip for cached answers). Snapshots (`/v1/detect/snapshot`, no image on the wire) only for admin/member, only for a configured camera whose room is in the caller's scope, never for guests; the question must name the room if more than one camera exists; any doubt means no snapshot |
 | Constrained decoding | `grammar.py`, `llm.py` | `schema.build_plan_schema` -> `schema_to_gbnf`; `ConstraintCache` keyed on the hub's `registry_version` from `list_devices` (content hash of ids/capabilities/ranges/enums/rooms/scenes when the hub sends none), one entry per request scope; backends `json_schema` (response_format) or `gbnf` (grammar field) |
 | Prefix cache | `prefix.py`, `prompt.py` | Static prefix first, then history/summary/memories/current; `cache_prompt` + pinned `id_slot`; `PrefixTracker` records same-prefix and server `cache_n` per turn |
 | Memory | `memory.py` | Per-user window by token budget (+ the builder's 4-message cap), rolling summary with its own budget, deterministic summariser (hook for an idle LLM one); guests in-process only |
 | Trace | `trace.py`, `scheduler.py` | One per turn: route, candidates, latency, tokens, cache hit, constrained, outcome, flags. Bus event `sched.trace` + a row in the `turn_traces` table (own retention cap, never in the action log); no user text. SSE `route` stays `fast|llm|vision` (sensor answers are `fast`) |
+
+Perception nodes (`sched.nodes`, **all disabled by default**; unknown keys are rejected at startup):
+
+```json
+{"sched": {"nodes": {
+  "vision": {"enabled": true, "base_url": "http://pi-vision:8300",
+             "secret_file": "/etc/edge-agent/secrets/vision-node-api.secret", "timeout_s": 30},
+  "yolo":   {"enabled": true, "base_url": "http://jetson-yolo:8400",
+             "secret_file": "/etc/edge-agent/secrets/yolo-node-api.secret", "timeout_s": 10,
+             "snapshot_sources": [{"source_id": "cam0", "room": "Hall"}]}}}}
+```
+
+`base_url` is the node's Tailscale name (plain HTTP over WireGuard per the contracts; `https` + `ca_file` also accepted).
+`secret_file` is a path: one secret per node, mode 600, owned by the agent user, never in env/argv/logs. An enabled node whose
+secret cannot be read is skipped (logged by node name only). `min_conf` (0.05..1, default 0.25) sets the detection threshold.
+Tests: `tests/test_sched_nodes.py` (mock node servers answering with `contracts/samples/*`).
 
 Ablation: `fast_path`, `router`, `constrained_decoding`, `prefix_cache` in `sched` config or live with `POST /v1/runtime`
 (`GET /v1/stats` has per-route counters and the cost table). Benchmark (mock LLM, simulated latency, prints per-route
@@ -115,7 +132,7 @@ secret from the hub secret (`agent.secret`); neither works on the other API.
    everything mirrored on `/v1/events`, it is a one-line change in `ReqCtx.emit`.
 3. **Outcome of an approval with no stream** is reported as a `notification` level `action_result` (the contract's event list has no
    tool_result/final).
-4. Images are accepted and discarded (no vision route until S8).
+4. Images are held in RAM for the turn and handed to the vision backends when `sched.nodes` enables one; with no node enabled they are accepted and discarded as before. A turn with only images and no text still answers "I can't analyse images yet."
 5. Extras beyond the contract, authenticated: `GET /v1/stats`, `GET|POST /v1/runtime` (constrained on/off for S10).
 6. Capability ids per type are shown to the model in the device list (slightly beyond names/rooms/types/tags).
 7. `node_status` has a node id but `list_devices` has none, so `online` is refreshed by reloading `list_devices`.

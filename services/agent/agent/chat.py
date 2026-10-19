@@ -114,6 +114,7 @@ class ChatService:
             log.exception("turn failed")
             await ctx.emit("error", {"code": "bad_request", "message": "internal error"})
         finally:
+            ctx.drop_images()                                # image bytes live for this turn only
             ctx.close()
 
     async def turn(self, ctx: ReqCtx, t0: float) -> None:

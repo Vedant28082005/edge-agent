@@ -27,6 +27,7 @@ from .reqctx import Budget, ReqCtx
 from .scope import NOTHING, UNRESTRICTED, Scope
 from .sched.config import SchedConfig
 from .sched.grammar import make_backend
+from .sched.nodes import build_backends
 from .sched.scheduler import Scheduler
 from .util import action_hash
 from .settle import SettleTable
@@ -49,6 +50,7 @@ class Agent:
         self.store = store or Store(cfg.db_path)
         self._bg: set[asyncio.Task] = set()
         self.mock = False
+        self.node_clients: list = []
         self.registry = DeviceRegistry()
         self.bus = EventBus()
         self.llm = llm
@@ -80,6 +82,9 @@ class Agent:
         secret = read_secret_file(cfg.hub_secret_file)
         hub = McpClient(cfg.hub_url, secret, http)
         agent = cls(cfg, llm, hub)
+        agent.node_clients = build_backends(agent.sched_cfg.nodes)          # none unless a node is enabled in sched.nodes
+        for b in agent.node_clients:
+            agent.sched.router.avail.register(b)
         agent.stream = HubEventStream(cfg.hub_url, secret, agent._on_hub_event, agent._on_hello,
                                       include_state=cfg.include_state_events)
         return agent
@@ -125,6 +130,8 @@ class Agent:
         await self.bus.close()
         if self.hub:
             await self.hub.aclose()
+        for b in self.node_clients:
+            await b.aclose()
 
     # ------------------------------------------------------------------------------------------ hub events -> bus
     async def _on_hub_event(self, etype: str, seq: int, data: dict) -> None:
@@ -146,7 +153,7 @@ class Agent:
 
     # ------------------------------------------------------------------------------------------ chat entry
     def new_request(self, user_id: str, session_id: str, text: str, role: str = "member", images: int = 0,
-                    scope: Scope | None = None) -> ReqCtx:
+                    scope: Scope | None = None, image_data: list | None = None) -> ReqCtx:
         """`role` and `scope` come only from the authenticated gateway call (app.py, which parses them fail-closed with
         `scope.make_scope`); neither is ever derived from the user id or from text. `scope=None` is for in-process callers
         (tests) and means unrestricted, except that a guest is never unrestricted."""
@@ -157,7 +164,7 @@ class Agent:
             sc = sc.for_guest()
         self._remember_scope(user_id, role, sc)
         ctx = ReqCtx(user_id, session_id, text, trig, Budget(c.max_steps, c.max_calls, c.deadline_s, c.max_retries),
-                     role=role, images=images, sink=self._to_ring, scope=sc)
+                     role=role, images=images, sink=self._to_ring, scope=sc, image_data=image_data)
         self.bus.publish(Event(USER_MESSAGE, {"ctx": ctx}, source="chat", user_id=user_id))
         return ctx
 

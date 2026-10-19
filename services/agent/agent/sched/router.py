@@ -10,8 +10,11 @@ reports (`update_health`, fed from `node_health` events) gate availability, e.g.
 down so YOLO runs on the Pi or is skipped.
 
 No new agent tool is involved: `sensor` is the existing `read_sensor` through the executor; the vision sources are behind
-the `PerceptionBackend` interface and are unavailable until a backend is registered (vision-node / yolo-node have no
-internal API contract yet, so nothing here calls them directly)."""
+the `PerceptionBackend` interface (`sched/nodes.py`: `VisionNodeClient` for vlm_yesno / vlm_short / vlm_json / yolo_pi,
+`YoloNodeClient` for yolo_jetson, per vision-node-internal.yaml and yolo-node-internal.yaml). They are unavailable until a
+backend is registered, and the nodes are disabled by default (`SchedConfig.nodes`). A 429 `queue_full` is "busy": the ladder
+moves on without tripping the breaker or touching the EWMA. A `yolo_jetson` question with no attached image may use a
+camera snapshot, but only for an admin or member whose scope covers the camera's room (never a guest; fail closed)."""
 from __future__ import annotations
 
 import time
@@ -65,10 +68,14 @@ class BackendAnswer:
     ok: bool
     text: str = ""
     latency_ms: float = 0.0
+    busy: bool = False          # not a failure: queue_full (429) or an unusable camera. Move up the ladder, no breaker, no EWMA
+    reason: str = ""            # fixed code for traces/logs only, never node content
 
 
 class PerceptionBackend(Protocol):
-    """Implemented by the (future) vision-node / yolo-node clients. `source` is one of the vision sources above."""
+    """Implemented by the vision-node / yolo-node clients (`sched/nodes.py`). `source` is one of the vision sources above.
+    `images` holds `NodeImage`s (the caller's uploads) or, for `yolo_jetson` only, one `SnapshotRef` the scheduler obtained
+    from the backend's role- and room-checked `snapshot_source`."""
     def supports(self, source: str) -> bool: ...
     async def answer(self, source: str, question: str, images: list) -> BackendAnswer: ...
 
@@ -115,7 +122,7 @@ class Availability:
     def recovered(self, source: str) -> None:
         self._down_until.pop(source, None)
 
-    def check(self, source: str, has_image: bool) -> tuple[bool, str]:
+    def check(self, source: str, has_image: bool, can_snapshot: bool = False) -> tuple[bool, str]:
         if source == "llm":
             return True, ""
         if self.clock() < self._down_until.get(source, 0.0):
@@ -124,7 +131,7 @@ class Availability:
             return True, ""
         if not any(b.supports(source) for b in self.backends):
             return False, "no_backend"
-        if not has_image:
+        if not has_image and not (can_snapshot and source == "yolo_jetson"):
             return False, "no_image_or_camera"
         node = {"yolo_jetson": "jetson-yolo", "yolo_pi": "pi-vision"}.get(source, "pi-vision")
         h = self.health.get(node)
@@ -193,7 +200,8 @@ class CostRouter:
         self.costs = CostTable(self.cfg)
         self.avail = availability or Availability(self.cfg)
 
-    def route(self, text: str, reg: DeviceRegistry, has_image: bool = False, role: str = "member") -> RouteDecision:
+    def route(self, text: str, reg: DeviceRegistry, has_image: bool = False, role: str = "member",
+              can_snapshot: bool = False) -> RouteDecision:
         kind = classify(text)
         if kind == OTHER_Q:
             return RouteDecision(kind, "llm", ladder=["llm"], detail="not a perception question")
@@ -214,7 +222,7 @@ class CostRouter:
         wants.append("llm")
         cands, usable = [], []
         for src in sorted(dict.fromkeys(wants), key=lambda x: self.costs.ms[x]):   # stable: ties keep the order above
-            ok, why = self.avail.check(src, has_image)
+            ok, why = self.avail.check(src, has_image, can_snapshot)
             cands.append(Candidate(src, round(self.costs.ms[src], 1), self.costs.flag[src], ok, why))
             if ok:
                 usable.append(src)

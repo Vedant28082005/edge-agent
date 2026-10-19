@@ -53,14 +53,16 @@ class Budget:
 
 class ReqCtx:
     def __init__(self, user_id: str, session_id: str, text: str, trigger: Trigger, budget: Budget,
-                 req_id: str | None = None, role: str = "member", images: int = 0, sink=None, scope: Scope = UNRESTRICTED) -> None:
+                 req_id: str | None = None, role: str = "member", images: int = 0, sink=None, scope: Scope = UNRESTRICTED,
+                 image_data: list | None = None) -> None:
         self.req_id = req_id or "r_" + secrets.token_hex(6)
         self.user_id, self.session_id, self.text = user_id, session_id, text
         self.role = role                    # set only by the authenticated gateway; never inferred
         # What this caller may touch (agent-internal.yaml 1.3.0). HTTP requests always pass the parsed, fail-closed scope;
         # the unrestricted default is for internal callers only (admin-defined rules, tests). A guest is never unrestricted.
         self.scope = scope.for_guest() if (role == "guest" or trigger.guest) else scope
-        self.images = images                # count of validated inline images (not analysed in v1)
+        self.images = images                # count of validated inline images
+        self.image_data: list = list(image_data or [])      # [NodeImage]: RAM only, for the perception backends; see drop_images
         self.sink = sink                    # (name, data, user_id) -> None: where events go when the stream is gone
         self.trigger, self.budget = trigger, budget
         self.out: asyncio.Queue[tuple[str, dict] | None] = asyncio.Queue()
@@ -85,6 +87,10 @@ class ReqCtx:
         self._seq += 1
         await self.out.put((name, {**data, "seq": self._seq, "req_id": self.req_id}))
         return True
+
+    def drop_images(self) -> None:
+        """Release the image bytes (called when the turn ends). They are never persisted, logged or kept in a trace."""
+        self.image_data = []
 
     def close(self) -> None:
         if not self.closed:

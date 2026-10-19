@@ -101,7 +101,9 @@ class Scheduler:
         return Routed(outs=outs, say=res.say)
 
     async def _perception(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
-        dec = self.router.route(text, self.views.get(ctx.scope).registry, has_image=ctx.images > 0, role=ctx.role)
+        snap = self._snapshot_ref(ctx, text)
+        dec = self.router.route(text, self.views.get(ctx.scope).registry, has_image=ctx.images > 0, role=ctx.role,
+                                can_snapshot=snap is not None)
         if dec.kind == "other":
             return None
         trace.candidates = [c.__dict__ for c in dec.candidates]
@@ -123,13 +125,30 @@ class Scheduler:
             backend = next((b for b in self.router.avail.backends if b.supports(src)), None)
             if backend is None:
                 continue
-            ans = await backend.answer(src, text, [])           # image bytes are not kept past the API layer (gap)
+            # the caller's own images (RAM only, released when the turn ends); else, for yolo_jetson alone, the camera snapshot
+            # that `_snapshot_ref` authorised for this role and scope. Never both, never a snapshot for another source.
+            imgs = list(ctx.image_data) or ([snap] if snap is not None and src == "yolo_jetson" else [])
+            ans = await backend.answer(src, text, imgs)
+            if ans.busy:                                         # queue_full / camera unusable: not a failure, try the next rung
+                trace.fallbacks.append(f"{src}:busy")
+                continue
             self.router.observe(src, ans.latency_ms or (time.monotonic() - t0) * 1000, ans.ok)
             if ans.ok and ans.text:
                 kind = src.split("_")[0]                                  # yolo | vlm
                 trace.route, trace.sse_route, trace.source = kind, kind, src
                 return Routed(text=ans.text, sse_route=kind)
             trace.fallbacks.append(src)
+        return None
+
+    def _snapshot_ref(self, ctx: ReqCtx, text: str):
+        """A camera snapshot the yolo backend allows THIS caller to take (role and room checked there), only when no image is
+        attached. Guests never; any backend without the check, or any doubt, means None (fail closed)."""
+        if ctx.image_data or ctx.images > 0 or ctx.role == "guest" or ctx.trigger.guest:
+            return None
+        for b in self.router.avail.backends:
+            check = getattr(b, "snapshot_source", None)
+            if check is not None and b.supports("yolo_jetson"):
+                return check(ctx.role, ctx.scope, text)
         return None
 
     def _sensor_text(self, out: CallOutcome) -> str:
