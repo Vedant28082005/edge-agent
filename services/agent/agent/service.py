@@ -27,7 +27,7 @@ from .reqctx import Budget, ReqCtx
 from .scope import NOTHING, UNRESTRICTED, Scope
 from .sched.config import SchedConfig
 from .sched.grammar import make_backend
-from .sched.nodes import build_backends
+from .sched.nodes import build_backends, health_poll_loop
 from .sched.scheduler import Scheduler
 from .util import action_hash
 from .settle import SettleTable
@@ -51,6 +51,7 @@ class Agent:
         self._bg: set[asyncio.Task] = set()
         self.mock = False
         self.node_clients: list = []
+        self._health_task: asyncio.Task | None = None
         self.registry = DeviceRegistry()
         self.bus = EventBus()
         self.llm = llm
@@ -123,8 +124,18 @@ class Agent:
             await self.loader.reload()
         if self.stream:
             self.stream.start()
+        if self.node_clients and self._health_task is None:
+            self._health_task = asyncio.get_running_loop().create_task(
+                health_poll_loop(self.node_clients, self.sched.router.avail))
 
     async def stop(self) -> None:
+        if self._health_task:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except asyncio.CancelledError:
+                pass
+            self._health_task = None
         if self.stream:
             await self.stream.stop()
         await self.bus.close()

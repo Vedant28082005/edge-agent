@@ -38,6 +38,8 @@ log = logging.getLogger("agent.sched.nodes")
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MEDIA_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
+HEALTH_TIMEOUT_S = 3.0
+HEALTH_POLL_S = 30.0
 
 _SAFE_TEXT = re.compile(r"[A-Za-z0-9 .,;:!?'()%/_+-]*")
 _LABEL = re.compile(r"[A-Za-z0-9 _-]{1,32}")
@@ -203,6 +205,26 @@ def validate_snapshot(obj: object, source_id: str) -> tuple[list[tuple[str, floa
     return validate_detections(o["detections"]), _meta(o, None)
 
 
+_HEALTH_BASE = ("ok", "service", "node", "contract_version", "mem_available_mb", "queue_depth", "busy")
+_NODE_NAME = re.compile(r"[a-z0-9-]{1,32}")
+_CONTRACT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def validate_health(obj: object, service: str, extra_required: tuple = ()) -> tuple[bool, float]:
+    """GET /health body (vision-node-internal.yaml / yolo-node-internal.yaml `Health`, both open/no-secret). Only `ok` and
+    `mem_available_mb` are consumed; the rest is checked just enough to reject a response that is not this node's own."""
+    o = _closed(obj, _HEALTH_BASE + extra_required, ("mock", "temp_c"))
+    if o["service"] != service:
+        raise Invalid("wrong service")
+    _str(o["node"], _NODE_NAME, 32, 1)
+    _str(o["contract_version"], _CONTRACT_VERSION, 16, 1)
+    ok = _bool(o["ok"])
+    mem = _num(o["mem_available_mb"], 0, 1_000_000)
+    _num(o["queue_depth"], 0, 8, True)
+    _bool(o["busy"])
+    return ok, float(mem)
+
+
 def validate_error(obj: object) -> str | None:
     """The error code of a contract-conforming error body, else None. Only the code is ever used (never `message`)."""
     try:
@@ -284,6 +306,9 @@ def _question(text: str) -> str:
 # ------------------------------------------------------------------------------------------------ transport
 class _NodeClient:
     name = "node"
+    health_node = ""          # Availability node name this client's /health feeds (e.g. "pi-vision")
+    service_name = ""         # `Health.service` const this node must echo
+    health_extra: tuple = ()  # Health fields required beyond the common base (schema differs vision vs yolo)
 
     def __init__(self, base_url: str, secret: str, timeout_s: float = 30.0, http: httpx.AsyncClient | None = None,
                  ca_file: str | None = None, min_conf: float = 0.25) -> None:
@@ -363,6 +388,20 @@ class _NodeClient:
         ms = (time.monotonic() - t0) * 1000 if meta.cached else max(0.0, meta.latency_ms - meta.queue_ms)
         return BackendAnswer(True, text, ms)
 
+    async def health(self) -> tuple[bool, float | None]:
+        """GET /health (open, no secret, short timeout). Any transport error, non-200, oversized body or schema violation
+        counts as down; nothing from the response is ever logged (CLAUDE.md rule 6: untrusted node data)."""
+        try:
+            resp = await self._http.get(self._base + "/health", timeout=httpx.Timeout(HEALTH_TIMEOUT_S))
+        except httpx.HTTPError:
+            return False, None
+        if resp.status_code != 200 or len(resp.content) > MAX_RESPONSE_BYTES:
+            return False, None
+        try:
+            return validate_health(json.loads(resp.content), self.service_name, self.health_extra)
+        except (ValueError, RecursionError):
+            return False, None
+
     @staticmethod
     def _first_image(images: list) -> NodeImage | None:
         img = next((i for i in images if isinstance(i, NodeImage)), None)
@@ -375,6 +414,7 @@ class VisionNodeClient(_NodeClient):
     """pi-vision (port 8300): vlm_yesno, vlm_short, vlm_json and the YOLO fallback `yolo_pi` (POST /v1/detect)."""
     name = "vision"
     SOURCES = frozenset({"vlm_yesno", "vlm_short", "vlm_json", "yolo_pi"})
+    health_node, service_name, health_extra = "pi-vision", "vision-node", ("models",)
 
     def supports(self, source: str) -> bool:
         return source in self.SOURCES
@@ -409,6 +449,7 @@ class SnapshotSource:
 class YoloNodeClient(_NodeClient):
     """jetson-yolo (port 8400): yolo_jetson via POST /v1/detect (uploaded image) or /v1/detect/snapshot (the node's camera)."""
     name = "yolo"
+    health_node, service_name, health_extra = "jetson-yolo", "yolo-node", ("engine_loaded", "sources_online")
 
     def __init__(self, *a, snapshot_sources: list[dict] | tuple = (), **kw) -> None:
         super().__init__(*a, **kw)
@@ -466,3 +507,22 @@ def build_backends(nodes: dict, http: httpx.AsyncClient | None = None) -> list:
         kw = {"snapshot_sources": cfg.get("snapshot_sources", [])} if key == "yolo" else {}
         out.append(cls(cfg["base_url"], secret, cfg.get("timeout_s", 30.0), http, cfg.get("ca_file"), cfg.get("min_conf", 0.25), **kw))
     return out
+
+
+async def poll_health_once(clients: list, avail, log_transitions: bool = True) -> None:
+    """One round: GET /health for every enabled node, feeding `Availability.update_health` so the router skips a down
+    node before routing a request to it. A node name is logged only on an up/down transition, never response content."""
+    for c in clients:
+        was_up = avail.health.get(c.health_node, {}).get("up")
+        ok, mem = await c.health()
+        avail.update_health(c.health_node, ok, mem)
+        if log_transitions and was_up is not None and was_up != ok:
+            log.warning("node %s health: %s", c.health_node, "up" if ok else "down")
+
+
+async def health_poll_loop(clients: list, avail, interval_s: float = HEALTH_POLL_S) -> None:
+    """Background task: polls every enabled node's /health on a fixed interval for as long as it runs. Started by the
+    service only when at least one node is enabled, cancelled on shutdown."""
+    while True:
+        await poll_health_once(clients, avail)
+        await asyncio.sleep(interval_s)

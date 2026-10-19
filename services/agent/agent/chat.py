@@ -24,6 +24,8 @@ from .util import clean_label, clean_user_text
 
 log = logging.getLogger("agent.chat")
 
+DEFAULT_IMAGE_QUESTION = "What do you see?"      # image-only turn, no text: a general describe-the-scene question
+
 ERROR_TEXT = {
     "unknown_endpoint": "that device doesn't exist", "unknown_capability": "that device can't do that",
     "not_actuator": "that can't be controlled", "bad_type": "that value isn't valid for the device",
@@ -103,6 +105,10 @@ class ChatService:
     def busy(self) -> bool:
         return self._active >= self._max_active
 
+    def _vision_enabled(self) -> bool:
+        """A node is enabled when the router is on and at least one vision/yolo backend is registered."""
+        return bool(self.sched and self.sched.cfg.router and self.sched.router.avail.backends)
+
     async def on_user_message(self, event: Event) -> None:
         ctx: ReqCtx = event.data["ctx"]
         t0 = time.monotonic()
@@ -120,11 +126,14 @@ class ChatService:
     async def turn(self, ctx: ReqCtx, t0: float) -> None:
         text = clean_user_text(ctx.text, 400)
         if not text:
-            if ctx.images:                                   # images only: nothing to analyse them with in v1 (S8)
+            if ctx.images and self._vision_enabled():         # image-only turn: ask a general describe question via the vision route
+                text = DEFAULT_IMAGE_QUESTION
+            elif ctx.images:                                   # no node enabled: nothing to analyse them with
                 await ctx.emit("final", {"text": "I can't analyse images yet.", "route": "llm", "latency_ms": 0})
+                return
             else:
                 await ctx.emit("error", {"code": "bad_request", "message": "empty message"})
-            return
+                return
         if self._active >= self._max_active:
             await ctx.emit("error", {"code": "llm_busy", "message": "the assistant is busy, try again shortly"})
             return
@@ -209,7 +218,7 @@ class ChatService:
                 extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
                 tool_results = "\n".join(render_result(o.tool, o.args, o.result, reg) for o in new if o.ok)
             final = compose_final(say, outs, reg)
-        if ctx.images:
+        if ctx.images and route not in ("vlm", "yolo"):        # those routes already answered using the image
             final += " (I can't analyse images yet.)"
         words = final.split(" ")
         for i in range(0, len(words), 3):
