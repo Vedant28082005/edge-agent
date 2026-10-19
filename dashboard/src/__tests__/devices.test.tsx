@@ -12,16 +12,22 @@ function moveSlider(name: string, value: number) {
 }
 
 describe("devices", () => {
-  it("groups endpoints by room and renders controls from capability types", async () => {
+  it("groups endpoints by room (room-at-a-time) and renders controls from capability types", async () => {
     server.use(...baseRoutes());
-    await openApp();
+    const { user } = await openApp();
+    // bedroom sorts first alphabetically and is shown by default.
     const bedroom = screen.getByRole("heading", { name: "bedroom" }).parentElement!;
     expect(within(bedroom).getByRole("article", { name: "Ceiling light" })).toBeInTheDocument();
     expect(within(bedroom).getByRole("switch", { name: "power" })).not.toBeChecked(); // bool -> switch
     expect(within(bedroom).getByRole("slider", { name: "brightness" })).toHaveValue("30"); // ranged int -> slider
+    expect(screen.queryByRole("heading", { name: "hall" })).not.toBeInTheDocument(); // only one room shown at a time
+
+    await user.click(screen.getByRole("button", { name: "hall" }));
     const hall = screen.getByRole("heading", { name: "hall" }).parentElement!;
-    expect(within(hall).getByRole("combobox", { name: "lock" })).toHaveValue("locked"); // enum -> select
-    expect(within(hall).getByText("21.5 C")).toBeInTheDocument(); // sensor -> readout
+    expect(within(hall).getByRole("button", { name: "Unlock…" })).toBeInTheDocument(); // lock -> LockCard, never a switch/select
+    expect(within(hall).getByText("Secured device")).toBeInTheDocument();
+    expect(within(hall).getAllByText("21.5 C").length).toBeGreaterThan(0); // sensor -> readout (and the readings strip)
+    expect(screen.queryByRole("heading", { name: "bedroom" })).not.toBeInTheDocument();
   });
 
   it("applies live state from the WebSocket", async () => {
@@ -70,7 +76,8 @@ describe("devices", () => {
   it("a confirmation_required body without the server summary is an error, not a client-written prompt", async () => {
     server.use(route("post", "/devices/{endpoint_id}/set", () => ({ status: 409, json: { error: "confirmation_required" } })), ...baseRoutes());
     const { user } = await openApp();
-    await user.selectOptions(screen.getByRole("combobox", { name: "lock" }), "unlocked");
+    await user.click(screen.getByRole("button", { name: "hall" }));
+    await user.click(screen.getByRole("button", { name: "Unlock…" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("needs your confirmation");
     expect(screen.queryByRole("group", { name: "Confirmation required" })).not.toBeInTheDocument();
   });
@@ -93,7 +100,8 @@ describe("devices", () => {
       ...baseRoutes(),
     );
     const { user } = await openApp();
-    await user.selectOptions(screen.getByRole("combobox", { name: "lock" }), "unlocked");
+    await user.click(screen.getByRole("button", { name: "hall" }));
+    await user.click(screen.getByRole("button", { name: "Unlock…" }));
     const card = await screen.findByRole("group", { name: "Confirmation required" });
     expect(card.querySelector("p")?.textContent).toBe("Unlock Front door?"); // the server summary, no client wording around it
     expect(document.body.textContent).not.toContain(hash);
