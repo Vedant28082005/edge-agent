@@ -1,0 +1,196 @@
+/* Edge Home · Obsidian Platinum tokens. Generated from design/tokens.json. Do not edit by hand. */
+
+/* Dark (Obsidian) is the default theme. */
+:root,
+[data-theme="dark"] {
+  --bg: #111110;
+  --surface: #1c1b19;
+  --surface-2: #26241f;
+  --surface-3: #34312c;
+  --line: #2e2c28;
+  --line-strong: #45423c;
+  --control-line: #77726a;
+  --ink: #f2ede4;
+  --ink-2: #b5afa4;
+  --ink-3: #8c877d;
+  --accent: #e2dfd8;
+  --on-accent: #111110;
+  --platinum: #e2dfd8;
+  --graphite: #2e2c28;
+  --risk: #ff8f87;
+  --risk-fill: #c9373c;
+  --on-risk: #ffffff;
+  --risk-soft: #33171a;
+  --risk-line: #6e2a2b;
+  --ok: #5bc48a;
+  --ok-soft: #14301f;
+  --warn: #f2b544;
+  --warn-soft: #3a2c10;
+  --info: #8fb2ee;
+  --info-soft: #19253a;
+  --focus: #8fb2ee;
+  --scrim: rgba(0,0,0,0.62);
+  --shadow-float: 0 12px 32px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4);
+  color-scheme: dark;
+}
+
+/* Light (Ivory): follows the OS unless the user picked a theme. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f6f4ef;
+    --surface: #ffffff;
+    --surface-2: #efece5;
+    --surface-3: #ffffff;
+    --line: #e3dfd6;
+    --line-strong: #cfcac0;
+    --control-line: #8a847a;
+    --ink: #1a1917;
+    --ink-2: #4f4a42;
+    --ink-3: #6b655b;
+    --accent: #1f1e1b;
+    --on-accent: #f6f4ef;
+    --platinum: #d9d5cc;
+    --graphite: #2a2825;
+    --risk: #b42318;
+    --risk-fill: #b42318;
+    --on-risk: #ffffff;
+    --risk-soft: #fdeceb;
+    --risk-line: #efb4ae;
+    --ok: #1f7a4a;
+    --ok-soft: #e3f4ea;
+    --warn: #8a5a00;
+    --warn-soft: #fdf3dc;
+    --info: #2b53a0;
+    --info-soft: #e6eefb;
+    --focus: #2b53a0;
+    --scrim: rgba(26,25,23,0.38);
+    --shadow-float: 0 12px 32px rgba(26,25,23,0.12), 0 2px 6px rgba(26,25,23,0.08);
+    color-scheme: light;
+  }
+}
+
+[data-theme="light"] {
+  --bg: #f6f4ef;
+  --surface: #ffffff;
+  --surface-2: #efece5;
+  --surface-3: #ffffff;
+  --line: #e3dfd6;
+  --line-strong: #cfcac0;
+  --control-line: #8a847a;
+  --ink: #1a1917;
+  --ink-2: #4f4a42;
+  --ink-3: #6b655b;
+  --accent: #1f1e1b;
+  --on-accent: #f6f4ef;
+  --platinum: #d9d5cc;
+  --graphite: #2a2825;
+  --risk: #b42318;
+  --risk-fill: #b42318;
+  --on-risk: #ffffff;
+  --risk-soft: #fdeceb;
+  --risk-line: #efb4ae;
+  --ok: #1f7a4a;
+  --ok-soft: #e3f4ea;
+  --warn: #8a5a00;
+  --warn-soft: #fdf3dc;
+  --info: #2b53a0;
+  --info-soft: #e6eefb;
+  --focus: #2b53a0;
+  --scrim: rgba(26,25,23,0.38);
+  --shadow-float: 0 12px 32px rgba(26,25,23,0.12), 0 2px 6px rgba(26,25,23,0.08);
+  color-scheme: light;
+}
+
+:root {
+  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-sans: Inter, "SF Pro Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-xl: 26px;
+  --radius-pill: 999px;
+  --tap-min: 44px;
+  --icon-tile: 40px;
+  --bp-tablet: 600px;
+  --bp-desktop: 1024px;
+  --dur-press: 120ms;
+  --dur-switch: 180ms;
+  --dur-sheet: 240ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --z-tabbar: 10;
+  --z-sheet: 20;
+  --z-toast: 30;
+}
+
+/* Type styles */
+.type-display {
+  font-family: var(--font-display);
+  font-size: 40px;
+  line-height: 44px;
+  font-weight: 400;
+  letter-spacing: -0.5px;
+}
+.type-title {
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 32px;
+  font-weight: 400;
+  letter-spacing: -0.25px;
+}
+.type-numeral {
+  font-family: var(--font-display);
+  font-size: 44px;
+  line-height: 44px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.type-heading {
+  font-family: var(--font-sans);
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 500;
+}
+.type-body {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 400;
+}
+.type-label {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+.type-meta {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 400;
+}
+.type-caption {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+}
+.type-value {
+  font-family: var(--font-sans);
+  font-size: 22px;
+  line-height: 26px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-press: 0ms; --dur-switch: 0ms; --dur-sheet: 0ms; }
+}

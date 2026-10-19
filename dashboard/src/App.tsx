@@ -29,15 +29,15 @@ function Shell() {
   return (
     <div className="shell">
       <header className="top">
-        <strong>Home</strong>
+        <strong className="brand">Home</strong>
         <nav aria-label="Main">
           {(["devices", "chat", "activity", ...(isAdmin ? ["admin"] : [])] as Tab[]).map((t) => (
-            <button key={t} className={tab === t ? "active" : ""} aria-current={tab === t} onClick={() => setTab(t)}>{t}</button>
+            <button key={t} aria-current={tab === t} onClick={() => setTab(t)}>{t}</button>
           ))}
         </nav>
         <span className="spacer" />
-        <button onClick={cycle} aria-label="Toggle theme">theme: {theme}</button>
-        <button onClick={logout}>Log out</button>
+        <button className="ghost sm" onClick={cycle} aria-label="Toggle theme">theme: {theme}</button>
+        <button className="ghost sm" onClick={logout}>Log out</button>
       </header>
       <PendingConfirmations />
       <main className="content">
