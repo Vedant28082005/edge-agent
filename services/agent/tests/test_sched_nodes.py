@@ -50,8 +50,20 @@ class MockNode:
 
     def __init__(self, secret: str, replies: dict | None = None) -> None:
         self.secret, self.replies, self.calls = secret, dict(replies or {}), []
+        self.health_calls = 0
         paths = ["/v1/vlm/yesno", "/v1/vlm/short", "/v1/vlm/json", "/v1/detect", "/v1/detect/snapshot"]
-        self.server = LocalServer(Starlette(routes=[Route(p, self._handle, methods=["POST"]) for p in paths]))
+        routes = [Route(p, self._handle, methods=["POST"]) for p in paths]
+        routes.append(Route("/health", self._health, methods=["GET"]))
+        self.server = LocalServer(Starlette(routes=routes))
+
+    async def _health(self, request: Request):
+        self.health_calls += 1
+        status, body, delay, headers, rawbody = self.replies.get("/health", (200, {"ok": True}, 0, {}, None))
+        if delay:
+            await asyncio.sleep(delay)
+        if rawbody is not None:
+            return Response(rawbody, status_code=status, media_type="application/json", headers=headers)
+        return JSONResponse(body, status_code=status, headers=headers)
 
     def reply(self, path, body, status=200, delay=0.0, headers=None, raw=None):
         self.replies[path] = (status, body, delay, headers or {}, raw)
@@ -400,6 +412,69 @@ async def test_images_released_after_turn():
     c = ctx_for(images=[IMG])
     c.drop_images()
     assert c.image_data == [] and c.images == 1
+
+
+# ------------------------------------------------------------------------------------------------ /health polling
+def test_validate_health_against_contract_samples():
+    for name, body in samples("vision-health", "valid"):
+        ok, mem = N.validate_health(body, "vision-node", ("models",))
+        assert ok is True and mem == 812.0, name
+    for name, body in samples("vision-health", "invalid"):
+        with pytest.raises(N.Invalid):
+            N.validate_health(body, "vision-node", ("models",))
+        assert name  # every file in invalid/ must raise
+    for name, body in samples("yolo-health", "valid"):
+        ok, mem = N.validate_health(body, "yolo-node", ("engine_loaded", "sources_online"))
+        assert mem == 1500.0, name
+    for name, body in samples("yolo-health", "invalid"):
+        with pytest.raises(N.Invalid):
+            N.validate_health(body, "yolo-node", ("engine_loaded", "sources_online"))
+
+
+async def test_node_client_health_up_and_down(vnode):
+    vnode.reply("/health", sample("vision-health", "valid", "ok"))
+    v = vclient(vnode)
+    ok, mem = await v.health()
+    assert ok is True and mem == 812.0 and vnode.health_calls == 1
+    vnode.reply("/health", {"error": "model_error", "message": "x"}, status=503)
+    assert await v.health() == (False, None)
+    vnode.reply("/health", {"ok": "not-a-bool"})                      # schema violation: down, not an exception
+    assert await v.health() == (False, None)
+
+
+async def test_node_client_health_unreachable_is_down():
+    v = N.VisionNodeClient(closed_url(), SECRET, timeout_s=1.0)
+    assert await v.health() == (False, None)
+
+
+async def test_health_poll_feeds_availability_and_router_skips_down_node(vnode, ynode):
+    vnode.reply("/health", sample("vision-health", "valid", "ok"))
+    ynode.reply("/health", sample("yolo-health", "valid", "ok"))
+    s = make_sched(vclient(vnode), yclient(ynode))
+    avail = s.router.avail
+    await N.poll_health_once([vclient(vnode), yclient(ynode)], avail)
+    assert avail.health["pi-vision"] == {"up": True, "mem_available_mb": 812.0}
+    assert avail.health["jetson-yolo"] == {"up": True, "mem_available_mb": 1500.0}
+    assert avail.check("vlm_yesno", True)[0] is True
+    ynode.reply("/health", sample("yolo-health", "valid", "no-camera"))      # engine not loaded: down
+    await N.poll_health_once([yclient(ynode)], avail)
+    assert avail.health["jetson-yolo"]["up"] is False
+    ok, why = avail.check("yolo_jetson", True)
+    assert ok is False and why == "node_down"
+
+
+async def test_health_poll_loop_runs_until_cancelled(vnode):
+    vnode.reply("/health", sample("vision-health", "valid", "ok"))
+    avail = Scheduler(SchedConfig(), registry(), object(), Store(":memory:"), EventBus()).router.avail
+    task = asyncio.ensure_future(N.health_poll_loop([vclient(vnode)], avail, interval_s=0.02))
+    for _ in range(50):
+        if vnode.health_calls >= 2:
+            break
+        await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert vnode.health_calls >= 2 and avail.health["pi-vision"]["up"] is True
 
 
 # ------------------------------------------------------------------------------------------------ refs, config, wiring

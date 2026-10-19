@@ -235,6 +235,41 @@ async def test_failed_sensor_falls_up_the_ladder_to_the_llm_and_trips_the_breake
         await e.close()
 
 
+async def test_image_only_turn_defaults_to_a_describe_question_via_vision(tmp_path):
+    from agent.sched.router import BackendAnswer
+
+    class Vlm:
+        def supports(self, s):
+            return s == "vlm_short"
+
+        async def answer(self, s, q, images):
+            assert q == "What do you see?"           # the default describe question, not empty text
+            return BackendAnswer(True, 'The camera view (unverified description): "a tidy kitchen."', 80.0)
+
+    e = await fast_env(tmp_path)
+    try:
+        e.agent.sched.router.avail.register(Vlm())
+        ctx = e.agent.new_request("alice", "s1", "", "member", images=1)        # image only, no text
+        ev = await collect(ctx)
+        final = one(ev, "final")
+        assert final["route"] == "vlm" and "tidy kitchen" in final["text"].lower()
+        assert "can't analyse images" not in final["text"].lower()
+        assert e.llm.requests == []
+    finally:
+        await e.close()
+
+
+async def test_image_only_turn_falls_back_when_no_vision_node_is_enabled(tmp_path):
+    e = await make_env(tmp_path)                       # default sched: fast_path=False, router=False, no backends
+    try:
+        ctx = e.agent.new_request("alice", "s1", "", "member", images=1)
+        ev = await collect(ctx)
+        assert one(ev, "final")["text"] == "I can't analyse images yet."
+        assert e.llm.requests == []
+    finally:
+        await e.close()
+
+
 async def test_a_registered_vision_backend_is_used_for_presence_and_costed(tmp_path):
     from agent.sched.router import BackendAnswer
 
