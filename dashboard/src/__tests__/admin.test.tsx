@@ -91,13 +91,19 @@ describe("admin", () => {
     const { user } = await openApp("admin");
     await user.click(screen.getByRole("button", { name: "admin" }));
     expect(await screen.findByText("alice")).toBeInTheDocument();
-    expect(screen.getByLabelText("rooms of guest1")).toHaveValue("hall");
+    // Rooms are a checklist (role segmented + room checklist), populated from rooms currently in use.
+    const guestRooms = screen.getByRole("group", { name: "rooms of guest1" });
+    expect(within(guestRooms).getByRole("checkbox", { name: "hall" })).toBeChecked();
+    expect(within(guestRooms).getByRole("checkbox", { name: "bedroom" })).not.toBeChecked();
+
     await user.type(screen.getByLabelText("New username"), "visitor");
     await user.type(screen.getByLabelText("New password"), "long-enough-pw");
-    await user.selectOptions(screen.getByLabelText("New role"), "guest");
-    await user.type(screen.getByLabelText("New rooms"), "living, hall");
+    const newRole = screen.getByRole("group", { name: "New role" });
+    await user.click(within(newRole).getByRole("button", { name: "guest" }));
+    const newRooms = screen.getByRole("group", { name: "New rooms" });
+    await user.click(within(newRooms).getByRole("checkbox", { name: "hall" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
-    await waitFor(() => expect(body).toEqual({ username: "visitor", password: "long-enough-pw", role: "guest", rooms: ["living", "hall"] }));
+    await waitFor(() => expect(body).toEqual({ username: "visitor", password: "long-enough-pw", role: "guest", rooms: ["hall"] }));
   });
 
   it("action log: filters go to the query, cursor pages append, errors are explained", async () => {
@@ -119,13 +125,16 @@ describe("admin", () => {
     await user.click(screen.getByRole("button", { name: "admin" }));
     const table = await screen.findByRole("table", { name: "Action log" });
     await waitFor(() => expect(within(table).getAllByRole("row")).toHaveLength(3)); // header + 2
-    expect(within(table).getByText("run_scene movie")).toBeInTheDocument();
+    const sceneRow = within(table).getAllByRole("row")[2]; // plain name, not the raw `kind` enum
+    expect(sceneRow.textContent).toContain("Run scene");
+    expect(sceneRow.textContent).toContain("movie");
     expect(urls[0].search).toBe("");
 
-    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await user.click(screen.getByRole("button", { name: "Load 50 more" }));
     await waitFor(() => expect(within(table).getAllByRole("row")).toHaveLength(4));
     expect(urls[1].searchParams.get("cursor")).toBe("c1");
-    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument(); // next_cursor null
+    expect(screen.queryByRole("button", { name: /Load \d+ more/ })).not.toBeInTheDocument(); // next_cursor null
+    expect(screen.getByText("Showing 3 (all matching)")).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText("Filter status"), "denied");
     await user.type(screen.getByLabelText("Filter endpoint"), "ep_00000003");

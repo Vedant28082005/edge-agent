@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api } from "../api/client";
+import { api, session } from "../api/client";
 import type { ConfirmationRequired } from "../api/events";
 import type { Capability, Endpoint, SetResult } from "../api/types";
 import { explain } from "../errors";
@@ -11,6 +11,8 @@ const PHASE_LABEL = { accepted: "accepted", settling: "settling", settled: "sett
 
 // While settling, the indicator runs for at most the capability's announced settle_s. If the result message never
 // arrives (lost socket), it stops claiming motion once that time is up.
+// Driven strictly by server events (action_settled / action_settle_timeout) — never shows the target as reached
+// before "settled".
 export function SettleTrail({ s }: { s?: Settle }) {
   const last = s?.phases[s.phases.length - 1];
   const deadline = last === "settling" ? s?.deadline : undefined;
@@ -25,7 +27,7 @@ export function SettleTrail({ s }: { s?: Settle }) {
   }, [deadline]);
   if (!s || !last) return null;
   return (
-    <span className={`settle settle-${last}`} role="status" aria-label="motion progress">
+    <span className={`motion settle-${last}`} role="status" aria-label="motion progress">
       {s.phases.map((p) => PHASE_LABEL[p]).join(" → ")}
       {last === "settling" && s.settle_s != null ? (lapsed ? ` (no result after ${s.settle_s}s)` : ` (up to ${s.settle_s}s)`) : ""}
       {last === "settled" && s.elapsed_ms != null ? ` (${(s.elapsed_ms / 1000).toFixed(1)}s)` : ""}
@@ -34,15 +36,16 @@ export function SettleTrail({ s }: { s?: Settle }) {
   );
 }
 
-function CapControl({ ep, cap }: { ep: Endpoint; cap: Capability }) {
-  const { noteSettle, settle } = useLive();
-  const cur = ep.state?.[cap.id];
-  const [draft, setDraft] = useState<number | null>(null);
+type Pending = { value: Value; summary: string; action: ConfirmationRequired["action"] };
+
+// Shared send/confirm machinery for any capability set, used by the generic control and by LockCard.
+// The server's own prompt (summary) and the exact action to mint for are the only confirm text shown;
+// the client never writes its own wording and never sees or stores the confirmation handle.
+function useCapabilityAction(ep: Endpoint, cap: Capability) {
+  const { noteSettle } = useLive();
   const [err, setErr] = useState<string | null>(null);
-  // The server's own prompt (summary) and the exact action to mint for; the client writes no confirm text of its own.
-  const [pending, setPending] = useState<{ value: Value; summary: string; action: ConfirmationRequired["action"] } | null>(null);
+  const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
-  const disabled = !ep.online || !ep.enabled || busy;
 
   const send = async (value: Value, token?: string) => {
     setErr(null);
@@ -57,7 +60,7 @@ function CapControl({ ep, cap }: { ep: Endpoint; cap: Capability }) {
       const body = (e as { body?: Partial<ConfirmationRequired> }).body;
       if (code === "confirmation_required" && body?.summary && body.action) setPending({ value, summary: body.summary, action: body.action });
       else setErr(explain(e));
-    } finally { setBusy(false); setDraft(null); }
+    } finally { setBusy(false); }
   };
 
   // Direct flow for risk:confirm: the gateway mints the token on POST /confirmations {action}; we only pass it along.
@@ -73,20 +76,48 @@ function CapControl({ ep, cap }: { ep: Endpoint; cap: Capability }) {
     } catch (e) { setErr(explain(e)); setPending(null); } finally { setBusy(false); }
   };
 
+  return { send, confirmDirect, cancelPending: () => setPending(null), pending, busy, err, setErr };
+}
+
+function ConfirmInline({ pending, busy, onConfirm, onCancel }: { pending: Pending; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div className="conf" role="group" aria-label="Confirmation required">
+      <p>{pending.summary}</p>
+      <div className="row">
+        <button className="primary" onClick={onConfirm} disabled={busy}>Confirm</button>
+        <button onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function CapControl({ ep, cap, hubDown }: { ep: Endpoint; cap: Capability; hubDown: boolean }) {
+  const { settle } = useLive();
+  const { send, confirmDirect, cancelPending, pending, busy, err } = useCapabilityAction(ep, cap);
+  const cur = ep.state?.[cap.id];
+  const [draft, setDraft] = useState<number | null>(null);
+  const guest = session.role === "guest";
+  // When the hub itself is unreachable, every device is treated as offline with its last known state.
+  const offline = !ep.online || !ep.enabled || hubDown;
+  const disabled = offline || busy;
+
   const unit = cap.unit ? ` ${cap.unit}` : "";
   let control: React.ReactNode;
-  if (cap.kind === "sensor") {
+  // Guests never see a control that won't work for them: read-only state text only, no switch/select/slider/input.
+  if (guest) {
+    control = <span className="readout">{cur == null ? "—" : `${String(cur)}${cap.kind === "sensor" ? unit : ""}`}</span>;
+  } else if (cap.kind === "sensor") {
     control = <span className="readout">{cur == null ? "—" : `${String(cur)}${unit}`}</span>;
   } else if (cap.type === "bool") {
     control = (
       <label className="switch">
-        <input type="checkbox" role="switch" aria-label={cap.id} checked={cur === true} disabled={disabled} onChange={(e) => send(e.target.checked)} />
-        <span>{cur === true ? "on" : "off"}</span>
+        <input type="checkbox" role="switch" aria-label={cap.id} checked={cur === true} disabled={disabled} tabIndex={offline ? -1 : undefined} onChange={(e) => send(e.target.checked)} />
+        <span className="switch-label">{cur === true ? "on" : "off"}</span>
       </label>
     );
   } else if (cap.type === "enum") {
     control = (
-      <select aria-label={cap.id} value={typeof cur === "string" ? cur : ""} disabled={disabled} onChange={(e) => send(e.target.value)}>
+      <select aria-label={cap.id} value={typeof cur === "string" ? cur : ""} disabled={disabled} tabIndex={offline ? -1 : undefined} onChange={(e) => send(e.target.value)}>
         {typeof cur !== "string" && <option value="" disabled>—</option>}
         {(cap.values ?? []).map((v) => <option key={v} value={v}>{v}</option>)}
       </select>
@@ -95,14 +126,14 @@ function CapControl({ ep, cap }: { ep: Endpoint; cap: Capability }) {
     const shown = draft ?? (typeof cur === "number" ? cur : cap.min);
     control = (
       <span className="slider">
-        <input type="range" aria-label={cap.id} min={cap.min} max={cap.max} step={cap.type === "int" ? 1 : "any"} value={shown} disabled={disabled}
+        <input type="range" aria-label={cap.id} min={cap.min} max={cap.max} step={cap.type === "int" ? 1 : "any"} value={shown} disabled={disabled} tabIndex={offline ? -1 : undefined}
           onChange={(e) => setDraft(Number(e.target.value))}
           onPointerUp={() => draft !== null && send(draft)} onKeyUp={() => draft !== null && send(draft)} />
         <output>{shown}{unit}</output>
       </span>
     );
   } else {
-    control = <input type="number" aria-label={cap.id} defaultValue={typeof cur === "number" ? cur : undefined} disabled={disabled}
+    control = <input type="number" aria-label={cap.id} defaultValue={typeof cur === "number" ? cur : undefined} disabled={disabled} tabIndex={offline ? -1 : undefined}
       onKeyDown={(e) => { if (e.key === "Enter") void send(Number((e.target as HTMLInputElement).value)); }} />;
   }
 
@@ -111,39 +142,112 @@ function CapControl({ ep, cap }: { ep: Endpoint; cap: Capability }) {
       <span className="cap-name">{cap.id}</span>
       {control}
       <SettleTrail s={settle[settleKey(ep.endpoint_id, cap.id)]} />
-      {pending !== null && (
-        <div className="conf" role="group" aria-label="Confirmation required">
-          <p>{pending.summary}</p>
-          <div className="row"><button className="primary" onClick={confirmDirect} disabled={busy}>Confirm</button><button onClick={() => setPending(null)}>Cancel</button></div>
-        </div>
-      )}
-      {err && <span className="err" role="alert">{err}</span>}
+      {!guest && pending !== null && <ConfirmInline pending={pending} busy={busy} onConfirm={confirmDirect} onCancel={cancelPending} />}
+      {!guest && err && <span className="err" role="alert">{err}</span>}
     </div>
   );
 }
 
-export function EndpointCard({ ep }: { ep: Endpoint }) {
+export function EndpointCard({ ep, hubDown = false }: { ep: Endpoint; hubDown?: boolean }) {
+  const guest = session.role === "guest";
+  const online = ep.online && !hubDown;
   return (
-    <article className={`card ${ep.online ? "" : "offline"}`} aria-label={ep.name}>
+    <article className={`card ${online ? "" : "offline"}`} aria-label={ep.name}>
       <header>
         <h3>{ep.name}</h3>
-        <span className={`badge ${ep.online ? "ok" : "off"}`}>{ep.online ? "online" : "offline"}</span>
+        <span className={`badge ${online ? "ok" : "off"}`}>{online ? "online" : "offline"}</span>
         {!ep.enabled && <span className="badge off">disabled</span>}
-        {ep.risk === "confirm" && <span className="badge warn">confirm</span>}
+        {guest && <span className="badge view-only">View only</span>}
       </header>
       <div className="muted small">{ep.type}{ep.tags?.length ? ` · ${ep.tags.join(", ")}` : ""}</div>
-      {ep.capabilities.map((c) => <CapControl key={c.id} ep={ep} cap={c} />)}
+      {ep.capabilities.map((c) => <CapControl key={c.id} ep={ep} cap={c} hubDown={hubDown} />)}
     </article>
+  );
+}
+
+// Risky devices look different: never a switch/toggle. Unlock always goes through the server's confirmation.
+// An unlocked lock washes the whole card risk-soft.
+export function LockCard({ ep, hubDown = false }: { ep: Endpoint; hubDown?: boolean }) {
+  const cap = ep.capabilities.find((c) => c.kind === "actuator") ?? ep.capabilities[0];
+  const { send, confirmDirect, cancelPending, pending, busy, err } = useCapabilityAction(ep, cap);
+  const cur = ep.state?.[cap.id];
+  const locked = cur !== "unlocked";
+  const guest = session.role === "guest";
+  const online = ep.online && !hubDown;
+  const offline = !online || !ep.enabled;
+  const disabled = offline || busy;
+
+  return (
+    <article className={`lock-card ${locked ? "" : "unlocked"} ${offline ? "offline" : ""}`} aria-label={ep.name}>
+      <header>
+        <h3>{ep.name}</h3>
+        <span className={`badge ${online ? "ok" : "off"}`}>{online ? "online" : "offline"}</span>
+        {guest && <span className="badge view-only">View only</span>}
+      </header>
+      <span className="secured-label">Secured device</span>
+      <p className="lock-state">{locked ? "Locked" : "Unlocked"}</p>
+      {!guest && (
+        <button
+          className="primary unlock-action"
+          disabled={disabled}
+          tabIndex={offline ? -1 : undefined}
+          onClick={() => send(locked ? "unlocked" : "locked")}
+        >
+          {locked ? "Unlock…" : "Lock…"}
+        </button>
+      )}
+      {!guest && pending !== null && <ConfirmInline pending={pending} busy={busy} onConfirm={confirmDirect} onCancel={cancelPending} />}
+      {!guest && err && <span className="err" role="alert">{err}</span>}
+    </article>
+  );
+}
+
+type Reading = { label: string; value: string };
+
+// Room readings strip: sensors, AC target, blind position — 1 to 4 values, generic across endpoint types.
+function roomReadings(eps: Endpoint[]): Reading[] {
+  const out: Reading[] = [];
+  for (const e of eps) {
+    for (const c of e.capabilities) {
+      if (out.length >= 4) break;
+      const v = e.state?.[c.id];
+      if (v == null) continue;
+      if (c.kind === "sensor") out.push({ label: e.name, value: `${String(v)}${c.unit ? ` ${c.unit}` : ""}` });
+      else if (e.type === "cover" && c.id === "position") out.push({ label: e.name, value: `${String(v)}${c.unit ?? "%"}` });
+      else if (e.type === "thermostat" && c.id === "target") out.push({ label: e.name, value: `${String(v)}${c.unit ? ` ${c.unit}` : ""}` });
+    }
+  }
+  return out.slice(0, 4);
+}
+
+function ReadingsStrip({ eps }: { eps: Endpoint[] }) {
+  const readings = roomReadings(eps);
+  if (!readings.length) return null;
+  return (
+    <div className="readings-strip" aria-label="Room readings">
+      {readings.map((r, i) => (
+        <div key={i} className="reading">
+          <div className="reading-label">{r.label}</div>
+          <div className="reading-value">{r.value}</div>
+        </div>
+      ))}
+    </div>
   );
 }
 
 export function Devices() {
   const { endpoints, loadError, ws } = useLive();
   const rooms = useMemo(() => {
-    const m = new Map<string, Endpoint[]>();
-    for (const e of endpoints ?? []) m.set(e.room, [...(m.get(e.room) ?? []), e]);
-    return [...m.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const set = new Set<string>();
+    for (const e of endpoints ?? []) set.add(e.room);
+    return [...set].sort((a, b) => a.localeCompare(b));
   }, [endpoints]);
+  const [room, setRoom] = useState<string | null>(null);
+  const activeRoom = room && rooms.includes(room) ? room : rooms[0] ?? null;
+  const roomEps = useMemo(() => (endpoints ?? []).filter((e) => e.room === activeRoom), [endpoints, activeRoom]);
+  const others = rooms.filter((r) => r !== activeRoom);
+  // When the hub itself is unreachable, show one banner and treat every device as offline with its last known state.
+  const hubDown = ws === "reconnecting" || ws === "closed";
 
   return (
     <section>
@@ -151,12 +255,42 @@ export function Devices() {
       {loadError && <p className="err" role="alert">{loadError}</p>}
       {endpoints === null && !loadError && <p className="muted">Loading…</p>}
       {endpoints?.length === 0 && <p className="muted">No devices visible to you.</p>}
-      {rooms.map(([room, eps]) => (
-        <div key={room} className="room">
-          <h3 className="room-name">{room}</h3>
-          <div className="grid">{eps.map((e) => <EndpointCard key={e.endpoint_id} ep={e} />)}</div>
+      {hubDown && (
+        <div className={`banner ${ws === "closed" ? "warn" : "info"}`} role="status">
+          {ws === "closed" ? "Hub unreachable. Showing the last known state for every device." : "Reconnecting to the hub. Showing the last known state for every device."}
         </div>
-      ))}
+      )}
+      {rooms.length > 0 && (
+        <div className="devices-layout">
+          <nav className="room-tabs" aria-label="Rooms">
+            {rooms.map((r) => (
+              <button key={r} aria-pressed={r === activeRoom} onClick={() => setRoom(r)}>{r}</button>
+            ))}
+          </nav>
+          <div className="devices-main">
+            {activeRoom && (
+              <div>
+                <h3 className="room-name">{activeRoom}</h3>
+                <ReadingsStrip eps={roomEps} />
+                <div className="grid">
+                  {roomEps.map((e) => (e.type === "lock" ? <LockCard key={e.endpoint_id} ep={e} hubDown={hubDown} /> : <EndpointCard key={e.endpoint_id} ep={e} hubDown={hubDown} />))}
+                </div>
+              </div>
+            )}
+          </div>
+          {others.length > 0 && (
+            <aside className="rail" aria-label="Around the house">
+              <h3>Around the house</h3>
+              {others.map((r) => (
+                <button key={r} type="button" className="rail-room" onClick={() => setRoom(r)}>
+                  <span>{r}</span>
+                  <span className="muted small">{(endpoints ?? []).filter((e) => e.room === r).length} devices</span>
+                </button>
+              ))}
+            </aside>
+          )}
+        </div>
+      )}
     </section>
   );
 }

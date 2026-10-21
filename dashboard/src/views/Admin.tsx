@@ -1,9 +1,43 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { ActionLogEntry, ActionLogPage, ActionStatus, Endpoint, ForgetUsage, Node, Role, User } from "../api/types";
 import { explain } from "../errors";
 
 const csv = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+const ROLES: Role[] = ["admin", "member", "guest"];
+
+// Role segmented control: guest = rooms-only + view-only (gateway.yaml Role enum: admin, member, guest).
+function RoleSegmented({ value, onChange, label }: { value: Role; onChange: (r: Role) => void; label: string }) {
+  return (
+    <div className="segmented" role="group" aria-label={label}>
+      {ROLES.map((r) => (
+        <button key={r} type="button" aria-pressed={value === r} onClick={() => onChange(r)}>{r}</button>
+      ))}
+    </div>
+  );
+}
+
+// Room checklist, populated from the rooms currently in use (the contract has no standalone "list of rooms"
+// endpoint; rooms only exist as a free-form field on endpoints and users). A room with no devices yet cannot
+// be offered here until an admin places a device in it.
+function RoomChecklist({ rooms, selected, onChange, label }: { rooms: string[]; selected: string[]; onChange: (next: string[]) => void; label: string }) {
+  if (rooms.length === 0) return <span className="muted small">No rooms yet</span>;
+  return (
+    <div className="checklist" role="group" aria-label={label}>
+      {rooms.map((r) => (
+        <label key={r}>
+          <input
+            type="checkbox"
+            aria-label={r}
+            checked={selected.includes(r)}
+            onChange={(e) => onChange(e.target.checked ? [...selected, r] : selected.filter((x) => x !== r))}
+          />
+          {r}
+        </label>
+      ))}
+    </div>
+  );
+}
 
 function useLoad<T>(path: string) {
   const [data, setData] = useState<T | null>(null);
@@ -133,18 +167,22 @@ function Nodes() {
   );
 }
 
-function UserRow({ u, reload }: { u: User; reload: () => void }) {
+function UserRow({ u, rooms, reload }: { u: User; rooms: string[]; reload: () => void }) {
   const [role, setRole] = useState<Role>(u.role ?? "member");
-  const [rooms, setRooms] = useState((u.rooms ?? []).join(","));
+  const [userRooms, setUserRooms] = useState<string[]>(u.rooms ?? []);
   const [err, setErr] = useState<string | null>(null);
   const save = async () => {
-    try { await api("PATCH", `/admin/users/${u.user_id}`, { role, rooms: csv(rooms) }); reload(); } catch (e) { setErr(explain(e)); }
+    try { await api("PATCH", `/admin/users/${u.user_id}`, { role, rooms: role === "admin" ? [] : userRooms }); reload(); } catch (e) { setErr(explain(e)); }
   };
   return (
     <tr>
       <td>{u.username}{u.disabled ? " (disabled)" : ""}</td>
-      <td><select aria-label={`role of ${u.username}`} value={role} onChange={(e) => setRole(e.target.value as Role)}><option>admin</option><option>member</option><option>guest</option></select></td>
-      <td><input aria-label={`rooms of ${u.username}`} value={rooms} disabled={role === "admin"} onChange={(e) => setRooms(e.target.value)} placeholder="rooms, comma separated" /></td>
+      <td><RoleSegmented value={role} onChange={setRole} label={`role of ${u.username}`} /></td>
+      <td>
+        {role === "admin"
+          ? <span className="muted small">All rooms</span>
+          : <RoomChecklist rooms={rooms} selected={userRooms} onChange={setUserRooms} label={`rooms of ${u.username}`} />}
+      </td>
       <td className="row">
         <button onClick={save}>Save</button>
         <button onClick={() => api("PATCH", `/admin/users/${u.user_id}`, { disabled: !u.disabled }).then(reload).catch((e) => setErr(explain(e)))}>{u.disabled ? "Enable" : "Disable"}</button>
@@ -155,15 +193,18 @@ function UserRow({ u, reload }: { u: User; reload: () => void }) {
   );
 }
 
-function Users() {
+function Users({ rooms }: { rooms: string[] }) {
   const { data, err, reload } = useLoad<User[]>("/admin/users");
-  const [f, setF] = useState({ username: "", password: "", role: "member" as Role, rooms: "" });
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<Role>("member");
+  const [selRooms, setSelRooms] = useState<string[]>([]);
   const [cerr, setCerr] = useState<string | null>(null);
   const create = async (ev: React.FormEvent) => {
     ev.preventDefault();
     try {
-      await api("POST", "/admin/users", { username: f.username, password: f.password, role: f.role, rooms: csv(f.rooms) });
-      setF({ username: "", password: "", role: "member", rooms: "" }); setCerr(null); reload();
+      await api("POST", "/admin/users", { username, password, role, rooms: role === "admin" ? [] : selRooms });
+      setUsername(""); setPassword(""); setRole("member"); setSelRooms([]); setCerr(null); reload();
     } catch (e) { setCerr(explain(e)); }
   };
   return (
@@ -172,14 +213,16 @@ function Users() {
       {err && <p className="err" role="alert">{err}</p>}
       <table className="table">
         <thead><tr><th>User</th><th>Role</th><th>Rooms (guest/member scope)</th><th /></tr></thead>
-        <tbody>{(data ?? []).map((u) => <UserRow key={u.user_id} u={u} reload={reload} />)}</tbody>
+        <tbody>{(data ?? []).map((u) => <UserRow key={u.user_id} u={u} rooms={rooms} reload={reload} />)}</tbody>
       </table>
-      <form onSubmit={create} className="row wrap" aria-label="Create user">
-        <input aria-label="New username" required maxLength={64} placeholder="username" value={f.username} onChange={(e) => setF({ ...f, username: e.target.value })} />
-        <input aria-label="New password" required minLength={8} maxLength={256} type="password" autoComplete="new-password" placeholder="password (min 8)" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} />
-        <select aria-label="New role" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value as Role })}><option>admin</option><option>member</option><option>guest</option></select>
-        <input aria-label="New rooms" placeholder="rooms" value={f.rooms} onChange={(e) => setF({ ...f, rooms: e.target.value })} />
-        <button className="primary">Create</button>
+      <form onSubmit={create} className="stack" aria-label="Create user">
+        <div className="row wrap">
+          <input aria-label="New username" required maxLength={64} placeholder="username" value={username} onChange={(e) => setUsername(e.target.value)} />
+          <input aria-label="New password" required minLength={8} maxLength={256} type="password" autoComplete="new-password" placeholder="password (min 8)" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <RoleSegmented value={role} onChange={setRole} label="New role" />
+          <button className="primary">Create</button>
+        </div>
+        {role !== "admin" && <RoomChecklist rooms={rooms} selected={selRooms} onChange={setSelRooms} label="New rooms" />}
       </form>
       {cerr && <p className="err" role="alert">{cerr}</p>}
     </div>
@@ -188,6 +231,7 @@ function Users() {
 
 const STATUSES: ActionStatus[] = ["done", "moving", "settled", "settle_timeout", "failed", "blocked", "confirmation_required", "declined", "expired", "denied"];
 const EMPTY_FILTERS = { node_id: "", endpoint_id: "", user_id: "", status: "", from: "", to: "" };
+const PAGE_LIMIT = 50;
 
 // datetime-local value (browser local time) -> unix seconds
 const toUnix = (v: string) => String(Math.floor(new Date(v).getTime() / 1000));
@@ -205,7 +249,18 @@ function logQuery(f: typeof EMPTY_FILTERS, cursor?: string): string {
   return `/admin/action-log${qs ? `?${qs}` : ""}`;
 }
 
-function ActionLog() {
+// Plain names for the log, per handoff rule 6. The contract's ActionLogEntry.kind is only ever set_state or
+// run_scene (chat, confirmations, node and user events are not rows here — the endpoint explicitly holds no
+// agent/chat traces). Endpoint ids are resolved to the admin-set device name; a node id is never a plain name
+// (it is MAC-derived) and the contract gives no friendly node label, so it is left out rather than shown raw.
+function actionLabel(r: ActionLogEntry, endpointName: (id: string | null) => string | null): { kind: string; detail: string; risky: boolean } {
+  if (r.kind === "run_scene") return { kind: "Run scene", detail: r.scene_id ?? "", risky: false };
+  const name = endpointName(r.endpoint_id ?? null) ?? "device";
+  const risky = r.capability === "lock";
+  return { kind: "Device command", detail: `${name} · ${r.capability ?? ""} → ${r.value == null ? "" : String(r.value)}`, risky };
+}
+
+function ActionLog({ endpointName }: { endpointName: (id: string | null) => string | null }) {
   const [draft, setDraft] = useState(EMPTY_FILTERS);
   const [applied, setApplied] = useState(EMPTY_FILTERS);
   const [rows, setRows] = useState<ActionLogEntry[]>([]);
@@ -231,7 +286,7 @@ function ActionLog() {
   return (
     <div>
       <h3>Action log</h3>
-      <form onSubmit={apply} className="row wrap" aria-label="Action log filters">
+      <form onSubmit={apply} className="log-filters row wrap" aria-label="Action log filters">
         <input aria-label="Filter node" placeholder="node id" value={draft.node_id} onChange={(e) => set("node_id", e.target.value)} />
         <input aria-label="Filter endpoint" placeholder="endpoint id" value={draft.endpoint_id} onChange={(e) => set("endpoint_id", e.target.value)} />
         <input aria-label="Filter user" placeholder="user id" maxLength={64} value={draft.user_id} onChange={(e) => set("user_id", e.target.value)} />
@@ -248,32 +303,44 @@ function ActionLog() {
       <table className="table" aria-label="Action log">
         <thead><tr><th>Time</th><th>User</th><th>Source</th><th>Action</th><th>Status</th><th>Error</th><th>Took</th></tr></thead>
         <tbody>
-          {rows.map((r) => (
-            <tr key={r.id}>
-              <td><time>{new Date(r.ts * 1000).toLocaleString()}</time></td>
-              <td>{r.user_id}</td>
-              <td>{r.source}</td>
-              <td>{r.kind === "run_scene" ? `run_scene ${r.scene_id ?? ""}` : `set ${r.endpoint_id ?? ""} ${r.capability ?? ""}=${r.value == null ? "" : String(r.value)}`}</td>
-              <td><span className="badge">{r.status}</span></td>
-              <td>{r.error ?? ""}</td>
-              <td>{r.elapsed_ms == null ? "" : `${(r.elapsed_ms / 1000).toFixed(1)}s`}</td>
-            </tr>
-          ))}
+          {rows.map((r) => {
+            const { kind, detail, risky } = actionLabel(r, endpointName);
+            return (
+              <tr key={r.id} className={`log-row${risky ? " risk" : ""}`}>
+                <td><time>{new Date(r.ts * 1000).toLocaleString()}</time></td>
+                <td>{r.user_id}</td>
+                <td>{r.source}</td>
+                <td><span className={`log-kind${risky ? " risk" : ""}`}>{kind}</span> {detail}</td>
+                <td><span className="badge">{r.status}</span></td>
+                <td>{r.error ?? ""}</td>
+                <td>{r.elapsed_ms == null ? "" : `${(r.elapsed_ms / 1000).toFixed(1)}s`}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       {loaded && !err && rows.length === 0 && <p className="muted">No matching actions.</p>}
-      {next && <button disabled={busy} onClick={() => load(applied, next)}>Load more</button>}
+      <div className="pager">
+        {next && <button disabled={busy} onClick={() => load(applied, next)}>Load {PAGE_LIMIT} more</button>}
+        {loaded && rows.length > 0 && <span className="count">Showing {rows.length}{next ? "" : " (all matching)"}</span>}
+      </div>
     </div>
   );
 }
 
 export function Admin() {
+  const { data: endpoints } = useLoad<Endpoint[]>("/devices");
+  const rooms = useMemo(() => [...new Set((endpoints ?? []).map((e) => e.room))].sort((a, b) => a.localeCompare(b)), [endpoints]);
+  const endpointName = useCallback(
+    (id: string | null) => (id ? (endpoints ?? []).find((e) => e.endpoint_id === id)?.name ?? null : null),
+    [endpoints],
+  );
   return (
     <section>
       <h2>Admin</h2>
       <Nodes />
-      <Users />
-      <ActionLog />
+      <Users rooms={rooms} />
+      <ActionLog endpointName={endpointName} />
     </section>
   );
 }

@@ -60,7 +60,8 @@ describe("confirmation flow (agent flow)", () => {
   it("token burned / hash mismatch outcomes from consume are explained, not shown raw", async () => {
     server.use(route("post", "/devices/{endpoint_id}/set", () => ({ json: { ok: false, error: "hash_mismatch" } })), ...baseRoutes());
     const { user } = await openApp();
-    await user.selectOptions(screen.getByRole("combobox", { name: "lock" }), "unlocked");
+    await user.click(screen.getByRole("button", { name: "hall" }));
+    await user.click(screen.getByRole("button", { name: "Unlock…" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/burned/i);
   });
 

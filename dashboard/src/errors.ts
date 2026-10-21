@@ -13,8 +13,8 @@ const MESSAGES: Record<string, string> = {
   unknown: "The approval was not recognised. Nothing was executed. Ask again.",
   confirmation_required: "This device needs your confirmation first.",
   endpoint_offline: "The device is offline.",
-  rate_limited: "Too many requests. Please wait a moment.",
-  too_many_uploads: "Too many uploads held. Please wait a moment.",
+  rate_limited: "Too many requests. Wait a moment and try again.",
+  too_many_uploads: "Too many uploads held. Wait a moment and try again.",
   upstream_error: "A backend service returned an error.",
   upstream_timeout: "A backend service did not answer in time.",
   vision_unavailable: "Vision is unavailable right now.",
@@ -24,7 +24,7 @@ const MESSAGES: Record<string, string> = {
   llm_busy: "The assistant is busy. Try again shortly.",
   budget_exceeded: "The assistant ran out of steps for this request.",
   bad_request: "The request was not valid.",
-  unauthorized: "Please sign in again.",
+  unauthorized: "Session expired, sign in again.",
 };
 
 export function explain(e: unknown): string {
