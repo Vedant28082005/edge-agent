@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 
 from .devices import DeviceRegistry
@@ -16,6 +17,7 @@ from .llm import LlmBusy, LlmError
 from .planner import Plan, Planner
 from .prompt import PromptBudgetError, PromptBuilder, render_result
 from .reqctx import ReqCtx
+from .schema import repair_plan_calls
 from .sched.scheduler import Scheduler
 from .sched.trace import TurnTrace
 from .store import Store
@@ -25,6 +27,21 @@ from .util import clean_label, clean_user_text
 log = logging.getLogger("agent.chat")
 
 DEFAULT_IMAGE_QUESTION = "What do you see?"      # image-only turn, no text: a general describe-the-scene question
+
+# S8e: a text-only reply to an imperative request ("turn on the fan") must not claim an action that never ran.
+_IMPERATIVE_RE = re.compile(r"\b(turn|switch|set|dim|lock|unlock|run|open|close|start|stop)\b", re.IGNORECASE)
+_CLAIMS_ACTION_RE = re.compile(
+    r"^(turning|switching|setting|dimming|locking|unlocking|running|opening|closing|starting|stopping|done)\b",
+    re.IGNORECASE)
+NO_ACTION_TEXT = "I didn't make that change — could you say it again?"
+
+
+def _is_imperative(text: str) -> bool:
+    return bool(_IMPERATIVE_RE.search(text))
+
+
+def _claims_action(say: str) -> bool:
+    return bool(_CLAIMS_ACTION_RE.match(say.strip()))
 
 ERROR_TEXT = {
     "unknown_endpoint": "that device doesn't exist", "unknown_capability": "that device can't do that",
@@ -174,6 +191,7 @@ class ChatService:
             extra_tail: list[dict] = []
             tool_results = ""
             say = ""
+            retried_claim = False
             while True:
                 if not ctx.budget.take_step():
                     if not outs:
@@ -208,7 +226,15 @@ class ChatService:
                     self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained))
                 say = plan.say
                 if not plan.calls:
+                    if _is_imperative(text) and _claims_action(say):
+                        if not retried_claim:
+                            retried_claim = True
+                            continue
+                        self.metrics.claims_without_calls += 1
+                        log.warning("planner claimed an action (%r) for an imperative request with no tool call", say)
+                        say = NO_ACTION_TEXT
                     break
+                plan.calls = repair_plan_calls(plan.calls, text)
                 await ctx.emit("status", {"text": "working on it"})
                 new = await self.executor.run_calls(ctx, plan.calls)
                 outs += new

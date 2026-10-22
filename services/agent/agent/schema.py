@@ -22,6 +22,8 @@ MAX_CALLS = 4
 SAY_MAX = 240
 FORBIDDEN_ARG_KEYS = ("confirmation_token", "user_id", "call_id", "_meta", "token")
 SCENE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.'&-]{0,47}$")
+BRIGHTNESS_FLOOR = 10
+_LEVEL_NAMED_RE = re.compile(r"\d|\bzero\b|\bpercent\b|%", re.IGNORECASE)
 
 
 def _call(tool: str, args: dict, required: list[str]) -> dict:
@@ -82,6 +84,27 @@ def schema_endpoint_ids(schema: dict) -> set[str]:
                 walk(v)
 
     walk(schema)
+    return out
+
+
+# --------------------------------------------------------------------------------------------- plan repair (pre-executor)
+def repair_plan_calls(calls: list[dict], user_text: str) -> list[dict]:
+    """A `set_state brightness=0` is never sent as-is unless the user named a level or `0`/"zero" themselves: turning a
+    light on must never leave it dark. An explicit `power=false` call for the same endpoint in this plan is a genuine
+    turn-off (brightness is moot), so it is left alone; everything else is repaired to `BRIGHTNESS_FLOOR`, never applied
+    silently."""
+    if _LEVEL_NAMED_RE.search(user_text or ""):
+        return calls
+    power_false_eps = {c["args"].get("endpoint_id") for c in calls if isinstance(c, dict) and isinstance(c.get("args"), dict)
+                        and c.get("tool") == "set_state" and c["args"].get("capability") == "power"
+                        and c["args"].get("value") is False}
+    out = []
+    for c in calls:
+        a = c.get("args") if isinstance(c, dict) else None
+        if (isinstance(a, dict) and c.get("tool") == "set_state" and a.get("capability") == "brightness"
+                and a.get("value") == 0 and a.get("endpoint_id") not in power_false_eps):
+            c = {**c, "args": {**a, "value": BRIGHTNESS_FLOOR}}
+        out.append(c)
     return out
 
 

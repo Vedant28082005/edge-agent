@@ -6,7 +6,7 @@ import pytest
 
 from agent.devices import DeviceRegistry
 from agent.mock import demo_devices
-from agent.schema import build_plan_schema, schema_endpoint_ids, strip_forbidden, validate_call
+from agent.schema import BRIGHTNESS_FLOOR, build_plan_schema, repair_plan_calls, schema_endpoint_ids, strip_forbidden, validate_call
 
 
 def reg_of(devs=None):
@@ -136,3 +136,40 @@ def test_validate_call_rejections_and_strip():
     clean, removed = strip_forbidden({"a": 1, "confirmation_token": "T", "_meta": {}})
     assert clean == {"a": 1} and sorted(removed) == ["_meta", "confirmation_token"]
     json.dumps(build_plan_schema(r))                                 # serialisable for llama-server
+
+
+# ------------------------------------------------------------------------------------------------ S8e brightness guard
+def test_repair_lifts_brightness_zero_paired_with_power_on():
+    calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "power", "value": True}},
+             {"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 0}}]
+    out = repair_plan_calls(calls, "turn on the ceiling light")
+    assert out[1]["args"]["value"] == BRIGHTNESS_FLOOR
+    assert out[0] == calls[0]                              # the power call is untouched
+
+
+def test_repair_lifts_a_lone_brightness_zero_call_on_a_turn_on_request():
+    calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 0}}]
+    out = repair_plan_calls(calls, "turn on the ceiling light")
+    assert out[0]["args"]["value"] == BRIGHTNESS_FLOOR
+
+
+def test_repair_leaves_an_explicit_level_alone():
+    calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "power", "value": True}},
+             {"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 0}}]
+    for text in ("turn on the ceiling light at 0", "set the ceiling light to zero brightness", "set it to 0%"):
+        out = repair_plan_calls(calls, text)
+        assert out[1]["args"]["value"] == 0, text
+
+
+def test_repair_leaves_a_genuine_power_off_alone():
+    calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "power", "value": False}},
+             {"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 0}}]
+    out = repair_plan_calls(calls, "turn off the ceiling light")
+    assert out[1]["args"]["value"] == 0
+
+
+def test_repair_only_touches_brightness_zero_for_the_matching_endpoint():
+    calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000006", "capability": "power", "value": False}},
+             {"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 0}}]
+    out = repair_plan_calls(calls, "turn off the lamp and turn on the ceiling light")
+    assert out[1]["args"]["value"] == BRIGHTNESS_FLOOR
