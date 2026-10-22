@@ -41,6 +41,7 @@ class Metrics:
     calls_rejected: dict = field(default_factory=dict)       # error code -> count (invalid calls caught by validation)
     calls_executed: int = 0
     stripped_fields: int = 0
+    claims_without_calls: int = 0     # a reply claimed an action but no tool call ran, even after one retry (S8e)
 
     def reject(self, code: str) -> None:
         self.calls_rejected[code] = self.calls_rejected.get(code, 0) + 1
@@ -49,7 +50,7 @@ class Metrics:
         return {"plans": self.plans, "plan_parse_failures": self.plan_parse_failures,
                 "calls_proposed": self.calls_proposed, "calls_rejected": dict(self.calls_rejected),
                 "calls_rejected_total": sum(self.calls_rejected.values()), "calls_executed": self.calls_executed,
-                "stripped_fields": self.stripped_fields}
+                "stripped_fields": self.stripped_fields, "claims_without_calls": self.claims_without_calls}
 
 
 @dataclass
