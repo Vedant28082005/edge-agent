@@ -1,14 +1,11 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { session } from "../api/client";
 import { streamChat } from "../api/sse";
 import type { SseEvent, WsMessage } from "../api/events";
+import { chatStore } from "../chatStore";
+import type { Msg, Tool } from "../chatStore";
 import { explain } from "../errors";
 import { useLive } from "../live";
-
-type Tool = { call_id: string; tool: string; args: unknown; result?: unknown; ok?: boolean };
-type Msg =
-  | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string; final: boolean; route?: string; latency_ms?: number; status?: string; tools: Tool[]; error?: string };
 
 type ChipStatus = "done" | "running" | "failed" | "confirm";
 const STATUS_WORD: Record<ChipStatus, string> = { done: "done", running: "running", failed: "failed", confirm: "needs confirmation" };
@@ -46,10 +43,10 @@ function ToolChips({ tools }: { tools: Tool[] }) {
 
 export function Chat() {
   const live = useLive();
-  const [msgs, setMsgs] = useState<Msg[]>([]);
+  const msgs = useSyncExternalStore(chatStore.subscribe, chatStore.getMsgs);
+  const setMsgs = chatStore.setMsgs;
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
-  const sessionId = useRef(`web-${Math.random().toString(36).slice(2, 10)}`);
   const abort = useRef<AbortController | null>(null);
 
   const patchLast = (fn: (m: Extract<Msg, { kind: "assistant" }>) => void) =>
@@ -89,7 +86,7 @@ export function Chat() {
     setMsgs((m) => [...m, { kind: "user", text: t }, { kind: "assistant", text: "", final: false, tools: [] }]);
     abort.current = new AbortController();
     try {
-      await streamChat({ session_id: sessionId.current, text: t }, onEvent, abort.current.signal);
+      await streamChat({ session_id: chatStore.sessionId, text: t }, onEvent, abort.current.signal);
     } catch (e) {
       if ((e as Error).name !== "AbortError") patchLast((m) => { m.error = explain(e); });
     } finally {
@@ -110,6 +107,7 @@ export function Chat() {
             {m.status && !m.final && <div className="muted small">{m.status}</div>}
             {m.text && <div className="reply">{m.text}{!m.final && <span className="caret" aria-hidden="true" />}</div>}
             {!m.final && !m.text && !m.status && <div className="muted small">thinking…</div>}
+            {m.final && !m.text && !m.tools.length && !m.error && <div className="muted small">No reply</div>}
             {m.error && <div className="err" role="alert">{m.error}</div>}
             {m.final && m.route && <div className="muted small">{m.route}{m.latency_ms != null ? ` · ${m.latency_ms} ms` : ""}</div>}
           </div>
