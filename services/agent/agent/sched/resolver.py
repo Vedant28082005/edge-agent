@@ -70,6 +70,7 @@ class _Cmd:
     cap: str | None = None                       # explicit capability word, if any
     conf: float = 1.0
     rest: list = field(default_factory=list)     # target tokens left after removing intent words
+    on_verb: bool = False                        # (S8f) the utterance itself said "on" (vs. a bare "set/dim ... to N")
 
 
 class FastPathResolver:
@@ -92,6 +93,9 @@ class FastPathResolver:
             sc = self._scene(s, toks, scenes, role)
             if sc is not None:
                 return sc
+            cp = self._compound_power_brightness(s, reg, role)
+            if cp is not None:
+                return cp
             return _fall("compound")
         if not reg.devices and not scenes:
             return _fall("empty_registry")
@@ -123,7 +127,7 @@ class FastPathResolver:
             rest = [t for t in rest_s.split() if t not in _SET_VERBS | _ON_PARTICLE_VERBS | {"open", "close", "up", "down", "on", "off"}]
             cap = next((_CAP_WORDS[t] for t in rest if t in _CAP_WORDS and _CAP_WORDS[t]), None)
             rest = [t for t in rest if t not in _CAP_WORDS and t != "percent" and t != "%"]
-            return _Cmd("value", value=value, cap=cap, conf=1.0, rest=self._clean(rest))
+            return _Cmd("value", value=value, cap=cap, conf=1.0, rest=self._clean(rest), on_verb="on" in tset)
         if "half" in tset or tset & {"full", "max", "maximum", "min", "minimum", "lowest", "highest"}:
             return "symbolic_value"                                       # needs the device's range: leave to the LLM
         if tset & RELATIVE:
@@ -236,14 +240,25 @@ class FastPathResolver:
         if role == "guest":
             return Resolution(DENIED, reason="guest_cannot_control", intent=intent, candidates=cands, confidence=conf)
         calls = []
+        turned_on: list[Device] = []                   # (S8f) members whose power was switched on by this plan
+        value_cap: str | None = None
         for d in members:
             tool_args = capable(d)
-            args = {"endpoint_id": d.endpoint_id, "capability": tool_args[0], "value": tool_args[1]}
+            cap, val = tool_args
+            value_cap = cap if cmd.kind == "value" else value_cap
+            if cap == "brightness" and isinstance(val, (int, float)) and val > 0:
+                p = d.cap("power")
+                if p and p.kind == "actuator" and p.type == "bool":
+                    perr, pclean = validate_call(reg, "set_state", {"endpoint_id": d.endpoint_id, "capability": "power", "value": True})
+                    if not perr:
+                        calls.append({"tool": "set_state", "args": pclean})
+                        turned_on.append(d)
+            args = {"endpoint_id": d.endpoint_id, "capability": cap, "value": val}
             err, clean = validate_call(reg, "set_state", args)
             if err:
                 return _fall(err, intent, cands, conf)
             calls.append({"tool": "set_state", "args": clean})
-        return Resolution(PLAN, calls, self._say(cmd, members), conf, "device_match", intent, cands)
+        return Resolution(PLAN, calls, self._say(cmd, members, turned_on, value_cap), conf, "device_match", intent, cands)
 
     def _call_for(self, cmd: _Cmd, d: Device) -> tuple[str, object] | None:
         """(capability, value) this command means on device `d`, or None if `d` cannot do it."""
@@ -269,7 +284,7 @@ class FastPathResolver:
         return None
 
     @staticmethod
-    def _say(cmd: _Cmd, devs: list[Device]) -> str:
+    def _say(cmd: _Cmd, devs: list[Device], turned_on: list[Device] | None = None, value_cap: str | None = None) -> str:
         names = ", ".join(d.name for d in devs[:3]) + (f" and {len(devs) - 3} more" if len(devs) > 3 else "")
         if cmd.kind == "power":
             return f"Turning {'on' if cmd.value else 'off'} {names}."
@@ -277,4 +292,54 @@ class FastPathResolver:
             return f"{'Locking' if cmd.value == 'locked' else 'Unlocking'} {names}."
         if cmd.kind == "cover":
             return f"{'Opening' if cmd.value else 'Closing'} {names}."
+        if cmd.kind == "value" and value_cap == "brightness":
+            num = int(cmd.value[0])
+            return f"{names} turned on at {num}%." if turned_on else f"{names} brightness set to {num}."
         return f"Setting {names}."
+
+    # ------------------------------------------------------------------------------------------ compound (S8f)
+    def _compound_power_brightness(self, s: str, reg: DeviceRegistry, role: str) -> Resolution | None:
+        """"turn on X and set brightness to N%" (either order, "and" means one device, one turn): run both calls
+        without the LLM, power first. Anything that is not exactly this shape (device unresolved, ambiguous, or the
+        two clauses are not a power-on + a value command) returns None and the generic compound fallthrough applies."""
+        if "," in s or s.count(" and ") != 1:
+            return None
+        halves = [h.split() for h in s.split(" and ", 1)]
+        if not all(halves):
+            return None
+        cmds = [self._parse(" ".join(h), h) for h in halves]
+        if any(isinstance(c, str) for c in cmds):
+            return None
+        for power_cmd, value_cmd in ((cmds[0], cmds[1]), (cmds[1], cmds[0])):
+            if power_cmd.kind != "power" or power_cmd.value is not True or value_cmd.kind != "value":
+                continue
+            pronoun = {"it", "them", "this", "that"}
+            xs = [t for t in value_cmd.rest if t not in pronoun] or [t for t in power_cmd.rest if t not in pronoun]
+            if not xs:
+                return None
+            scored = sorted(((sc, d) for d in reg.devices.values() for sc, ident in (score_device(xs, d),) if sc > 0 and ident),
+                            key=lambda t: (-t[0], t[1].endpoint_id))
+            if not scored:
+                return None
+            top = scored[0][0]
+            runner = max((sc for sc, d in scored if sc < top - 1e-9), default=0.0)
+            if top < self.cfg.fast_threshold or top - runner < self.cfg.fast_margin:
+                return None
+            d = scored[0][1]
+            tool_args = self._call_for(value_cmd, d)
+            if tool_args is None or tool_args[0] != "brightness" or not isinstance(tool_args[1], (int, float)) or tool_args[1] <= 0:
+                return None
+            if d.cap("power") is None or d.cap("power").kind != "actuator" or d.cap("power").type != "bool":
+                return None
+            if role == "guest":
+                return Resolution(DENIED, reason="guest_cannot_control", intent="value", candidates=[(d.endpoint_id, top)], confidence=top)
+            pow_args = {"endpoint_id": d.endpoint_id, "capability": "power", "value": True}
+            val_args = {"endpoint_id": d.endpoint_id, "capability": tool_args[0], "value": tool_args[1]}
+            perr, pclean = validate_call(reg, "set_state", pow_args)
+            verr, vclean = validate_call(reg, "set_state", val_args)
+            if perr or verr:
+                return None
+            calls = [{"tool": "set_state", "args": pclean}, {"tool": "set_state", "args": vclean}]
+            return Resolution(PLAN, calls, f"{d.name} on at {tool_args[1]}%.", top, "compound_power_value", "value",
+                              [(d.endpoint_id, top)])
+        return None

@@ -27,7 +27,7 @@ from .memory import MemoryWindow
 from .prefix import PrefixTracker
 from .resolver import DENIED, PLAN, FastPathResolver
 from .router import CostRouter
-from .trace import TRACE_EVENT, TurnTrace
+from .trace import RAW_TRUNC, TRACE_EVENT, TurnTrace
 
 log = logging.getLogger("agent.sched")
 
@@ -162,7 +162,7 @@ class Scheduler:
         return f"{who}: {r.get('capability')} is {shown}{unit}{stale}."
 
     # ------------------------------------------------------------------------------------------ LLM bookkeeping
-    def note_llm(self, trace: TurnTrace, prefix_hash: str, timings: dict, constrained: bool) -> None:
+    def note_llm(self, trace: TurnTrace, prefix_hash: str, timings: dict, constrained: bool, raw: str = "") -> None:
         obs = self.prefix.observe(prefix_hash, timings)
         trace.llm_calls += 1
         trace.prefix_hash = prefix_hash
@@ -172,6 +172,7 @@ class Scheduler:
         if trace.cache_hit is None:                      # the first request of the turn decides; totals are in cached_tokens
             trace.cache_hit = obs.cache_hit
         trace.constrained = constrained
+        trace.llm_raw = (raw or "")[:RAW_TRUNC]
 
     # ------------------------------------------------------------------------------------------ trace out
     def emit(self, ctx: ReqCtx, trace: TurnTrace) -> None:

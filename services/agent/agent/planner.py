@@ -22,6 +22,7 @@ class Plan:
     say: str
     parsed_ok: bool
     timings: dict = field(default_factory=dict)
+    raw: str = ""                   # the model's unparsed reply (S8f: logged, truncated, in turn_traces)
 
     def as_assistant_json(self) -> str:
         return json.dumps({"calls": self.calls, "say": self.say}, separators=(",", ":"), ensure_ascii=False)
@@ -77,6 +78,7 @@ class Planner:
         res: LlmResult = await self.llm.complete(messages, schema)
         plan = parse_plan(res.content)
         plan.timings = res.timings
+        plan.raw = res.content or ""
         self.metrics.plans += 1
         if not plan.parsed_ok:
             self.metrics.plan_parse_failures += 1

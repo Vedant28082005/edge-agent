@@ -1,12 +1,14 @@
 """One trace per turn, for S10. Emitted on the internal event bus as `sched.trace` and written to the `turn_traces` table
-(`Store.log_trace`/`Store.traces`; not the action log, own retention cap). Never contains the user's text, tool arguments, tokens or secrets: only
-route, source ids, endpoint ids, counts and latencies."""
+(`Store.log_trace`/`Store.traces`; not the action log, own retention cap). Never contains the user's text or tool
+arguments: only route, source ids, endpoint ids, counts and latencies - plus (S8f) the model's own raw reply, truncated,
+for debugging the planner; constrained decoding keeps it schema-shaped, so it never carries a secret."""
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
 
 TRACE_EVENT = "sched.trace"
+RAW_TRUNC = 300
 
 
 @dataclass
@@ -29,6 +31,7 @@ class TurnTrace:
     outcome: str = "ok"                      # ok | partial | failed | needs_confirmation | denied | error:<code>
     flags: dict = field(default_factory=dict)
     fallbacks: list = field(default_factory=list)    # sources tried and failed before the final one
+    llm_raw: str = ""                        # (S8f) the last LLM reply this turn, truncated; "" when no LLM call ran
     _t0: float = field(default_factory=time.monotonic, repr=False)
     _emitted: bool = field(default=False, repr=False)
 

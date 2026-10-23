@@ -30,9 +30,9 @@ TABLE = [
     ("can you turn off the living room lamp?", "member", PLAN, [S(B4, "power", False)]),
     ("Switch OFF the Lamp", "member", PLAN, [S(B4, "power", False)]),
     ("start the bedroom fan", "member", PLAN, [S(B2, "power", True)]),
-    ("set the living room light to 40%", "member", PLAN, [S(B4, "brightness", 40)]),
-    ("dim the bedroom light to 20", "member", PLAN, [S(B1, "brightness", 20)]),
-    ("dim the lamp to 30 percent", "member", PLAN, [S(B4, "brightness", 30)]),
+    ("set the living room light to 40%", "member", PLAN, [S(B4, "power", True), S(B4, "brightness", 40)]),
+    ("dim the bedroom light to 20", "member", PLAN, [S(B1, "power", True), S(B1, "brightness", 20)]),
+    ("dim the lamp to 30 percent", "member", PLAN, [S(B4, "power", True), S(B4, "brightness", 30)]),
     ("set bedroom fan speed to 3", "member", PLAN, [S(B2, "speed", 3)]),
     ("set the bedroom fan to three", "member", PLAN, [S(B2, "speed", 3)]),
     ("set the blinds to 50 percent", "member", PLAN, [S(B5, "position", 50)]),
@@ -51,6 +51,9 @@ TABLE = [
     ("good night", "member", PLAN, [SC("Good night")]),
     ("run good night scene", "member", PLAN, [SC("Good night")]),
     ("activate morning mode", "member", PLAN, [SC("Morning")]),
+    # --- compound power + brightness (S8f): one device, two ordered calls, no LLM
+    ("turn on the lamp and set brightness to 50%", "member", PLAN, [S(B4, "power", True), S(B4, "brightness", 50)]),
+    ("set the bedroom light brightness to 25% and turn it on", "member", PLAN, [S(B1, "power", True), S(B1, "brightness", 25)]),
     # --- ambiguous: two or more devices fit equally -> LLM
     ("turn on the fan", "member", FALLTHROUGH, "ambiguous"),
     ("stop the fan", "member", FALLTHROUGH, "ambiguous"),
