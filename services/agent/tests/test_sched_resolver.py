@@ -33,8 +33,9 @@ TABLE = [
     ("set the living room light to 40%", "member", PLAN, [S(B4, "power", True), S(B4, "brightness", 40)]),
     ("dim the bedroom light to 20", "member", PLAN, [S(B1, "power", True), S(B1, "brightness", 20)]),
     ("dim the lamp to 30 percent", "member", PLAN, [S(B4, "power", True), S(B4, "brightness", 30)]),
-    ("set bedroom fan speed to 3", "member", PLAN, [S(B2, "speed", 3)]),
-    ("set the bedroom fan to three", "member", PLAN, [S(B2, "speed", 3)]),
+    # (S8g) the generic power-dependency rule now also covers fan speed, not just light brightness
+    ("set bedroom fan speed to 3", "member", PLAN, [S(B2, "power", True), S(B2, "speed", 3)]),
+    ("set the bedroom fan to three", "member", PLAN, [S(B2, "power", True), S(B2, "speed", 3)]),
     ("set the blinds to 50 percent", "member", PLAN, [S(B5, "position", 50)]),
     ("open the blinds", "member", PLAN, [S(B5, "position", 100)]),
     ("close the living room blinds", "member", PLAN, [S(B5, "position", 0)]),
@@ -66,7 +67,9 @@ TABLE = [
     ("turn on the kitchen fan", "member", FALLTHROUGH, "low_confidence"),
     ("turn on the temp sensor", "member", FALLTHROUGH, "capability_missing"),
     ("open the front door", "member", FALLTHROUGH, "capability_missing"),          # open is not unlock
-    ("set the temperature to 22", "member", FALLTHROUGH, "no_match"),
+    # (S8g) "temperature" is now a recognised capability word (-> target_temp); with no device named, this is
+    # "no_target" (same as a bare "turn on") rather than a hopeless device-name match.
+    ("set the temperature to 22", "member", FALLTHROUGH, "no_target"),
     ("set bedroom light brightness to 150", "member", FALLTHROUGH, "out_of_range"),
     ("set the bedroom fan speed to 9", "member", FALLTHROUGH, "out_of_range"),
     ("set the blinds to 150", "member", FALLTHROUGH, "out_of_range"),
