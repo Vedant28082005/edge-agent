@@ -309,7 +309,15 @@ bool EdgeNode::waitForTime() {
     if (elapsedMs(nowMs(), t0) > kNtpTimeoutMs) { logf("ntp: no plausible time yet"); return false; }
     vTaskDelay(pdMS_TO_TICKS(500));
   }
-  logf("time ok");
+  {
+    // Diagnostic: show the UTC date the TLS certificate check will use (no secrets).
+    time_t tnow = time(nullptr);
+    struct tm tmv;
+    gmtime_r(&tnow, &tmv);
+    char stamp[32];
+    strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tmv);
+    logf("time ok %s UTC", stamp);
+  }
   return true;
 }
 
