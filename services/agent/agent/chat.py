@@ -27,6 +27,7 @@ from .util import clean_label, clean_user_text
 log = logging.getLogger("agent.chat")
 
 DEFAULT_IMAGE_QUESTION = "What do you see?"      # image-only turn, no text: a general describe-the-scene question
+KEEPALIVE_S = 8.0      # (S8g) well under any sane SSE/proxy idle timeout, for a 15-65s [est/measured] LLM turn
 
 # S8e: a text-only reply to an imperative request ("turn on the fan") must not claim an action that never ran.
 _IMPERATIVE_RE = re.compile(r"\b(turn|switch|set|dim|lock|unlock|run|open|close|start|stop)\b", re.IGNORECASE)
@@ -34,6 +35,14 @@ _CLAIMS_ACTION_RE = re.compile(
     r"^(turning|switching|setting|dimming|locking|unlocking|running|opening|closing|starting|stopping|done)\b",
     re.IGNORECASE)
 NO_ACTION_TEXT = "I didn't make that change — could you say it again?"
+NO_PLAN_TEXT = "I couldn't work out what to do."
+
+
+def no_plan_text(reg: DeviceRegistry) -> str:
+    """(S8g) The model made no tool call and gave no text either: never silently say "OK", and never invent a
+    device -- name one straight from the live registry (any real one; it is only an example of the phrasing)."""
+    name = next((d.name for d in reg.devices.values()), None)
+    return f"{NO_PLAN_TEXT} Try naming the device, for example: turn on {name}." if name else NO_PLAN_TEXT
 
 
 def _is_imperative(text: str) -> bool:
@@ -116,7 +125,9 @@ def describe_outcomes(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
         return ""
     on_eps = {o.args.get("endpoint_id") for o in acted if o.tool == "set_state" and o.args.get("capability") == "power"
               and o.args.get("value") is True}
-    bright_eps = {o.args.get("endpoint_id") for o in acted if o.tool == "set_state" and o.args.get("capability") == "brightness"}
+    # (S8g) generic: any other set_state on the same endpoint in this turn is narrated together with the power-on,
+    # not as a separate "turned on." sentence -- whatever capability it is, not just brightness.
+    other_cap_eps = {o.args.get("endpoint_id") for o in acted if o.tool == "set_state" and o.args.get("capability") != "power"}
     parts: list[str] = []
     for o in acted:
         if o.tool == "run_scene":
@@ -125,18 +136,20 @@ def describe_outcomes(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
         cap, val, ep = o.args.get("capability"), o.args.get("value"), o.args.get("endpoint_id")
         name = _name(reg, ep)
         if cap == "power":
-            if val is True and ep in bright_eps:
-                continue                          # narrated together with the brightness call below
+            if val is True and ep in other_cap_eps:
+                continue                          # narrated together with the dependent call below
             parts.append(f"{name} turned {'on' if val else 'off'}.")
         elif cap == "lock":
             parts.append(f"{name} {'unlocked' if val == 'unlocked' else 'locked'}.")
         elif cap == "position":
             parts.append(f"{name} {'opened' if val else 'closed'}.")
         elif cap == "brightness":
-            if o.args.get("endpoint_id") in on_eps:
+            if ep in on_eps:
                 parts.append(f"{name} turned on at {val}%.")
             else:
                 parts.append(f"{name} brightness set to {val}.")
+        elif ep in on_eps:
+            parts.append(f"{name} turned on; {cap} set to {val}.")
         else:
             parts.append(f"{name} {cap} set to {val}.")
     return " ".join(parts)
@@ -155,6 +168,27 @@ class ChatService:
 
     def busy(self) -> bool:
         return self._active >= self._max_active
+
+    async def _plan_with_keepalive(self, ctx: ReqCtx, messages: list[dict], scope) -> Plan:
+        """(S8g) One real LLM round takes 15-65 s [est/measured]; without traffic on the SSE stream for that whole
+        time, a proxy or the gateway's own idle/read timeout can give up on the stream well before `final` arrives,
+        so the browser sees "No reply" even though the turn (and any actions in it) completed normally on the agent.
+        A periodic `status` event (already a defined, display-only SSE event) keeps the stream alive while the
+        model generates; it is purely cosmetic and never substitutes for the real `final`."""
+        async def ping() -> None:
+            while True:
+                await asyncio.sleep(KEEPALIVE_S)
+                await ctx.emit("status", {"text": "still working on it"})
+
+        pinger = asyncio.get_running_loop().create_task(ping())
+        try:
+            return await self.planner.plan(messages, scope)
+        finally:
+            pinger.cancel()
+            try:
+                await pinger
+            except asyncio.CancelledError:
+                pass
 
     def _vision_enabled(self) -> bool:
         """A node is enabled when the router is on and at least one vision/yolo backend is registered."""
@@ -206,12 +240,17 @@ class ChatService:
         user, sess, guest = ctx.user_id, ctx.session_id, ctx.role == "guest"
         view = self.views.get(ctx.scope)               # what THIS caller may see: names outside the scope never reach the model
         reg = view.registry
+        route_t0 = time.monotonic()
         routed = await self.sched.route(ctx, text, trace) if self.sched else None
+        if trace is not None:
+            trace.add_stage("route_ms", (time.monotonic() - route_t0) * 1000)
         outs: list[CallOutcome] = []
         route = "llm"
         final: str | None = None
         if routed is not None:
             outs, route = routed.outs, routed.sse_route
+            if trace is not None:
+                trace.note_executed(outs)
             await ctx.emit("status", {"text": "working on it"})
             final = routed.text if routed.text is not None else compose_final(routed.say, outs, reg)
         else:
@@ -226,6 +265,7 @@ class ChatService:
             tool_results = ""
             say = ""
             retried_claim = False
+            retried_validation = False
             while True:
                 if not ctx.budget.take_step():
                     if not outs:
@@ -243,8 +283,9 @@ class ChatService:
                     if trace:
                         trace.outcome = "error:prompt_budget"
                     return
+                llm_t0 = time.monotonic()
                 try:
-                    plan: Plan = await self.planner.plan(prompt.messages, ctx.scope)
+                    plan: Plan = await self._plan_with_keepalive(ctx, prompt.messages, ctx.scope)
                 except LlmBusy:
                     await ctx.emit("error", {"code": "llm_busy", "message": "the assistant is busy, try again shortly"})
                     if trace:
@@ -256,6 +297,8 @@ class ChatService:
                     if trace:
                         trace.outcome = "error:llm_unavailable"
                     return
+                if trace is not None:
+                    trace.add_stage("llm_ms", (time.monotonic() - llm_t0) * 1000)
                 if self.sched and trace is not None:
                     self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained), plan.raw)
                 say = plan.say
@@ -267,11 +310,29 @@ class ChatService:
                         self.metrics.claims_without_calls += 1
                         log.warning("planner claimed an action (%r) for an imperative request with no tool call", say)
                         say = NO_ACTION_TEXT
+                    elif not say.strip():
+                        say = no_plan_text(reg)
                     break
-                plan.calls = repair_plan_calls(plan.calls, text)
+                plan.calls = repair_plan_calls(plan.calls, text, reg)
+                if trace is not None:
+                    trace.note_calls(plan.calls)
                 await ctx.emit("status", {"text": "working on it"})
+                exec_t0 = time.monotonic()
                 new = await self.executor.run_calls(ctx, plan.calls)
-                outs += new
+                if trace is not None:
+                    trace.add_stage("exec_ms", (time.monotonic() - exec_t0) * 1000)
+                    trace.note_executed(new)
+                outs += new                        # kept even on a retry, so a model that fixes nothing still reports
+                                                     # the real rejection rather than whatever it says on the retry
+                rejected = [o for o in new if o.state == "rejected"]
+                if new and len(rejected) == len(new) and not retried_validation:
+                    # (S8g) the plan failed validation (unknown endpoint/capability, bad type, out of range, ...):
+                    # give the model one retry with the reason before falling back, instead of reporting a failure
+                    # for a mistake the model can usually fix itself on the next round.
+                    retried_validation = True
+                    extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
+                    tool_results = "\n".join(f"{o.tool} rejected: {o.note or 'invalid'}" for o in rejected)
+                    continue
                 reads = [o for o in new if o.tool in READ_TOOLS and o.ok]
                 if not reads:
                     # a pure action turn: the confirmation is built from the verified results, not drafted by the

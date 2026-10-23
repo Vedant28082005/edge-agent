@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 TRACE_EVENT = "sched.trace"
 RAW_TRUNC = 300
+MAX_TRACE_CALLS = 8
 
 
 @dataclass
@@ -32,8 +33,39 @@ class TurnTrace:
     flags: dict = field(default_factory=dict)
     fallbacks: list = field(default_factory=list)    # sources tried and failed before the final one
     llm_raw: str = ""                        # (S8f) the last LLM reply this turn, truncated; "" when no LLM call ran
+    planned_calls: list = field(default_factory=list)   # (S8g) [{"tool","endpoint_id"?,"capability"?}], never values
+    executed: list = field(default_factory=list)        # (S8g) [{"tool","endpoint_id"?,"capability"?,"ok","state"}]
+    stage_ms: dict = field(default_factory=dict)        # (S8g) {"route_ms","llm_ms","exec_ms"}: time spent per stage
     _t0: float = field(default_factory=time.monotonic, repr=False)
     _emitted: bool = field(default=False, repr=False)
+
+    def add_stage(self, name: str, ms: float) -> None:
+        self.stage_ms[name] = round(self.stage_ms.get(name, 0.0) + ms, 1)
+
+    def note_calls(self, calls: list[dict]) -> None:
+        """Planned calls, shape only (tool/endpoint_id/capability): never the value the model proposed."""
+        for c in calls[:MAX_TRACE_CALLS]:
+            a = c.get("args") if isinstance(c, dict) else None
+            row = {"tool": c.get("tool") if isinstance(c, dict) else None}
+            if isinstance(a, dict):
+                if isinstance(a.get("endpoint_id"), str):
+                    row["endpoint_id"] = a["endpoint_id"]
+                if isinstance(a.get("capability"), str):
+                    row["capability"] = a["capability"]
+                if isinstance(a.get("scene"), str):
+                    row["scene"] = a["scene"]
+            self.planned_calls.append(row)
+
+    def note_executed(self, outs: list) -> None:
+        for o in outs[:MAX_TRACE_CALLS]:
+            row = {"tool": o.tool, "ok": o.ok, "state": o.state}
+            ep = o.args.get("endpoint_id") if isinstance(o.args, dict) else None
+            cap = o.args.get("capability") if isinstance(o.args, dict) else None
+            if isinstance(ep, str):
+                row["endpoint_id"] = ep
+            if isinstance(cap, str):
+                row["capability"] = cap
+            self.executed.append(row)
 
     def finish(self) -> "TurnTrace":
         self.latency_ms = int((time.monotonic() - self._t0) * 1000)

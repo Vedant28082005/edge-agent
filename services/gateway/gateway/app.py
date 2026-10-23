@@ -588,7 +588,13 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         payload = {"user_id": u.user_id, "role": u.role, "session_id": "s_" + sha256_hex(f"{u.user_id}\0{client_sid}")[:48],
                    **scope, **({"text": text} if text else {}), **({"images": images} if images else {})}
         async def open_agent(body: dict):
-            cm_ = ctx.agent.stream("POST", "/v1/chat", json=body, headers={"Accept": "text/event-stream"})
+            # A real LLM turn takes 15-65s [est/measured] and the agent sends a `status` keepalive roughly every
+            # KEEPALIVE_S (chat.py) while it generates, but this is still a long-lived stream, not an ordinary JSON
+            # call: it gets its own generous read timeout (comfortably above the agent's own request deadline, cfg
+            # `deadline_s`, default 180s) instead of `cfg.agent.timeout_s` (tuned for quick calls), so a slow turn is
+            # never cut off here before `final` arrives.
+            cm_ = ctx.agent.stream("POST", "/v1/chat", json=body, headers={"Accept": "text/event-stream"},
+                                   timeout=httpx.Timeout(10.0, read=200.0))
             try:
                 return cm_, await cm_.__aenter__()
             except httpx.TimeoutException:

@@ -88,10 +88,10 @@ def schema_endpoint_ids(schema: dict) -> set[str]:
 
 
 # --------------------------------------------------------------------------------------------- plan repair (pre-executor)
-def repair_plan_calls(calls: list[dict], user_text: str) -> list[dict]:
+def repair_plan_calls(calls: list[dict], user_text: str, reg: DeviceRegistry) -> list[dict]:
     """Two independent repairs applied to every plan (LLM or fast path) before it reaches the executor: the brightness
-    floor (S8e), then the brightness-implies-power-on rule (S8f, see `_ensure_power_for_brightness`)."""
-    return _ensure_power_for_brightness(_lift_brightness_floor(calls, user_text))
+    floor (S8e), then the generic power-dependency rule (S8g, see `ensure_power_dependency`)."""
+    return ensure_power_dependency(_lift_brightness_floor(calls, user_text), reg)
 
 
 def _lift_brightness_floor(calls: list[dict], user_text: str) -> list[dict]:
@@ -114,22 +114,52 @@ def _lift_brightness_floor(calls: list[dict], user_text: str) -> list[dict]:
     return out
 
 
-def _ensure_power_for_brightness(calls: list[dict]) -> list[dict]:
-    """(S8f) Setting a dimmable light's brightness above 0 must also turn it on. Brightness 0 never implies power on
-    (a genuine dim-to-off is left alone). If this plan already says what power should be for that endpoint, that call
-    is left exactly as the model (or the fast path) wrote it: this never overrides an explicit power call, it only
-    fills in one that is missing. The power call always precedes the brightness call for the same endpoint."""
+# Actuator capabilities whose own meaning already covers the endpoint's on/off state, so this rule never touches
+# them: `power` is the dependency itself, `lock` is a security state unrelated to electrical power.
+POWER_INDEPENDENT_CAPS = ("power", "lock")
+
+
+def _is_off_like(value: object) -> bool:
+    """A value that itself means "off" (or the zero/false floor of a range) never implies turning the endpoint on;
+    a genuine dim-to-off / move-to-0 / mode-"off" is left alone."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        return value.lower() == "off"
+    return False
+
+
+def ensure_power_dependency(calls: list[dict], reg: DeviceRegistry) -> list[dict]:
+    """(S8g) Generic rule, driven only by the endpoint's announced capabilities (never a device name or type): setting
+    any non-power, non-lock actuator capability (int level, enum mode, position, float setpoint, ...) to an "on"-like
+    value on an endpoint that has a boolean `power` capability must turn that endpoint on first. Replaces the old
+    brightness-only `_ensure_power_for_brightness` (S8f); same ordering and non-override guarantees, now generic:
+
+    - Skipped when the value itself is off-like (0, False, "off"): never turns a light on by dimming it to 0.
+    - Skipped when this plan already states power for that endpoint (explicit, or already inserted for an earlier
+      call on the same endpoint): this never overrides an explicit power call, it only fills in one that is missing.
+    - Skipped when the endpoint is `risk: confirm`: that endpoint keeps its own confirmation flow untouched; this
+      rule never adds an unconfirmed call ahead of a risky one.
+    - Skipped when the endpoint has no boolean `power` actuator capability at all (e.g. a sensor-only endpoint, or
+      a device type that was never given a power switch).
+
+    The power call always precedes the dependent call for the same endpoint."""
     power_eps = {c["args"].get("endpoint_id") for c in calls if isinstance(c, dict) and isinstance(c.get("args"), dict)
                  and c.get("tool") == "set_state" and c["args"].get("capability") == "power"}
     out: list[dict] = []
     for c in calls:
         a = c.get("args") if isinstance(c, dict) else None
-        if (isinstance(a, dict) and c.get("tool") == "set_state" and a.get("capability") == "brightness"
-                and isinstance(a.get("value"), (int, float)) and not isinstance(a.get("value"), bool)
-                and a.get("value") > 0 and a.get("endpoint_id") not in power_eps):
-            ep = a.get("endpoint_id")
-            out.append({"tool": "set_state", "args": {"endpoint_id": ep, "capability": "power", "value": True}})
-            power_eps.add(ep)
+        if (isinstance(a, dict) and c.get("tool") == "set_state" and isinstance(a.get("capability"), str)
+                and a["capability"] not in POWER_INDEPENDENT_CAPS and not _is_off_like(a.get("value"))
+                and isinstance(a.get("endpoint_id"), str) and a["endpoint_id"] not in power_eps):
+            ep = a["endpoint_id"]
+            d = reg.devices.get(ep)
+            p = d.cap("power") if d else None
+            if d is not None and p is not None and p.kind == "actuator" and p.type == "bool" and d.risk != "confirm":
+                out.append({"tool": "set_state", "args": {"endpoint_id": ep, "capability": "power", "value": True}})
+                power_eps.add(ep)
         out.append(c)
     return out
 

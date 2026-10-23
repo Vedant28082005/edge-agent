@@ -18,6 +18,7 @@ from ..devices import DeviceRegistry
 from ..events import Event, EventBus
 from ..executor import CallOutcome, Executor
 from ..reqctx import ReqCtx
+from ..schema import ensure_power_dependency, validate_call
 from ..scope import UNRESTRICTED, Scope
 from ..store import Store
 from ..views import ScopedViews
@@ -25,7 +26,7 @@ from .config import SchedConfig
 from .grammar import ConstraintCache, ConstraintSchema, make_backend
 from .memory import MemoryWindow
 from .prefix import PrefixTracker
-from .resolver import DENIED, PLAN, FastPathResolver
+from .resolver import DENIED, PLAN, RELATIVE_PENDING, FastPathResolver
 from .router import CostRouter
 from .trace import RAW_TRUNC, TRACE_EVENT, TurnTrace
 
@@ -93,12 +94,48 @@ class Scheduler:
                                   status="denied_guest", ok=False, detail={"candidates": trace.candidates})
             trace.route, trace.sse_route, trace.source, trace.outcome = "denied", "fast", "fast_path", "denied"
             return Routed(text=GUEST_DENIED_TEXT)
+        if res.status == RELATIVE_PENDING:
+            r = await self._relative(ctx, res, trace)
+            if r is not None:
+                return r
+            trace.fast_reason = "relative_state_unavailable"
+            return None                                     # cannot compute a target safely: let the LLM take it
         if res.status != PLAN:
             return None
         ctx.reason = f"user request (fast path): {text[:80]}"
+        trace.note_calls(res.calls)
         outs = await self.executor.run_calls(ctx, res.calls)
         trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
         return Routed(outs=outs, say=res.say)
+
+    async def _relative(self, ctx: ReqCtx, res, trace: TurnTrace) -> Routed | None:
+        """"raise the fan speed by 2": the resolver named the endpoint and capability but never reads live state
+        (no I/O there), so this fetches the current value with the same `get_state` tool the executor always uses,
+        computes and clamps the new value against the capability's own announced range, then runs it through the
+        ordinary `set_state` path (including the generic power-dependency rule). Returns None (fall through to the
+        LLM) only when the current value genuinely cannot be read or the capability has no usable range -- never a
+        guess."""
+        ep, cap_id, direction, amount, pct = res.relative
+        trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
+        out_get = await self.executor.run_call(ctx, "get_state", {"endpoint_id": ep})
+        if not out_get.ok:
+            return Routed(outs=[out_get], say="")
+        states = out_get.result.get("states") or []
+        cur = states[0].get("values", {}).get(cap_id) if states else None
+        d = self.registry.devices.get(ep)
+        c = d.cap(cap_id) if d else None
+        if not isinstance(cur, (int, float)) or isinstance(cur, bool) or c is None or c.min is None or c.max is None:
+            return None
+        step = amount if amount is not None else max(1, round((c.max - c.min) * 0.1))
+        target = max(c.min, min(c.max, cur + direction * step))
+        if c.type == "int":
+            target = int(round(target))
+        err, clean = validate_call(self.registry, "set_state", {"endpoint_id": ep, "capability": cap_id, "value": target})
+        if err:
+            return None
+        calls = ensure_power_dependency([{"tool": "set_state", "args": clean}], self.registry)
+        outs = await self.executor.run_calls(ctx, calls)
+        return Routed(outs=outs, say="")
 
     async def _perception(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
         snap = self._snapshot_ref(ctx, text)
