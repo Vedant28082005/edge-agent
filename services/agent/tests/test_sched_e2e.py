@@ -357,6 +357,8 @@ async def test_one_trace_per_turn_on_the_bus_and_in_the_action_log(tmp_path):
         need = {"req_id", "route", "source", "candidates", "latency_ms", "prompt_tokens", "cached_tokens", "generated_tokens",
                 "cache_hit", "constrained", "outcome", "flags", "fast_reason", "confidence", "llm_calls"}
         assert need <= set(seen[0].data)
+        assert seen[0].data["llm_raw"] == ""                            # (S8f) the fast path never calls the LLM
+        assert seen[1].data["llm_raw"]                                  # the LLM turn's raw reply is captured, truncated
         stats = e.agent.sched.stats()["routes"]
         assert stats["fast"]["n"] == 1 and stats["llm"]["n"] == 1
     finally:

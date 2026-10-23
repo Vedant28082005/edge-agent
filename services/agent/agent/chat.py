@@ -108,6 +108,40 @@ def compose_final(say: str, outs: list[CallOutcome], reg: DeviceRegistry) -> str
     return " ".join(parts)
 
 
+def describe_outcomes(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
+    """The confirmation text for a pure action turn, built by the agent from the verified outcomes (S8f): the model
+    is not trusted to draft it, so its `say` is never used here. Empty when nothing to act on was actually run."""
+    acted = [o for o in outs if o.ok and o.tool in ("set_state", "run_scene")]
+    if not acted:
+        return ""
+    on_eps = {o.args.get("endpoint_id") for o in acted if o.tool == "set_state" and o.args.get("capability") == "power"
+              and o.args.get("value") is True}
+    bright_eps = {o.args.get("endpoint_id") for o in acted if o.tool == "set_state" and o.args.get("capability") == "brightness"}
+    parts: list[str] = []
+    for o in acted:
+        if o.tool == "run_scene":
+            parts.append(f"Running {o.args.get('scene')}.")
+            continue
+        cap, val, ep = o.args.get("capability"), o.args.get("value"), o.args.get("endpoint_id")
+        name = _name(reg, ep)
+        if cap == "power":
+            if val is True and ep in bright_eps:
+                continue                          # narrated together with the brightness call below
+            parts.append(f"{name} turned {'on' if val else 'off'}.")
+        elif cap == "lock":
+            parts.append(f"{name} {'unlocked' if val == 'unlocked' else 'locked'}.")
+        elif cap == "position":
+            parts.append(f"{name} {'opened' if val else 'closed'}.")
+        elif cap == "brightness":
+            if o.args.get("endpoint_id") in on_eps:
+                parts.append(f"{name} turned on at {val}%.")
+            else:
+                parts.append(f"{name} brightness set to {val}.")
+        else:
+            parts.append(f"{name} {cap} set to {val}.")
+    return " ".join(parts)
+
+
 class ChatService:
     def __init__(self, registry: DeviceRegistry, builder: PromptBuilder, planner: Planner, executor: Executor,
                  store: Store, metrics: Metrics, settle_wait_s: float = 150.0, max_queued_turns: int = 2,
@@ -187,7 +221,7 @@ class ChatService:
             else:
                 history, summary = self.store.recent(user, sess, 4, guest), self.store.summary(user, sess, guest)
             memories = [m["text"] for m in self.store.list_memories(user, guest)[:5]]
-            await ctx.emit("status", {"text": "thinking"})
+            await ctx.emit("status", {"text": "working on it"})   # immediately: no blank bubble while the LLM runs
             extra_tail: list[dict] = []
             tool_results = ""
             say = ""
@@ -223,7 +257,7 @@ class ChatService:
                         trace.outcome = "error:llm_unavailable"
                     return
                 if self.sched and trace is not None:
-                    self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained))
+                    self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained), plan.raw)
                 say = plan.say
                 if not plan.calls:
                     if _is_imperative(text) and _claims_action(say):
@@ -240,6 +274,9 @@ class ChatService:
                 outs += new
                 reads = [o for o in new if o.tool in READ_TOOLS and o.ok]
                 if not reads:
+                    # a pure action turn: the confirmation is built from the verified results, not drafted by the
+                    # model (S8f) - this also covers a turn that ran a tool but produced no usable text (S8e/S8f).
+                    say = describe_outcomes(outs, reg) or say
                     break
                 extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
                 tool_results = "\n".join(render_result(o.tool, o.args, o.result, reg) for o in new if o.ok)

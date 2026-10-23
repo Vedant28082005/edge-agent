@@ -150,7 +150,8 @@ def test_repair_lifts_brightness_zero_paired_with_power_on():
 def test_repair_lifts_a_lone_brightness_zero_call_on_a_turn_on_request():
     calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 0}}]
     out = repair_plan_calls(calls, "turn on the ceiling light")
-    assert out[0]["args"]["value"] == BRIGHTNESS_FLOOR
+    bright = next(c for c in out if c["args"]["capability"] == "brightness")
+    assert bright["args"]["value"] == BRIGHTNESS_FLOOR
 
 
 def test_repair_leaves_an_explicit_level_alone():
@@ -172,4 +173,35 @@ def test_repair_only_touches_brightness_zero_for_the_matching_endpoint():
     calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000006", "capability": "power", "value": False}},
              {"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 0}}]
     out = repair_plan_calls(calls, "turn off the lamp and turn on the ceiling light")
+    bright = next(c for c in out if c["args"]["capability"] == "brightness")
+    assert bright["args"]["value"] == BRIGHTNESS_FLOOR
+
+
+# ------------------------------------------------------------------------------------------------ S8f brightness-implies-on
+def test_repair_adds_a_missing_power_on_before_a_positive_brightness():
+    calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 40}}]
+    out = repair_plan_calls(calls, "set the ceiling light to 40%")
+    assert [c["args"]["capability"] for c in out] == ["power", "brightness"]
+    assert out[0]["args"] == {"endpoint_id": "ep_a1000001", "capability": "power", "value": True}
+    assert out[1]["args"]["value"] == 40
+
+
+def test_repair_does_not_duplicate_an_explicit_power_call():
+    calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "power", "value": False}},
+             {"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 40}}]
+    out = repair_plan_calls(calls, "set the ceiling light to 40%")
+    assert out == calls                                    # an explicit power call (even False) is never overridden
+
+
+def test_repair_never_adds_power_on_for_brightness_zero():
+    calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 0}}]
+    out = repair_plan_calls(calls, "set the ceiling light to 0%")
+    assert out == calls                                    # explicit zero: no floor lift, no power-on either
+
+
+def test_repair_lifts_the_floor_then_adds_power_on_for_a_lone_brightness_zero():
+    calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 0}}]
+    out = repair_plan_calls(calls, "turn on the lone ceiling light")
+    assert [c["args"]["capability"] for c in out] == ["power", "brightness"]
+    assert out[0]["args"]["value"] is True
     assert out[1]["args"]["value"] == BRIGHTNESS_FLOOR

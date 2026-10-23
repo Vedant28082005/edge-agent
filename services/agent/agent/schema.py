@@ -89,6 +89,12 @@ def schema_endpoint_ids(schema: dict) -> set[str]:
 
 # --------------------------------------------------------------------------------------------- plan repair (pre-executor)
 def repair_plan_calls(calls: list[dict], user_text: str) -> list[dict]:
+    """Two independent repairs applied to every plan (LLM or fast path) before it reaches the executor: the brightness
+    floor (S8e), then the brightness-implies-power-on rule (S8f, see `_ensure_power_for_brightness`)."""
+    return _ensure_power_for_brightness(_lift_brightness_floor(calls, user_text))
+
+
+def _lift_brightness_floor(calls: list[dict], user_text: str) -> list[dict]:
     """A `set_state brightness=0` is never sent as-is unless the user named a level or `0`/"zero" themselves: turning a
     light on must never leave it dark. An explicit `power=false` call for the same endpoint in this plan is a genuine
     turn-off (brightness is moot), so it is left alone; everything else is repaired to `BRIGHTNESS_FLOOR`, never applied
@@ -104,6 +110,26 @@ def repair_plan_calls(calls: list[dict], user_text: str) -> list[dict]:
         if (isinstance(a, dict) and c.get("tool") == "set_state" and a.get("capability") == "brightness"
                 and a.get("value") == 0 and a.get("endpoint_id") not in power_false_eps):
             c = {**c, "args": {**a, "value": BRIGHTNESS_FLOOR}}
+        out.append(c)
+    return out
+
+
+def _ensure_power_for_brightness(calls: list[dict]) -> list[dict]:
+    """(S8f) Setting a dimmable light's brightness above 0 must also turn it on. Brightness 0 never implies power on
+    (a genuine dim-to-off is left alone). If this plan already says what power should be for that endpoint, that call
+    is left exactly as the model (or the fast path) wrote it: this never overrides an explicit power call, it only
+    fills in one that is missing. The power call always precedes the brightness call for the same endpoint."""
+    power_eps = {c["args"].get("endpoint_id") for c in calls if isinstance(c, dict) and isinstance(c.get("args"), dict)
+                 and c.get("tool") == "set_state" and c["args"].get("capability") == "power"}
+    out: list[dict] = []
+    for c in calls:
+        a = c.get("args") if isinstance(c, dict) else None
+        if (isinstance(a, dict) and c.get("tool") == "set_state" and a.get("capability") == "brightness"
+                and isinstance(a.get("value"), (int, float)) and not isinstance(a.get("value"), bool)
+                and a.get("value") > 0 and a.get("endpoint_id") not in power_eps):
+            ep = a.get("endpoint_id")
+            out.append({"tool": "set_state", "args": {"endpoint_id": ep, "capability": "power", "value": True}})
+            power_eps.add(ep)
         out.append(c)
     return out
 
