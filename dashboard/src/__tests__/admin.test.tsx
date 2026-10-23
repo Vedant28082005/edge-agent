@@ -40,7 +40,7 @@ describe("admin", () => {
     expect(screen.queryByText("alice")).not.toBeInTheDocument();
   });
 
-  it("approves a pending node with name, room, tags and risk", async () => {
+  it("approves a pending node with a name pre-filled from the announced type, and a room", async () => {
     let body: unknown;
     server.use(
             route("get", "/admin/nodes", () => ({ json: [pending] })),
@@ -51,12 +51,35 @@ describe("admin", () => {
     const { user } = await openApp("admin");
     await user.click(screen.getByRole("button", { name: "admin" }));
     await user.click(await screen.findByRole("button", { name: "Approve…" }));
+    expect(screen.getByLabelText("Name")).toHaveValue("Fan"); // pre-filled from the announced endpoint type
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled(); // room still empty
+    expect(screen.queryByText("ch1")).not.toBeInTheDocument(); // local_id is an internal id, never shown
+    await user.clear(screen.getByLabelText("Name"));
     await user.type(screen.getByLabelText("Name"), "Bedroom fan");
     await user.type(screen.getByLabelText("Room"), "bedroom");
-    await user.type(screen.getByLabelText("Tags"), "night, cool");
-    await user.selectOptions(screen.getByLabelText("Risk"), "confirm");
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Approve" }));
-    await waitFor(() => expect(body).toEqual({ endpoints: [{ local_id: "ch1", name: "Bedroom fan", room: "bedroom", aliases: [], tags: ["night", "cool"], risk: "confirm" }] }));
+    await waitFor(() => expect(body).toEqual({ endpoints: [{ local_id: "ch1", name: "Bedroom fan", room: "bedroom" }] }));
+  });
+
+  it("approve stays disabled until every name and room is filled, and shows the server's error", async () => {
+    server.use(
+            route("get", "/admin/nodes", () => ({ json: [pending] })),
+      route("get", "/admin/users", () => ({ json: users })),
+      route("post", "/admin/nodes/{node_id}/approve", () => ({ status: 403, json: { error: "forbidden", message: "This node was already approved by someone else." } })),
+      ...baseRoutes("admin"),
+    );
+    const { user } = await openApp("admin");
+    await user.click(screen.getByRole("button", { name: "admin" }));
+    await user.click(await screen.findByRole("button", { name: "Approve…" }));
+    await user.clear(screen.getByLabelText("Name"));
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
+    await user.type(screen.getByLabelText("Name"), "Bedroom fan");
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled(); // room still empty
+    await user.type(screen.getByLabelText("Room"), "bedroom");
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+    expect(await screen.findByText("This node was already approved by someone else.")).toBeInTheDocument();
   });
 
   it("forget: first call returns the usage list, only a second explicit confirm sends confirm=true", async () => {

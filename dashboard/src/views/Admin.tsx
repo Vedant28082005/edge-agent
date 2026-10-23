@@ -1,10 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import type { ActionLogEntry, ActionLogPage, ActionStatus, Endpoint, ForgetUsage, Node, Role, User } from "../api/types";
 import { explain } from "../errors";
 
+// The approve form shows the server's own error message verbatim when it sent one (e.g. a name
+// collision), falling back to the generic explanation only when it didn't.
+function explainApprove(e: unknown): string {
+  if (e instanceof ApiError) {
+    const body = e.body as { message?: string } | undefined;
+    if (body?.message) return body.message;
+  }
+  return explain(e);
+}
+
 const csv = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
 const ROLES: Role[] = ["admin", "member", "guest"];
+const capitalize = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
 // Role segmented control: guest = rooms-only + view-only (gateway.yaml Role enum: admin, member, guest).
 function RoleSegmented({ value, onChange, label }: { value: Role; onChange: (r: Role) => void; label: string }) {
@@ -49,39 +60,39 @@ function useLoad<T>(path: string) {
   return { data, err, reload };
 }
 
-function ApproveForm({ node, onDone }: { node: Node; onDone: () => void }) {
+function ApproveForm({ node, rooms, onDone }: { node: Node; rooms: string[]; onDone: () => void }) {
   const eps = node.endpoints ?? [];
-  const [rows, setRows] = useState(() => eps.map((e) => ({ local_id: e.local_id ?? "", name: "", room: "", aliases: "", tags: "", risk: "normal" as "normal" | "confirm" })));
+  const [rows, setRows] = useState(() => eps.map((e) => ({ local_id: e.local_id ?? "", name: e.type ? capitalize(e.type) : "", room: "" })));
   const [err, setErr] = useState<string | null>(null);
-  const set = (i: number, k: string, v: string) => setRows((r) => r.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+  const set = (i: number, k: "name" | "room", v: string) => setRows((r) => r.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+  const valid = rows.every((r) => r.name.trim() && r.room.trim());
+  const datalistId = `rooms-${node.node_id}`;
   const submit = async (ev: React.FormEvent) => {
     ev.preventDefault();
     try {
       await api("POST", `/admin/nodes/${node.node_id}/approve`, {
-        endpoints: rows.map((r) => ({ local_id: r.local_id, name: r.name, room: r.room, aliases: csv(r.aliases), tags: csv(r.tags), risk: r.risk })),
+        endpoints: rows.map((r) => ({ local_id: r.local_id, name: r.name, room: r.room })),
       });
       onDone();
-    } catch (e) { setErr(explain(e)); }
+    } catch (e) { setErr(explainApprove(e)); }
   };
   return (
     <form onSubmit={submit} className="stack">
+      <datalist id={datalistId}>{rooms.map((r) => <option key={r} value={r} />)}</datalist>
       {rows.map((r, i) => (
         <fieldset key={r.local_id || i}>
-          <legend>{eps[i]?.type ?? "endpoint"} · {r.local_id}</legend>
+          <legend>{eps[i]?.type ? capitalize(eps[i].type) : "Endpoint"}{eps.length > 1 ? ` ${i + 1}` : ""}</legend>
           <label>Name <input required maxLength={48} value={r.name} onChange={(e) => set(i, "name", e.target.value)} /></label>
-          <label>Room <input required maxLength={48} value={r.room} onChange={(e) => set(i, "room", e.target.value)} /></label>
-          <label>Aliases <input value={r.aliases} onChange={(e) => set(i, "aliases", e.target.value)} placeholder="comma separated" /></label>
-          <label>Tags <input value={r.tags} pattern="[a-z0-9_,\- ]*" onChange={(e) => set(i, "tags", e.target.value)} placeholder="a-z 0-9 _ - ; comma separated" /></label>
-          <label>Risk <select value={r.risk} onChange={(e) => set(i, "risk", e.target.value)}><option value="normal">normal</option><option value="confirm">confirm</option></select></label>
+          <label>Room <input required maxLength={48} list={datalistId} value={r.room} onChange={(e) => set(i, "room", e.target.value)} /></label>
         </fieldset>
       ))}
       {err && <p className="err" role="alert">{err}</p>}
-      <button className="primary">Approve</button>
+      <button className="primary" disabled={!valid}>Approve</button>
     </form>
   );
 }
 
-function NodeRow({ node, reload }: { node: Node; reload: () => void }) {
+function NodeRow({ node, rooms, reload }: { node: Node; rooms: string[]; reload: () => void }) {
   const [open, setOpen] = useState(false);
   const [usage, setUsage] = useState<ForgetUsage | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -112,7 +123,7 @@ function NodeRow({ node, reload }: { node: Node; reload: () => void }) {
         <button onClick={() => api("POST", `/admin/nodes/${node.node_id}/identify`, {}).catch((e) => setErr(explain(e)))}>Identify</button>
         <button className="danger" onClick={() => forget(false)}>Forget</button>
       </div>
-      {open && node.status === "pending" && <ApproveForm node={node} onDone={() => { setOpen(false); reload(); }} />}
+      {open && node.status === "pending" && <ApproveForm node={node} rooms={rooms} onDone={() => { setOpen(false); reload(); }} />}
       {usage && (
         <div className="conf" role="alertdialog" aria-label="Forget node">
           <p>{usage.message ?? `Used by ${usage.scenes ?? 0} scenes and ${usage.automations ?? 0} automations.`} Forgetting revokes the node&apos;s MQTT access.</p>
@@ -154,14 +165,14 @@ function EndpointEdit({ ep, reload, pending }: { ep: Endpoint; reload: () => voi
   );
 }
 
-function Nodes() {
+function Nodes({ rooms }: { rooms: string[] }) {
   const { data, err, reload } = useLoad<Node[]>("/admin/nodes");
   const sorted = [...(data ?? [])].sort((a, b) => Number(b.status === "pending") - Number(a.status === "pending"));
   return (
     <div>
       <h3>Nodes</h3>
       {err && <p className="err" role="alert">{err}</p>}
-      <ul className="plain">{sorted.map((n) => <NodeRow key={n.node_id} node={n} reload={reload} />)}</ul>
+      <ul className="plain">{sorted.map((n) => <NodeRow key={n.node_id} node={n} rooms={rooms} reload={reload} />)}</ul>
       {data?.length === 0 && <p className="muted">No nodes.</p>}
     </div>
   );
@@ -338,7 +349,7 @@ export function Admin() {
   return (
     <section>
       <h2>Admin</h2>
-      <Nodes />
+      <Nodes rooms={rooms} />
       <Users rooms={rooms} />
       <ActionLog endpointName={endpointName} />
     </section>
