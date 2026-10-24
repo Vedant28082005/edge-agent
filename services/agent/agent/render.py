@@ -88,6 +88,61 @@ def describe_reads(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
     return " ".join(parts)
 
 
+_QUESTION_UNIT = {"brightness": "%", "position": "%"}
+_QUESTION_LABEL = {"brightness": "brightness", "position": "position", "speed": "speed",
+                   "target_temp": "temperature", "temperature": "temperature"}
+
+
+def describe_question(outs: list[CallOutcome], reg: DeviceRegistry, question: tuple) -> str:
+    """(S8l) The one-line answer to a `resolve_question` fast-path match (`sched/resolver.py`), composed from the
+    verified `get_state` result(s): never a model draft, and never the multi-capability dump `describe_reads` gives
+    for a plain "device status" question. `question` is `(mode, capability, expect)`:
+    bool/lock/position_bool compare the live value against what the user asked ("is X on?"), "value" just states the
+    current reading ("what is X's brightness?"), "any" (no device named, e.g. "is anything on?") scans every state
+    this turn fetched. Empty string when the read failed or the capability is missing from the result (the caller
+    falls back to its own default text)."""
+    mode, cap, expect = question
+    states = [s for o in outs if o.ok and o.tool == "get_state" for s in (o.result.get("states") or []) if isinstance(s, dict)]
+    if not states:
+        return ""
+    if mode == "any":
+        verb = "on" if expect else "off"
+        hits = [s for s in states if s.get("online") and s.get("values", {}).get(cap) is expect]
+        if not hits:
+            return f"No, nothing is {verb}." if expect else "No, everything is off."
+        shown = ", ".join(name(reg, s.get("endpoint_id")) for s in hits[:3])
+        more = f" and {len(hits) - 3} more" if len(hits) > 3 else ""
+        plural = "is" if len(hits) == 1 else "are"
+        return f"Yes, {shown}{more} {plural} {verb}."
+    s = states[0]
+    nm = name(reg, s.get("endpoint_id"))
+    if not s.get("online"):
+        return f"{nm} is offline."
+    vals = s.get("values") or {}
+    actual = vals.get(cap)
+    if mode == "bool":
+        if not isinstance(actual, bool):
+            return ""
+        extra = f" at {vals['brightness']}%" if actual and cap == "power" and isinstance(vals.get("brightness"), (int, float)) else ""
+        return f"{'Yes' if actual == expect else 'No'}, {nm} is {'on' if actual else 'off'}{extra}."
+    if mode == "lock":
+        if not isinstance(actual, str):
+            return ""
+        return f"{'Yes' if actual == expect else 'No'}, {nm} is {actual}."
+    if mode == "position_bool":
+        if not isinstance(actual, (int, float)) or isinstance(actual, bool):
+            return ""
+        is_open = actual > 0
+        return f"{'Yes' if is_open == expect else 'No'}, {nm} is {'open' if is_open else 'closed'} ({int(actual)}%)."
+    if mode == "value":
+        if actual is None:
+            return ""
+        unit = _QUESTION_UNIT.get(cap, "")
+        label = _QUESTION_LABEL.get(cap, cap)
+        return f"{nm} {label} is {fmt_value(actual)}{unit}."
+    return ""
+
+
 def ambient_clarifying_text(domain: str, reg: DeviceRegistry) -> str:
     """(S8h) An ambient complaint that named no device and no number: ask, naming the real devices that could
     answer it rather than guessing one."""

@@ -78,6 +78,9 @@ async def test_budget_max_calls(tmp_path):
 
 
 async def test_budget_max_steps_stops_a_read_loop(tmp_path):
+    """(S8l) This is the exact bug the question loop guard fixes: a vague status question whose model kept
+    re-issuing the same read instead of stopping (it has no text channel to say "I'm done" with, S8i) used to burn
+    through the whole step budget; now the turn is answered after the FIRST verified read, never a second round."""
     e = await make_env(tmp_path, max_steps=2)
     try:
         n = []
@@ -88,6 +91,29 @@ async def test_budget_max_steps_stops_a_read_loop(tmp_path):
 
         e.llm.script.append((".", always_read))
         ctx, ev = await e.chat("what is going on")
+        assert len(n) == 1                                    # the loop guard stops after the first verified read
+        final = one(ev, "final")
+        assert names(ev)[-1] == "final" and "limit" not in final["text"]
+        assert "Fan" in final["text"] or "Ceiling light" in final["text"]
+    finally:
+        await e.close()
+
+
+async def test_budget_max_steps_stops_a_non_question_action_loop(tmp_path):
+    """The loop guard above only shortcuts QUESTION turns on a verified read; a non-question request whose model
+    keeps issuing fresh (non-duplicate) reads every round still runs out after exactly `max_steps` rounds -- the
+    budget cap itself is unchanged."""
+    e = await make_env(tmp_path, max_steps=2)
+    try:
+        n = []
+        eps = ["ep_a1000001", "ep_a1000002", "ep_a1000006"]
+
+        def always_read(messages):
+            n.append(1)
+            return {"calls": [{"tool": "get_state", "args": {"endpoint_id": eps[(len(n) - 1) % len(eps)]}}], "say": "again"}
+
+        e.llm.script.append((".", always_read))
+        ctx, ev = await e.chat("turn on whichever light needs it")
         assert len(n) == 2                                    # exactly max_steps planner rounds
         assert names(ev)[-1] == "final" and "limit" in one(ev, "final")["text"]
     finally:
@@ -184,9 +210,20 @@ async def test_only_five_tools_can_be_called(env):
 
 
 async def test_read_loop_feeds_results_back_and_answers(env):
-    ctx, ev = await env.chat("what is the temperature in the bedroom")
-    assert [c["tool"] for c in env.fake.calls if c["tool"] != "list_devices"] == ["read_sensor"]
-    assert "24.5" in one(ev, "final")["text"]
+    """Not a question ("turn ... once ..."): the loop guard (S8l) only shortcuts QUESTION turns on a verified
+    read, so a genuine read-then-act round trip still gets its second LLM round, with the read fed back as
+    `Tool results:`."""
+    def reply(messages, state={"n": 0}):
+        state["n"] += 1
+        if state["n"] > 1:
+            return {"calls": [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000002", "capability": "power", "value": False}}],
+                    "say": "Turning off the fan, it's cold enough."}
+        return {"calls": [{"tool": "read_sensor", "args": {"endpoint_id": "ep_a1000003", "capability": "temperature"}}],
+                "say": "Checking."}
+
+    env.llm.script.append((r"cold enough", reply))
+    ctx, ev = await env.chat("turn off the fan once it's cold enough in the bedroom")
+    assert [c["tool"] for c in env.fake.calls if c["tool"] != "list_devices"] == ["read_sensor", "set_state"]
     assert len(env.llm.requests) == 2
     second = env.llm.requests[1]
     assert second[0] == env.llm.requests[0][0]                   # prefix message identical across rounds

@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..devices import Device, DeviceRegistry
-from ..schema import _is_off_like, ensure_power_dependency, validate_call
+from ..schema import _ACTION_VERBS, _is_off_like, ensure_power_dependency, validate_call
 from .config import SchedConfig
 from .text import (FILLER, NEGATION, PREP, QUANT, QUESTION, RELATIVE, TEMPORAL, TYPE_SYN, is_type_word, normalise,
                    score_device, stem, strip_polite)
@@ -51,6 +51,15 @@ _PRONOUN = {"it", "them", "this", "that"}
 _SCENE_WORDS = {"scene", "mode", "routine", "preset"}
 _SCENE_VERBS = {"run", "play", "start", "activate", "launch", "trigger", "set", "enable", "execute"}
 _STATUS_WORDS = {"status", "state"}
+# (S8l) yes/no and attribute status questions ("is X on/off/open/locked?", "what is X's brightness/temperature?",
+# "how bright is X?", "is anything on?") -- distinct from `_STATUS_WORDS` ("what is the device status"), which
+# dumps every capability; these name one capability and compose a one-line answer for it.
+_ON_OFF_WORDS = {"on": True, "off": False}
+_LOCK_STATE_WORDS = {"locked": "locked", "unlocked": "unlocked"}
+_OPEN_CLOSED_WORDS = {"open": True, "opened": True, "closed": False, "shut": False}
+_ATTR_CAP_WORDS = {"brightness": "brightness", "bright": "brightness", "speed": "speed",
+                   "temperature": "temperature", "temp": "temperature", "position": "position"}
+_ANY_WORDS = {"anything", "anyone", "any"}
 
 
 @dataclass
@@ -65,6 +74,9 @@ class Resolution:
     relative: tuple | None = None                # (endpoint_id, capability, direction, amount|None, pct) for RELATIVE:
                                                   # the current value is unknown here (no live state, no I/O in the
                                                   # resolver), so the scheduler fetches it and computes the target
+    question: tuple | None = None                # (mode, capability, expect) for `resolve_question`: how the
+                                                  # scheduler should compose the answer from the get_state result(s)
+                                                  # it still has to fetch (no live state here either)
 
     @property
     def is_plan(self) -> bool:
@@ -158,6 +170,82 @@ class FastPathResolver:
             eps = [winners[0].endpoint_id]
         calls = [{"tool": "get_state", "args": {"endpoint_id": ep}} for ep in eps]
         return Resolution(PLAN, calls, "", 1.0, "status_question", "status", [(ep, 1.0) for ep in eps[:5]])
+
+    # ------------------------------------------------------------------------------------------ yes/no & attribute questions (S8l)
+    def resolve_question(self, text: str, reg: DeviceRegistry) -> Resolution | None:
+        """"is the ceiling light on?" / "is the front door locked?" / "is the blinds open?" / "what is the fan
+        speed?" / "how bright is the lamp?" / "is anything on?" -- a yes/no or single-capability question, answered
+        with get_state and no LLM (and never a write: these calls are always reads). None (fall through to
+        `resolve_status` / the router / the LLM) when the text is not a question, names no recognised capability
+        word, carries an imperative verb too (a mixed question+command must still reach the LLM so the command
+        half is not silently dropped), or the target device is unmatched/ambiguous."""
+        if not reg.devices:
+            return None
+        s = strip_polite(normalise(text))
+        toks = s.split()
+        if not toks or not (toks[0] in QUESTION or text.strip().endswith("?")):
+            return None
+        tset = set(toks)
+        bool_word = next((w for w in _ON_OFF_WORDS if w in tset), None)
+        lock_word = next((w for w in _LOCK_STATE_WORDS if w in tset), None)
+        open_word = next((w for w in _OPEN_CLOSED_WORDS if w in tset), None)
+        attr_word = next((w for w in _ATTR_CAP_WORDS if w in tset), None)
+        # "open"/"closed" double as both the question adjective asked here and an imperative verb ("open the
+        # blinds"); the question word itself never disqualifies its own question, only some OTHER action verb
+        # ("is the blinds open, lock the door too") does.
+        if tset & _ACTION_VERBS - {bool_word, lock_word, open_word}:
+            return None
+        if bool_word is not None and tset & _ANY_WORDS:
+            eps = sorted(d.endpoint_id for d in reg.devices.values() if d.cap("power") and d.cap("power").kind == "actuator")
+            if not eps or len(eps) > self.cfg.fast_max_group:
+                return None
+            calls = [{"tool": "get_state", "args": {"endpoint_id": ep}} for ep in eps]
+            return Resolution(PLAN, calls, "", 1.0, "any_bool_question", "question", [(ep, 1.0) for ep in eps[:5]],
+                              question=("any", "power", _ON_OFF_WORDS[bool_word]))
+        if not (bool_word or lock_word or open_word or attr_word):
+            return None
+        drop = set(_ON_OFF_WORDS) | set(_LOCK_STATE_WORDS) | set(_OPEN_CLOSED_WORDS) | set(_ATTR_CAP_WORDS)
+        xs = self._clean([t for t in toks if t not in QUESTION and t not in drop])
+        if not xs:
+            return None
+        scored = [(sc, d) for d in reg.devices.values() for sc, ident in (score_device(xs, d),) if sc > 0 and ident]
+        scored.sort(key=lambda t: (-t[0], t[1].endpoint_id))
+        if not scored:
+            return None
+        top = scored[0][0]
+        if top < self.cfg.fast_threshold:
+            return None
+        winners = [d for sc, d in scored if sc >= top - 1e-9]
+        runner = max((sc for sc, d in scored if sc < top - 1e-9), default=0.0)
+        if len(winners) > 1 or top - runner < self.cfg.fast_margin:
+            return None
+        d = winners[0]
+        if bool_word is not None:
+            c = d.cap("power")
+            if c is None or c.kind != "actuator" or c.type != "bool":
+                return None
+            mode, cap, expect = "bool", "power", _ON_OFF_WORDS[bool_word]
+        elif lock_word is not None:
+            c = d.cap("lock")
+            if c is None:
+                return None
+            mode, cap, expect = "lock", "lock", _LOCK_STATE_WORDS[lock_word]
+        elif open_word is not None:
+            c = d.cap("position")
+            if c is None:
+                return None
+            mode, cap, expect = "position_bool", "position", _OPEN_CLOSED_WORDS[open_word]
+        else:
+            cap = _ATTR_CAP_WORDS[attr_word]
+            c = d.cap(cap)
+            if c is None and cap == "temperature":
+                cap, c = "target_temp", d.cap("target_temp")
+            if c is None:
+                return None
+            mode, expect = "value", None
+        reason = "attribute_question" if mode == "value" else "bool_question"
+        return Resolution(PLAN, [{"tool": "get_state", "args": {"endpoint_id": d.endpoint_id}}], "", top, reason,
+                          "question", [(d.endpoint_id, top)], question=(mode, cap, expect))
 
     # ------------------------------------------------------------------------------------------ intent
     def _parse(self, s: str, toks: list[str], reg: DeviceRegistry) -> _Cmd | str:
