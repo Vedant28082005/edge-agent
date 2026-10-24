@@ -41,7 +41,8 @@ class LlmResult:
 class Llm(Protocol):
     constrained: bool
 
-    async def complete(self, messages: list[dict], schema: dict | None) -> LlmResult: ...
+    async def complete(self, messages: list[dict], schema: dict | None, max_tokens: int | None = None,
+                       repeat_penalty: float | None = None) -> LlmResult: ...
 
 
 class LlmClient:
@@ -67,14 +68,19 @@ class LlmClient:
         if self._own_http:
             await self._http.aclose()
 
-    def payload(self, messages: list[dict], schema: dict | None) -> dict:
+    def payload(self, messages: list[dict], schema: dict | None, max_tokens: int | None = None,
+                repeat_penalty: float | None = None) -> dict:
         body: dict = {"model": self.model, "messages": messages, "temperature": 0, "top_k": 1, "seed": 0,
-                      "max_tokens": self.max_tokens, "stream": False, **cache_fields(self.prefix_cache, self.id_slot)}
+                      "max_tokens": max_tokens if max_tokens is not None else self.max_tokens, "stream": False,
+                      **cache_fields(self.prefix_cache, self.id_slot)}
+        if repeat_penalty is not None:
+            body["repeat_penalty"] = repeat_penalty
         if self.constrained and schema is not None:
             self.constraint.apply(body, schema)
         return body
 
-    async def complete(self, messages: list[dict], schema: dict | None) -> LlmResult:
+    async def complete(self, messages: list[dict], schema: dict | None, max_tokens: int | None = None,
+                       repeat_penalty: float | None = None) -> LlmResult:
         if self._slot.locked() and self._waiting >= self._max_queued:
             raise LlmBusy("language model busy")
         self._waiting += 1
@@ -84,7 +90,8 @@ class LlmClient:
             self._waiting -= 1
         try:
             try:
-                r = await self._http.post(self._base + "/v1/chat/completions", json=self.payload(messages, schema))
+                r = await self._http.post(self._base + "/v1/chat/completions",
+                                          json=self.payload(messages, schema, max_tokens, repeat_penalty))
             except httpx.HTTPError as e:
                 raise LlmError(f"llama-server unreachable: {type(e).__name__}") from None
             if r.status_code == 503:

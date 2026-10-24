@@ -318,7 +318,8 @@ class ScriptedLLM:
         self.delay = 0.0
         self.script: list[tuple[str, Any]] = []         # optional overrides: (regex on user text, reply dict|callable)
 
-    async def complete(self, messages: list[dict], schema: dict | None) -> LlmResult:
+    async def complete(self, messages: list[dict], schema: dict | None, max_tokens: int | None = None,
+                       repeat_penalty: float | None = None) -> LlmResult:
         self.requests.append(messages)
         if self.delay:
             await asyncio.sleep(self.delay)

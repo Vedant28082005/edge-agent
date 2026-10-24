@@ -106,10 +106,11 @@ def compose_final(say: str, outs: list[CallOutcome], reg: DeviceRegistry) -> str
 class ChatService:
     def __init__(self, registry: DeviceRegistry, builder: PromptBuilder, planner: Planner, executor: Executor,
                  store: Store, metrics: Metrics, settle_wait_s: float = 150.0, max_queued_turns: int = 2,
-                 sched: Scheduler | None = None, views: ScopedViews | None = None) -> None:
+                 sched: Scheduler | None = None, views: ScopedViews | None = None, hb_table_provider=None) -> None:
         self.registry, self.builder, self.planner, self.executor = registry, builder, planner, executor
         self.views = views or ScopedViews(registry, builder)
         self.sched = sched
+        self.hb_table_provider = hb_table_provider     # homebench only: Scope -> homebench.HomebenchTable
         self.store, self.metrics, self.settle_wait_s = store, metrics, settle_wait_s
         self._active = 0
         self._max_active = 1 + max_queued_turns
@@ -243,7 +244,13 @@ class ChatService:
             say = ""
             retried_validation = False
             retried_polarity = False
-            while True:
+            hb_table = self.hb_table_provider(ctx.scope) if (self.hb_table_provider
+                                                             and view.builder.format == "homebench") else None
+            # (homebench) the fine-tuned model was never trained on state questions -- those are answered by the
+            # fast path / read tools upstream (`sched.route`), never by calling the LLM here.
+            homebench_question = view.builder.format == "homebench" and is_question_intent(text)
+            hb_failures: list[str] = []
+            while not homebench_question:
                 if not ctx.budget.take_step():
                     if not outs:
                         await ctx.emit("error", {"code": "budget_exceeded", "message": "request budget exceeded"})
@@ -278,6 +285,8 @@ class ChatService:
                     trace.add_stage("llm_ms", (time.monotonic() - llm_t0) * 1000)
                 if self.sched and trace is not None:
                     self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained), plan.raw)
+                if plan.failures:        # homebench only: error_input / unparsed parts, reported alongside whatever ran
+                    hb_failures.extend(plan.failures)
                 if not plan.calls:
                     # the model has no text channel (S8i): either this is "I'm done" after a read earlier this turn
                     # (narrate it), an ambient complaint the model gave up on (act/ask on it directly rather than
@@ -310,7 +319,7 @@ class ChatService:
                             # one candidate device but the plan moved the wrong way: give the model one retry
                             # with the contradiction stated before falling back to a clarifying question.
                             retried_polarity = True
-                            extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases)}]
+                            extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases, hb_table)}]
                             tool_results = ("Contradiction: this plan moves the opposite way from what the user's "
                                             "wording asked for. Reconsider the direction, or ask instead.")
                             continue
@@ -333,7 +342,7 @@ class ChatService:
                     # give the model one retry with the reason before falling back, instead of reporting a failure
                     # for a mistake the model can usually fix itself on the next round.
                     retried_validation = True
-                    extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases)}]
+                    extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases, hb_table)}]
                     tool_results = "\n".join(f"{o.tool} rejected: {o.note or 'invalid'}" for o in rejected)
                     continue
                 reads = [o for o in new if o.tool in READ_TOOLS and o.ok]
@@ -342,9 +351,13 @@ class ChatService:
                     # built from the verified results, never the model's (it has none to draft, S8i).
                     say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or say
                     break
-                extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases)}]
+                extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases, hb_table)}]
                 tool_results = "\n".join(render_result(o.tool, o.args, o.result, reg, aliases) for o in new if o.ok)
+            if homebench_question:
+                say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
             final = compose_final(say, outs, reg)
+            if hb_failures:
+                final += " " + " ".join(f"Couldn't do this part: {f}." for f in hb_failures)
         if ctx.images and route not in ("vlm", "yolo"):        # those routes already answered using the image
             final += " (I can't analyse images yet.)"
         words = final.split(" ")

@@ -16,6 +16,7 @@ from .devices import DeviceRegistry, RegistryLoader
 from .events import (HUB_NODE_STATUS, HUB_REGISTRY_CHANGED, HUB_SETTLE_TIMEOUT, HUB_SETTLED, HUB_STATE, USER_MESSAGE,
                      Event, EventBus, RulesEngine)
 from .executor import Executor, Metrics
+from . import homebench
 from .hub_client import HubEventStream, McpClient
 from .llm import Llm, LlmError
 from .evring import EventRing, RingNotifier
@@ -61,7 +62,7 @@ class Agent:
         self.llm.constraint = make_backend(self.sched_cfg.constraint_backend)
         self.llm.prefix_cache, self.llm.id_slot = self.sched_cfg.prefix_cache, self.sched_cfg.id_slot
         self.hub = hub
-        self.builder = PromptBuilder(self.registry)
+        self.builder = PromptBuilder(self.registry, format=cfg.llm_format)
         self.views = ScopedViews(self.registry, self.builder)
         self._last_scope: OrderedDict[str, tuple[str, Scope, float]] = OrderedDict()    # user -> (role, scope, monotonic ts)
         self.loader = RegistryLoader(hub, self.registry, self._on_registry_changed) if hub else None
@@ -69,10 +70,13 @@ class Agent:
         self.settles = SettleTable(self.notifier, cfg.settle_wait_s)
         self.executor = Executor(hub, self.registry, self.store, self.confirmations, self.settles, self.notifier,
                                  self.metrics) if hub else None
-        self.planner = Planner(llm, self.plan_schema, self.metrics)
+        schema_provider = self.hb_table if cfg.llm_format == "homebench" else self.plan_schema
+        self.planner = Planner(llm, schema_provider, self.metrics, format=cfg.llm_format)
         self.sched = Scheduler(self.sched_cfg, self.registry, self.executor, self.store, self.bus, self.views)
+        hb_table_provider = self.hb_table if cfg.llm_format == "homebench" else None
         self.chat = ChatService(self.registry, self.builder, self.planner, self.executor, self.store, self.metrics,
-                                cfg.settle_wait_s, cfg.max_queued_turns, self.sched, self.views) if self.executor else None
+                                cfg.settle_wait_s, cfg.max_queued_turns, self.sched, self.views,
+                                hb_table_provider) if self.executor else None
         self.rules = RulesEngine(self.store, self._run_rule_action)
         self.stream = stream
         self._wire_bus()
@@ -104,6 +108,10 @@ class Agent:
         """Constrained-decoding schema (+ GBNF) for a scope, rebuilt only when the hub's registry_version (else the registry's
         decoding-relevant content) changed."""
         return self.sched.schema(scope)
+
+    def hb_table(self, scope: Scope = UNRESTRICTED) -> homebench.HomebenchTable:
+        """homebench format's table, for the same scope the prompt was built for (`views.get(scope)`'s registry)."""
+        return homebench.build_table(self.views.get(scope).registry)
 
     def set_flags(self, **flags: bool) -> None:
         """Runtime ablation switches (S10): fast_path, router, constrained_decoding, prefix_cache."""
