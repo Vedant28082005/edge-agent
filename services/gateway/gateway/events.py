@@ -282,13 +282,16 @@ async def refresh_rooms(hub, bc: Broadcaster) -> None:
                     bc.node_of[e["endpoint_id"]] = e["node_id"]
 
 
-async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Event, retry_s: float = 1.0, assigned=None, actions=None) -> None:
+async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Event, retry_s: float = 1.0, assigned=None, actions=None,
+                             auto=None) -> None:
     last_id: str | None = None
     delay = retry_s
     while not stop.is_set():
         try:
             await refresh_rooms(hub, bc)
             await refresh_scenes(hub, bc)
+            if auto is not None:
+                await auto.resync()
             hdr = {"Last-Event-ID": last_id} if last_id else None
             async for fid, ev, data in hub.sse("/events", params={"types": HUB_TYPES}, headers=hdr):
                 delay = retry_s
@@ -300,6 +303,8 @@ async def run_hub_subscriber(hub: JsonClient, bc: Broadcaster, stop: asyncio.Eve
                     continue
                 if ev == "hello" or not isinstance(env, dict):
                     continue
+                if auto is not None and env.get("type") in ("state", "node_status", "registry_changed"):
+                    await auto.on_hub_event(env)
                 if actions is not None and env.get("type") in ("action_settled", "action_settle_timeout"):
                     note_settle(actions, env.get("type"), env.get("data"))
                 if env.get("type") == "registry_changed":

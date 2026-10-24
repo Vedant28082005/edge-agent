@@ -50,6 +50,8 @@ class Config:
     rate_limits: dict = field(default_factory=lambda: {"chat": [30, 60], "voice": [20, 60], "confirm": [30, 60],
                                                        "ticket": [10, 60], "ws": [20, 60], "ws_msg": [20, 10]})
     agent_scope_fallback: bool = False             # agent < 1.3.0 rejects allowed_rooms/allowed_scenes: retry without them (false = fail closed)
+    household_tz: str = "UTC"                      # IANA zone for time_of_day / schedule / time_window and "per day" limits
+    automation_tick_s: float = 1.0                 # timer resolution of the rules engine
     mock: bool = False
 
     def __post_init__(self) -> None:

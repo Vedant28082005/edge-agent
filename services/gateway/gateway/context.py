@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 
 from .actionlog import ActionLog
+from .automations import Automations, run_engine
 from .auth import AuthService, LoginLimiter
 from .confirmations import Confirmations
 from .config import Config
@@ -41,12 +42,14 @@ class Ctx:
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     tasks: list = field(default_factory=list)
     agent_push: bool = True                       # subscribe to the agent GET /v1/events (agent-internal.yaml)
+    auto: Automations | None = None
     autostart: bool = False                       # start background subscribers from the app lifespan
 
     def start(self, retry_s: float = 1.0) -> None:
         self.stop = asyncio.Event()
         self.tasks = [asyncio.create_task(run_hub_subscriber(self.hub, self.bc, self.stop, retry_s, self.confirm.assigned,
-                                                          self.actions))]
+                                                          self.actions, self.auto))]
+        self.tasks.append(asyncio.create_task(run_engine(self.auto, self.stop, self.cfg.automation_tick_s)))
         if self.agent_push:
             self.tasks.append(asyncio.create_task(run_agent_subscriber(self.agent, self.bc, self.confirm, self.stop, retry_s, self.actions)))
         self.tasks.append(asyncio.create_task(self._sweeper(self.stop)))
@@ -102,4 +105,6 @@ def build_ctx(cfg: Config, *, transports: dict | None = None, hub_secret: str | 
     install_log_redaction()
     limiter_ = RateLimiter({k: tuple(v) for k, v in cfg.rate_limits.items()}, clock)
     tickets = WsTickets(cfg.ticket_ttl_s, clock)
-    return Ctx(cfg, db, auth, hub, agent, vision, yolo, media, bc, confirm, profiles, limiter_, tickets, actions, clock, agent_push=agent_push)
+    auto = Automations(db, hub, auth, bc, actions, cfg, clock)
+    return Ctx(cfg, db, auth, hub, agent, vision, yolo, media, bc, confirm, profiles, limiter_, tickets, actions, clock,
+               agent_push=agent_push, auto=auto)

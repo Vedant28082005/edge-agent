@@ -34,7 +34,7 @@ def effective_security(op: dict) -> list:
 
 
 def test_spec_version_known():
-    assert SPEC["info"]["version"] == "2.11.0", "gateway.yaml changed: re-check the implementation, then update this pin"
+    assert SPEC["info"]["version"] == "2.12.0", "gateway.yaml changed: re-check the implementation, then update this pin"
 
 
 def test_every_public_route_exists_and_no_extra(gw):
@@ -58,7 +58,7 @@ def test_every_public_route_exists_and_no_extra(gw):
 def test_auth_requirement(gw, path, method, op):
     sec = effective_security(op)
     url = path.replace("{endpoint_id}", "ep_00000001").replace("{node_id}", "esp32-aabbccddeeff").replace("{scene_id}", "sc_00000001") \
-        .replace("{request_id}", "x").replace("{memory_id}", "m1").replace("{user_id}", "u1")
+        .replace("{request_id}", "x").replace("{rule_id}", "ru_00000001").replace("{memory_id}", "m1").replace("{user_id}", "u1")
     r = gw.pub.request(method.upper(), url, json={})
     if sec == []:
         assert r.status_code != 401 or op["operationId"] in ("login", "refresh")      # public ops reject creds, not the missing header

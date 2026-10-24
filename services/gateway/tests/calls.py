@@ -28,6 +28,19 @@ def own_scene(gw, uid: str) -> str:
     return sid
 
 
+RULE = {"name": "Lamp note", "source": "user", "cooldown_s": 60, "max_runs_per_day": 10,
+        "trigger": {"type": "device_state_change", "endpoint_id": "ep_00000001", "capability": "power", "to": True},
+        "action": {"type": "notify", "text": "Bedroom light turned on"}}
+
+
+def make_rule(gw, role: str | None, **over) -> str:
+    """A rule owned by `role` (admin when the role cannot create rules)."""
+    who = role if role in ("admin", "member") else "admin"
+    r = gw.pub.post("/automations", json={**RULE, **over}, headers=gw.h(who))
+    assert r.status_code == 201, r.text
+    return r.json()["rule_id"]
+
+
 def new_user(gw) -> str:
     u = gw.ctx.auth.create(f"tmp{next(_n)}", "x", "member", ["Bedroom"])
     return u.user_id
@@ -83,10 +96,25 @@ def build(gw, op: str, role: str | None) -> dict:
                                                               "rooms": ["Hall"]}}, 201),
         "adminPatchUser": ("PATCH", None, {"json": {"rooms": ["Kitchen"], "disabled": False}}, 200),
         "adminDeleteUser": ("DELETE", None, {}, 204),
+        "listAutomations": ("GET", "/automations", {}, 200),
+        "createAutomation": ("POST", "/automations", {"json": RULE}, 201),
+        "getAutomation": ("GET", None, {}, 200),
+        "updateAutomation": ("PUT", None, {"json": {**RULE, "name": "Renamed"}}, 200),
+        "deleteAutomation": ("DELETE", None, {}, 204),
+        "approveAutomation": ("POST", None, {}, 200),
+        "disableAutomation": ("POST", None, {}, 200),
+        "listAutomationRuns": ("GET", None, {}, 200),
+        "listNotifications": ("GET", "/notifications", {}, 200),
+        "markNotificationsRead": ("POST", "/notifications/read", {"json": {"notification_ids": ["nt_000000000000"]}}, 204),
+        "adminGetAutomationKillSwitch": ("GET", "/admin/automations/kill-switch", {}, 200),
+        "adminSetAutomationKillSwitch": ("PUT", "/admin/automations/kill-switch", {"json": {"automations_enabled": True}}, 200),
     }[op]
     method, url, kw, status = t
     if op in ("updateScene", "deleteScene"):
         url = f"/scenes/{own_scene(gw, uid)}"
+    elif op in ("getAutomation", "updateAutomation", "deleteAutomation", "approveAutomation", "disableAutomation", "listAutomationRuns"):
+        url = f"/automations/{make_rule(gw, role)}" + {"approveAutomation": "/approve", "disableAutomation": "/disable",
+                                                      "listAutomationRuns": "/runs"}.get(op, "")
     elif op == "declineConfirmation":
         url = f"/confirmations/{pending_request(gw, uid)}/decline"
     elif op == "retryConfirmation":
