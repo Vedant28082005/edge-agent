@@ -1,0 +1,27 @@
+{
+  "rule_id": "ru_0a1b2c3d",
+  "name": "Night hall light",
+  "owner": "u_admin1",
+  "enabled": true,
+  "trigger": {
+    "type": "time_of_day",
+    "at": "25:00"
+  },
+  "action": {
+    "type": "set_state",
+    "endpoint_id": "ep_3fa91c02",
+    "capability": "power",
+    "value": false
+  },
+  "cooldown_s": 300,
+  "max_runs_per_day": 4,
+  "status": "approved",
+  "created_by": "user",
+  "approved_by": "u_admin1",
+  "approved_at": 1767225600,
+  "created_at": 1767225600,
+  "updated_at": 1767225600,
+  "rooms": [
+    "hall"
+  ]
+}

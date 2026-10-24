@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "ts": 1767225600,
+      "user_id": "household",
+      "source": "automation",
+      "kind": "set_state",
+      "endpoint_id": "ep_3fa91c02",
+      "capability": "power",
+      "value": false,
+      "status": "done"
+    }
+  ],
+  "next_cursor": null
+}

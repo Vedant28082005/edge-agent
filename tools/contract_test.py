@@ -76,6 +76,11 @@ OPENAPI_SUITES = {
     "confirmation-required": "ConfirmationRequired",
     "ws-message": "WsMessage",
     "sse-event": "SseEvent",
+    "automation-rule": "AutomationRule",
+    "automation-rule-input": "AutomationRuleInput",
+    "automation-run-page": "AutomationRunPage",
+    "automation-kill-switch": "AutomationKillSwitch",
+    "notification": "Notification",
 }
 spec_for_refs = dict(spec)
 # ConsumeResponse = granted or denied
@@ -132,6 +137,46 @@ if "/admin/action-log" not in spec["paths"] or spec["paths"]["/admin/action-log"
     failures += 1
     print("FAIL gateway /admin/action-log must exist and be admin-gated")
 print("ok   gateway Route enum, Capability.settle_s, admin action-log checked")
+
+# automation layer (contracts/automations.md): guests never, kill switch admin-only, closed rule, no risk/token surface
+_AUTO_OPS = {
+    ("/automations", "get"), ("/automations", "post"), ("/automations/{rule_id}", "get"), ("/automations/{rule_id}", "put"),
+    ("/automations/{rule_id}", "delete"), ("/automations/{rule_id}/approve", "post"), ("/automations/{rule_id}/disable", "post"),
+    ("/automations/{rule_id}/runs", "get"), ("/notifications", "get"), ("/notifications/read", "post"),
+}
+for _path, _m in sorted(_AUTO_OPS):
+    _op = spec["paths"].get(_path, {}).get(_m)
+    if _op is None:
+        failures += 1
+        print(f"FAIL gateway lacks {_m.upper()} {_path}")
+    elif _op.get("x-forbidden-roles") != ["guest"] or "403" not in _op["responses"] or _op.get("security", [{"bearerAuth": []}]) == []:
+        failures += 1
+        print(f"FAIL gateway {_m.upper()} {_path}: must be JWT-authenticated, x-forbidden-roles [guest], with a 403")
+for _m in ("get", "put"):
+    _op = spec["paths"].get("/admin/automations/kill-switch", {}).get(_m)
+    if _op is None or _op.get("x-required-role") != "admin":
+        failures += 1
+        print(f"FAIL gateway kill switch {_m.upper()} must exist and be admin-gated")
+_inp = _gs["AutomationRuleInput"]["properties"]
+for _forbidden in ("status", "created_by", "owner", "enabled", "approved_by", "approved_at", "rule_id", "confirmation_token", "risk"):
+    if _forbidden in _inp:
+        failures += 1
+        print(f"FAIL AutomationRuleInput must not accept {_forbidden}")
+if set(_gs["AutomationAction"]["oneOf"][i]["properties"]["type"]["const"] for i in range(2)) != {"notify", "set_state"}:
+    failures += 1
+    print("FAIL AutomationAction must be exactly notify | set_state")
+if set(_gs["AutomationStatus"]["enum"]) != {"proposed", "approved", "disabled"}:
+    failures += 1
+    print("FAIL AutomationStatus enum")
+if {o["properties"]["type"]["const"] for o in _gs["AutomationTrigger"]["oneOf"]} != {
+        "device_state_change", "device_offline", "duration_in_state", "time_of_day", "schedule"}:
+    failures += 1
+    print("FAIL AutomationTrigger must be exactly the five documented types")
+_sm = {m["properties"]["type"]["const"] for m in _gs["WsMessage"]["oneOf"] if "type" in m.get("properties", {})}
+if not {"automations_changed"} <= _sm:
+    failures += 1
+    print("FAIL WsMessage lacks automations_changed")
+print("ok   gateway automation API checked")
 
 # internal section: only service-secret auth, never user JWT, never /admin
 for path, item in spec["paths"].items():

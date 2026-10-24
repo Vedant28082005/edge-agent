@@ -1,0 +1,9 @@
+{
+  "notification_id": "nt_ba9876543210",
+  "ts": 1767225600,
+  "level": "kill_switch",
+  "source": "system",
+  "rule_id": null,
+  "endpoint_id": null,
+  "text": "Automations switched off by an admin."
+}

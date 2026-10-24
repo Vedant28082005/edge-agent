@@ -1,0 +1,10 @@
+{
+  "notification_id": "nt_0123456789ab",
+  "ts": 1767225600,
+  "level": "warning",
+  "source": "automation:ru_0a1b2c3d",
+  "rule_id": "ru_0a1b2c3d",
+  "endpoint_id": "ep_5c6d7e8f",
+  "text": "Back door opened at night",
+  "read": false
+}

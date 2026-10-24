@@ -1,0 +1,41 @@
+{
+  "rule_id": "ru_33333333",
+  "name": "Light left on",
+  "owner": "u_admin1",
+  "enabled": true,
+  "trigger": {
+    "type": "duration_in_state",
+    "endpoint_id": "ep_3fa91c02",
+    "capability": "power",
+    "value": true,
+    "for_s": 7200
+  },
+  "action": {
+    "type": "set_state",
+    "endpoint_id": "ep_3fa91c02",
+    "capability": "power",
+    "value": false
+  },
+  "cooldown_s": 300,
+  "max_runs_per_day": 4,
+  "status": "approved",
+  "created_by": "user",
+  "approved_by": "u_admin1",
+  "approved_at": 1767225600,
+  "created_at": 1767225600,
+  "updated_at": 1767225600,
+  "rooms": [
+    "hall"
+  ],
+  "condition": {
+    "all": [
+      {
+        "type": "device_state",
+        "endpoint_id": "ep_5c6d7e8f",
+        "capability": "contact",
+        "op": "eq",
+        "value": "closed"
+      }
+    ]
+  }
+}

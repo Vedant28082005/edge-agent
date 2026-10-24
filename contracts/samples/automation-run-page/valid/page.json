@@ -1,0 +1,35 @@
+{
+  "items": [
+    {
+      "run_id": 17,
+      "rule_id": "ru_0a1b2c3d",
+      "ts": 1767225600,
+      "outcome": "fired",
+      "action_status": "done",
+      "action_log_id": 301,
+      "call_id": "auto-17",
+      "error": null
+    },
+    {
+      "run_id": 16,
+      "rule_id": "ru_0a1b2c3d",
+      "ts": 1767225600,
+      "outcome": "skipped_cooldown",
+      "action_status": null,
+      "action_log_id": null,
+      "call_id": null,
+      "error": null
+    },
+    {
+      "run_id": 15,
+      "rule_id": "ru_0a1b2c3d",
+      "ts": 1767225600,
+      "outcome": "blocked_confirm",
+      "action_status": "blocked",
+      "action_log_id": 300,
+      "call_id": "auto-17",
+      "error": "confirmation_required"
+    }
+  ],
+  "next_cursor": "c2"
+}

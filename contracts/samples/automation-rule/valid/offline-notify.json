@@ -1,0 +1,26 @@
+{
+  "rule_id": "ru_22222222",
+  "name": "Sensor lost",
+  "owner": "u_admin1",
+  "enabled": true,
+  "trigger": {
+    "type": "device_offline",
+    "endpoint_id": "ep_9a0b1c2d",
+    "for_s": 600
+  },
+  "action": {
+    "type": "notify",
+    "text": "Hall sensor offline"
+  },
+  "cooldown_s": 300,
+  "max_runs_per_day": 4,
+  "status": "approved",
+  "created_by": "user",
+  "approved_by": "u_admin1",
+  "approved_at": 1767225600,
+  "created_at": 1767225600,
+  "updated_at": 1767225600,
+  "rooms": [
+    "hall"
+  ]
+}

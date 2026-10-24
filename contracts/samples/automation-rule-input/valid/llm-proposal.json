@@ -1,0 +1,14 @@
+{
+  "name": "Night hall light",
+  "source": "llm_proposal",
+  "trigger": {
+    "type": "time_of_day",
+    "at": "22:30"
+  },
+  "action": {
+    "type": "notify",
+    "text": "Time for bed"
+  },
+  "cooldown_s": 300,
+  "max_runs_per_day": 4
+}
