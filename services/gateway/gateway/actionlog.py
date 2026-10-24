@@ -13,7 +13,8 @@ from .db import DB
 
 STATUSES = ("done", "moving", "settled", "settle_timeout", "failed", "blocked", "confirmation_required", "declined", "expired",
             "denied")
-SOURCES = ("direct", "agent", "scene", "automation", "admin")
+SOURCES = ("direct", "agent", "scene", "admin")
+AUTOMATION_SOURCE = re.compile(r"^automation:ru_[0-9a-f]{8}$")      # never a bare `automation` (automations.md, invariant 3)
 NODE_RE = re.compile(r"^esp32-[0-9a-f]{12}$")
 EP_RE = re.compile(r"^ep_[0-9a-f]{8}$")
 CODE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
@@ -45,7 +46,7 @@ class ActionLog:
 
     def record(self, user_id: str, source: str, kind: str, status: str, *, node_id=None, endpoint_id=None, scene_id=None,
                capability=None, value=None, error=None, call_id=None, elapsed_ms=None) -> int:
-        assert source in SOURCES and kind in ("set_state", "run_scene") and status in STATUSES
+        assert (source in SOURCES or AUTOMATION_SOURCE.match(source)) and kind in ("set_state", "run_scene") and status in STATUSES
         node_id = node_id if isinstance(node_id, str) and NODE_RE.match(node_id) else None
         endpoint_id = endpoint_id if isinstance(endpoint_id, str) and EP_RE.match(endpoint_id) else None
         cur = self.db.run(
