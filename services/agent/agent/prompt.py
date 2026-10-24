@@ -25,8 +25,11 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 
+from typing import Callable
+
 from .aliases import AliasMap, build_aliases
 from .devices import Device, DeviceRegistry
+from . import homebench
 from .util import ENUM_VAL_RE, clean_label, clean_user_text, est_tokens, truncate_tokens
 
 
@@ -154,8 +157,10 @@ class Prompt:
 
 
 class PromptBuilder:
-    def __init__(self, registry: DeviceRegistry, budgets: Budgets | None = None) -> None:
-        self.registry, self.budgets = registry, budgets or Budgets()
+    def __init__(self, registry: DeviceRegistry, budgets: Budgets | None = None, format: str = "json",
+                 states_provider: Callable[[], dict] | None = None) -> None:
+        self.registry, self.budgets, self.format = registry, budgets or Budgets(), format
+        self.states_provider = states_provider        # homebench only: () -> {endpoint_id: {capability: value}}
         if est_tokens(SYSTEM_PROMPT) > self.budgets.system or est_tokens(TOOLS_TEXT) > self.budgets.tools:
             raise PromptBudgetError("static system/tool text exceeds its budget")
         self.prefix = ""
@@ -164,14 +169,22 @@ class PromptBuilder:
         self.degraded = False
         self.devices_tokens = 0
         self.aliases = AliasMap()
+        self.hb_table: homebench.HomebenchTable | None = None
         self.rebuild_prefix()
 
     def rebuild_prefix(self) -> bool:
-        """Rebuild from the registry. Call ONLY on registry changes. Returns True if the bytes changed."""
-        self.aliases = build_aliases(self.registry)     # (S8i) same map the decoding schema cache computes, kept in step
-        dev_text, self.degraded = build_devices_section(self.registry, self.budgets.devices, self.aliases)
-        self.devices_tokens = est_tokens(dev_text)
-        prefix = f"{SYSTEM_PROMPT}\n\n{TOOLS_TEXT}\n\n{dev_text}"
+        """Rebuild from the registry (and, in homebench format, the live states snapshot). Call on a registry
+        change, and -- homebench only -- also whenever the states snapshot has moved (see homebench.py's cache
+        trade-off note). Returns True if the bytes changed."""
+        if self.format == "homebench":
+            states = self.states_provider() if self.states_provider else None
+            prefix, self.hb_table = homebench.build_prefix(self.registry, states)
+            self.degraded, self.devices_tokens = False, est_tokens(prefix)
+        else:
+            self.aliases = build_aliases(self.registry)  # (S8i) same map the decoding schema cache computes, kept in step
+            dev_text, self.degraded = build_devices_section(self.registry, self.budgets.devices, self.aliases)
+            self.devices_tokens = est_tokens(dev_text)
+            prefix = f"{SYSTEM_PROMPT}\n\n{TOOLS_TEXT}\n\n{dev_text}"
         if prefix == self.prefix:
             return False
         self.prefix = prefix
@@ -179,11 +192,31 @@ class PromptBuilder:
         self.prefix_version += 1
         return True
 
+    def _build_homebench(self, user_text: str, extra_tail: list[dict] | None, tool_results: str) -> Prompt:
+        cur = clean_user_text(user_text, 400)
+        content = self.prefix
+        note_parts = [m.get("content", "") for m in (extra_tail or []) if isinstance(m, dict)]
+        if tool_results:
+            note_parts.append(tool_results)
+        if note_parts:
+            content += "\n\nPrevious attempt: " + " ".join(p for p in note_parts if p)
+        content += "\n\n" + homebench.build_trailer(cur)
+        sizes = {"system": est_tokens(self.prefix), "tools": 0, "devices": self.devices_tokens, "memories": 0,
+                 "recent": 0, "current": est_tokens(cur), "tool_results": est_tokens(tool_results or "")}
+        p = Prompt([{"role": "system", "content": content}], sizes, self.prefix_hash, self.budgets, False)
+        return p
+
     def build(self, user_text: str, history: list[tuple[str, str]] | None = None, summary: str = "",
               memories: list[str] | None = None, extra_tail: list[dict] | None = None,
               tool_results: str = "") -> Prompt:
         """history: [(role 'user'|'assistant', text)] oldest first. extra_tail: messages appended after the user turn
-        (the planner loop's own assistant output and tool results) — also in the tail, never the prefix."""
+        (the planner loop's own assistant output and tool results) — also in the tail, never the prefix.
+
+        homebench format ignores history/summary/memories: the fine-tuned model was trained on a single system-role
+        message (prefix + the exact per-turn trailer), never a multi-message chat; a validation retry's correction
+        is folded into that same message as a short note instead of a separate turn."""
+        if self.format == "homebench":
+            return self._build_homebench(user_text, extra_tail, tool_results)
         b = self.budgets
         msgs: list[dict] = [{"role": "system", "content": self.prefix}]
         # --- recent turns (+ summary) <= 400

@@ -34,6 +34,7 @@ class ScopedViews:
 
     def __init__(self, registry: DeviceRegistry, main_builder: PromptBuilder | None = None) -> None:
         self.registry, self.main = registry, main_builder
+        self.format = main_builder.format if main_builder else "json"
         self._cache: OrderedDict[str, View] = OrderedDict()
 
     def get(self, scope: Scope) -> View:
@@ -44,7 +45,8 @@ class ScopedViews:
         if v is not None and v.generation == self.registry.generation:
             self._cache.move_to_end(key)
             return v
-        v = View(scope, self.registry.scoped(scope), self.registry.generation)
+        builder = PromptBuilder(self.registry.scoped(scope), format=self.format)
+        v = View(scope, self.registry.scoped(scope), self.registry.generation, _builder=builder)
         self._cache[key] = v
         while len(self._cache) > self.MAX:
             self._cache.popitem(last=False)

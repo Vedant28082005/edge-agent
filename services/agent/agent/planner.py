@@ -14,6 +14,7 @@ import logging
 from dataclasses import dataclass, field
 
 from .aliases import AliasMap
+from . import homebench
 from .executor import Metrics
 from .llm import Llm, LlmResult
 from .schema import MAX_CALLS
@@ -110,8 +111,14 @@ class Plan:
     parsed_ok: bool
     timings: dict = field(default_factory=dict)
     raw: str = ""                   # the model's unparsed reply (S8f: logged, truncated, in turn_traces)
+    failures: list[str] = field(default_factory=list)   # homebench only: "could not do this part" notes
 
-    def as_assistant_json(self, aliases: AliasMap) -> str:
+    def as_assistant_json(self, aliases: AliasMap, hb_table: "homebench.HomebenchTable | None" = None) -> str:
+        """The compact wire re-rendering of this plan, used only to show the planner its own previous turn in a
+        retry. homebench format re-renders in the model's own `room.device.method(...)` notation (never the
+        json-format's aliased tuples) when `hb_table` is given."""
+        if hb_table is not None:
+            return homebench.render_calls(self.calls, hb_table)
         tuples = [t for t in (encode_call(c, aliases) for c in self.calls) if t is not None]
         return json.dumps(tuples, separators=(",", ":"), ensure_ascii=False)
 
@@ -128,14 +135,26 @@ def parse_plan(text: str, aliases: AliasMap) -> Plan:
     return Plan(calls, True)
 
 
+def parse_homebench_plan(text: str, table: homebench.HomebenchTable) -> Plan:
+    res = homebench.parse_reply(text, table)
+    return Plan(res.calls[:MAX_CALLS], True, failures=res.failures)
+
+
 class Planner:
-    def __init__(self, llm: Llm, schema_provider, metrics: Metrics) -> None:
-        self.llm, self._schema, self.metrics = llm, schema_provider, metrics
+    def __init__(self, llm: Llm, schema_provider, metrics: Metrics, format: str = "json") -> None:
+        """`schema_provider(scope)` returns the json-format's schema+aliases wrapper when `format == "json"`, or a
+        `homebench.HomebenchTable` when `format == "homebench"` -- same call site, different return type per format."""
+        self.llm, self._schema, self.metrics, self.format = llm, schema_provider, metrics, format
 
     async def plan(self, messages: list[dict], scope: Scope = UNRESTRICTED) -> Plan:
-        sch = self._schema(scope)                     # also carries the alias map: needed to decode even when unconstrained
-        res: LlmResult = await self.llm.complete(messages, sch if self.llm.constrained else None)
-        plan = parse_plan(res.content, sch.aliases)
+        if self.format == "homebench":
+            table: homebench.HomebenchTable = self._schema(scope)
+            res: LlmResult = await self.llm.complete(messages, None, max_tokens=128, repeat_penalty=1.0)
+            plan = parse_homebench_plan(res.content, table)
+        else:
+            sch = self._schema(scope)                  # also carries the alias map: needed to decode even when unconstrained
+            res = await self.llm.complete(messages, sch if self.llm.constrained else None)
+            plan = parse_plan(res.content, sch.aliases)
         plan.timings = res.timings
         plan.raw = res.content or ""
         self.metrics.plans += 1

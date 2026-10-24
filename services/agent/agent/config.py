@@ -18,6 +18,7 @@ class AgentConfig:
     llm_max_tokens: int = 256
     llm_timeout_s: float = 600.0
     constrained: bool = True                  # runtime switch: constrained decoding on/off (S10 ablation)
+    llm_format: str = "json"                  # "json" (default, unchanged) | "homebench" (agent/homebench.py)
     db_path: str = "agent.sqlite"
     api_verifier_file: str = "/etc/edge-agent/secrets/verifiers/agent-api.sha256"   # SHA-256 of the gateway secret
     max_steps: int = 4                        # LLM rounds per request
@@ -45,6 +46,8 @@ def load_config(path: str | None) -> AgentConfig:
             setattr(cfg, k, v)
     from .sched.config import SchedConfig
     SchedConfig.from_dict(cfg.sched)                  # fail at startup on an unknown or malformed scheduler key
+    if cfg.llm_format not in ("json", "homebench"):
+        raise ValueError("llm_format must be 'json' or 'homebench'")
     if cfg.host not in ("127.0.0.1", "::1", "localhost") and not cfg.allow_non_loopback:
         raise ValueError("the agent API is internal: host must be a loopback address "
                          "(allow_non_loopback only for a container on a private network that does not publish the port)")
