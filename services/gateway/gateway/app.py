@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
+import anyio
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
@@ -648,7 +649,10 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             except Exception as e:                                  # mid-stream failure: end the stream
                 log.warning("chat stream ended early: %s", type(e).__name__)
             finally:
-                await cm.__aexit__(None, None, None)
+                # The browser aborted (we are being cancelled/closed): close the upstream request so the agent sees the
+                # disconnect and cancels the turn. Shielded, or the pending cancellation would abort this very close.
+                with anyio.CancelScope(shield=True):
+                    await cm.__aexit__(None, None, None)
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={
             "Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Session-Id": client_sid})

@@ -18,7 +18,7 @@ from .planner import Plan, Planner
 from .prompt import PromptBudgetError, PromptBuilder, render_result
 from .render import ambient_clarifying_text, describe_outcomes, describe_reads
 from .render import name as _name
-from .reqctx import ReqCtx
+from .reqctx import ReqCtx, TurnCancelled
 from .schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
                      is_question_intent, is_short_confirmation, plan_domain_direction, repair_plan_calls,
                      strip_writes_for_question)
@@ -154,7 +154,7 @@ class ChatService:
 
         pinger = asyncio.get_running_loop().create_task(ping())
         try:
-            return await self.planner.plan(messages, scope)
+            return await ctx.await_cancellable(self.planner.plan(messages, scope))
         finally:
             pinger.cancel()
             try:
@@ -258,6 +258,11 @@ class ChatService:
         trace = self.sched.new_trace(ctx) if self.sched else None
         try:
             await self._turn_traced(ctx, text, t0, trace)
+        except TurnCancelled:
+            # (S8o) the browser aborted the stream: nothing is answered or remembered; what already ran stays
+            log.info("turn %s cancelled", ctx.req_id)
+            if trace is not None:
+                trace.outcome = "cancelled"
         finally:
             if self.sched and trace is not None:
                 self.sched.emit(ctx, trace)
@@ -272,6 +277,9 @@ class ChatService:
             routed = await self.sched.route(ctx, text, trace) if self.sched else None
         if trace is not None:
             trace.add_stage("route_ms", (time.monotonic() - route_t0) * 1000)
+            if routed is not None and ctx.cancelled:
+                trace.note_executed(routed.outs)
+        ctx.check_cancelled()
         outs: list[CallOutcome] = []
         route = "llm"
         final: str | None = None
@@ -405,6 +413,7 @@ class ChatService:
                 if trace is not None:
                     trace.add_stage("exec_ms", (time.monotonic() - exec_t0) * 1000)
                     trace.note_executed(new)
+                ctx.check_cancelled()              # (S8o) executor skipped what was left; do not go back to the LLM
                 outs += new                        # kept even on a retry, so a model that fixes nothing still reports
                                                      # the real rejection rather than whatever it says on the retry
                 rejected = [o for o in new if o.state == "rejected"]
