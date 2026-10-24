@@ -114,6 +114,88 @@ def _lift_brightness_floor(calls: list[dict], user_text: str) -> list[dict]:
     return out
 
 
+# --------------------------------------------------------------------------------------------- ambient polarity (S8h)
+# A vague ambient complaint ("it's dark/bright/hot/cold/stuffy in here", no device named, no number) implies a
+# direction: +1 = the user wants more of the domain's effect (more light, more warmth, more airflow), -1 = less.
+# Data-driven on purpose: a new word or a new domain is one table row, never a device-type branch.
+AMBIENT_WORDS: dict[str, tuple[str, int]] = {
+    "dark": ("light", 1), "darker": ("light", 1), "dim": ("light", 1), "dimly": ("light", 1),
+    "gloomy": ("light", 1), "murky": ("light", 1), "shadowy": ("light", 1), "pitchblack": ("light", 1),
+    "bright": ("light", -1), "brighter": ("light", -1), "glare": ("light", -1), "glaring": ("light", -1),
+    "blinding": ("light", -1), "dazzling": ("light", -1),
+    "cold": ("temp", 1), "chilly": ("temp", 1), "freezing": ("temp", 1), "frigid": ("temp", 1),
+    "hot": ("temp", -1), "warm": ("temp", -1), "boiling": ("temp", -1), "sweltering": ("temp", -1),
+    "stuffy": ("air", 1), "muggy": ("air", 1), "suffocating": ("air", 1), "airless": ("air", 1),
+}
+# domain -> the endpoint type that answers it (ARCHITECTURE device types, same convention the resolver already uses
+# for its per-type capability hint, e.g. `_DEFAULT_CAP`).
+AMBIENT_DOMAIN_TYPE = {"light": "light", "temp": "thermostat", "air": "fan"}
+
+
+def ambient_domain_devices(reg: DeviceRegistry, domain: str) -> list:
+    """Live devices that can answer a complaint in this domain (used both to size the ambiguity and, by the
+    caller, to name real devices in a clarifying question)."""
+    typ = AMBIENT_DOMAIN_TYPE.get(domain)
+    return [d for d in reg.devices.values() if d.type == typ] if typ else []
+
+
+def ambient_request_signal(user_text: str, reg: DeviceRegistry | None = None) -> tuple[str, int] | None:
+    """(domain, expected direction) for a vague ambient complaint, or None when the text names an explicit level
+    (a number/percent/"zero", see `_LEVEL_NAMED_RE`), names a device by its own registry name, or matches more than
+    one domain at once (ambiguous, left to the model/clarifying path untouched)."""
+    if _LEVEL_NAMED_RE.search(user_text or ""):
+        return None
+    low = (user_text or "").lower()
+    if reg is not None and any(d.name.lower() in low for d in reg.devices.values()):
+        return None
+    toks = set(re.findall(r"[a-z']+", low))
+    hits = {AMBIENT_WORDS[w] for w in toks if w in AMBIENT_WORDS}
+    return next(iter(hits)) if len(hits) == 1 else None
+
+
+def _call_direction(domain: str, cap: str, value: object) -> int | None:
+    """Which way one set_state call moves the domain's effect, or None when this call says nothing about it. Keyed
+    only on capability id + value (never a device name), so it generalises to any endpoint announcing these caps."""
+    if domain == "light":
+        if cap == "power" and isinstance(value, bool):
+            return 1 if value else -1
+        if cap == "brightness":
+            return -1 if _is_off_like(value) else 1
+    elif domain == "air":
+        if cap == "power" and isinstance(value, bool):
+            return 1 if value else -1
+        if cap == "speed":
+            return -1 if _is_off_like(value) else 1
+    elif domain == "temp":
+        if cap == "mode" and value in ("heat", "cool"):
+            return 1 if value == "heat" else -1
+    return None
+
+
+def plan_domain_direction(domain: str, calls: list[dict]) -> int | None:
+    """The single direction this plan moves `domain` in, or None when no call speaks to it or the calls disagree
+    (treated as ambiguous, never guessed)."""
+    dirs = set()
+    for c in calls:
+        a = c.get("args") if isinstance(c, dict) else None
+        if not isinstance(a, dict) or c.get("tool") != "set_state" or not isinstance(a.get("capability"), str):
+            continue
+        d = _call_direction(domain, a["capability"], a.get("value"))
+        if d is not None:
+            dirs.add(d)
+    return next(iter(dirs)) if len(dirs) == 1 else None
+
+
+def contradicts_ambient_request(calls: list[dict], user_text: str, reg: DeviceRegistry) -> bool:
+    """True when the plan's calls move exactly opposite to what an ambient complaint in `user_text` asked for."""
+    sig = ambient_request_signal(user_text, reg)
+    if sig is None or not calls:
+        return False
+    domain, expected = sig
+    actual = plan_domain_direction(domain, calls)
+    return actual is not None and actual == -expected
+
+
 # Actuator capabilities whose own meaning already covers the endpoint's on/off state, so this rule never touches
 # them: `power` is the dependency itself, `lock` is a security state unrelated to electrical power.
 POWER_INDEPENDENT_CAPS = ("power", "lock")

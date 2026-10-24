@@ -17,7 +17,7 @@ from .llm import LlmBusy, LlmError
 from .planner import Plan, Planner
 from .prompt import PromptBudgetError, PromptBuilder, render_result
 from .reqctx import ReqCtx
-from .schema import repair_plan_calls
+from .schema import ambient_domain_devices, ambient_request_signal, plan_domain_direction, repair_plan_calls
 from .sched.scheduler import Scheduler
 from .sched.trace import TurnTrace
 from .store import Store
@@ -43,6 +43,19 @@ def no_plan_text(reg: DeviceRegistry) -> str:
     device -- name one straight from the live registry (any real one; it is only an example of the phrasing)."""
     name = next((d.name for d in reg.devices.values()), None)
     return f"{NO_PLAN_TEXT} Try naming the device, for example: turn on {name}." if name else NO_PLAN_TEXT
+
+
+# S8h: an ambient complaint ("it's dark/bright/hot/cold/stuffy in here") names no device and no number. Acting is
+# only safe when exactly one device answers that domain and the plan's own direction is unambiguous; otherwise ask,
+# naming the real devices from the registry rather than guessing one.
+def ambient_clarifying_text(domain: str, reg: DeviceRegistry) -> str:
+    names = [d.name for d in ambient_domain_devices(reg, domain)]
+    if not names:
+        return "Which device do you mean?"
+    if len(names) == 1:
+        return f"Did you mean {names[0]}?"
+    shown = ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
+    return f"Which one do you mean — {shown}?"
 
 
 def _is_imperative(text: str) -> bool:
@@ -266,6 +279,7 @@ class ChatService:
             say = ""
             retried_claim = False
             retried_validation = False
+            retried_polarity = False
             while True:
                 if not ctx.budget.take_step():
                     if not outs:
@@ -314,6 +328,23 @@ class ChatService:
                         say = no_plan_text(reg)
                     break
                 plan.calls = repair_plan_calls(plan.calls, text, reg)
+                sig = ambient_request_signal(text, reg)
+                if sig is not None:
+                    domain, expected = sig
+                    devs = ambient_domain_devices(reg, domain)
+                    actual = plan_domain_direction(domain, plan.calls) if len(devs) == 1 else None
+                    if len(devs) != 1 or actual != expected:
+                        if len(devs) == 1 and not retried_polarity:
+                            # one candidate device but the plan moved the wrong way: give the model one retry
+                            # with the contradiction stated before falling back to a clarifying question.
+                            retried_polarity = True
+                            extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
+                            tool_results = ("Contradiction: this plan moves the opposite way from what the user's "
+                                            "wording asked for. Reconsider the direction, or ask instead.")
+                            continue
+                        self.metrics.ambient_clarifications += 1
+                        say = ambient_clarifying_text(domain, reg)
+                        break
                 if trace is not None:
                     trace.note_calls(plan.calls)
                 await ctx.emit("status", {"text": "working on it"})
