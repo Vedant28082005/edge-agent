@@ -35,7 +35,8 @@ NEGATION = frozenset({"not", "dont", "never", "no", "cant", "wont", "without"})
 TEMPORAL = frozenset({"if", "unless", "until", "whenever", "after", "before", "later", "tomorrow", "tonight", "timer",
                       "schedule", "remind", "daily", "weekly", "while", "then", "also", "again", "instead"})
 RELATIVE = frozenset({"brighter", "dimmer", "higher", "lower", "more", "less", "increase", "decrease", "raise",
-                      "warmer", "cooler", "faster", "slower", "louder", "quieter", "bit", "little", "slightly", "up", "down"})
+                      "warmer", "cooler", "faster", "slower", "louder", "quieter", "bit", "little", "slightly", "up", "down", "reduce", "lessen", "drop", "boost",
+                      "brighten"})
 
 _NUM_WORDS = {w: i for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen "

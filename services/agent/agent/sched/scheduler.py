@@ -114,6 +114,9 @@ class Scheduler:
             trace.fast_reason = "relative_state_unavailable"
             return None                                     # cannot compute a target safely: let the LLM take it
         if res.status != PLAN:
+            if res.unknown and ctx.role != "guest":
+                trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
+                return Routed(text=self._unknown_text(res.unknown, reg))
             if res.reason == "relative":
                 return None      # an explicit relative command word (e.g. "brighter") overlapping an ambient word
                                  # ("too bright") is a real command the resolver already recognised, never a complaint
@@ -123,6 +126,16 @@ class Scheduler:
         outs = await self.executor.run_calls(ctx, res.calls)
         trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
         return Routed(outs=outs, say=res.say)
+
+    @staticmethod
+    def _unknown_text(name: str, reg: DeviceRegistry) -> str:
+        """"I don't see a kitchen fan. I can control: Test light." -- real device names only, never acts on a guess."""
+        names = sorted({d.name for d in reg.devices.values() if any(c.kind == "actuator" for c in d.caps)})
+        art = "an" if name[:1] in "aeiou" else "a"
+        if not names:
+            return f"I don't see {art} {name}."
+        more = f" and {len(names) - 5} more" if len(names) > 5 else ""
+        return f"I don't see {art} {name}. I can control: {', '.join(names[:5])}{more}."
 
     async def _status(self, ctx: ReqCtx, status, trace: TurnTrace, reg: DeviceRegistry) -> Routed:
         """(S8j) "what is the device status?" -- a question, answered with get_state and no LLM, never a write."""
@@ -187,7 +200,10 @@ class Scheduler:
         c = d.cap(cap_id) if d else None
         if not isinstance(cur, (int, float)) or isinstance(cur, bool) or c is None or c.min is None or c.max is None:
             return None
-        step = amount if amount is not None else max(1, round((c.max - c.min) * 0.1))
+        if amount is None:
+            step = max(1, round((c.max - c.min) * 0.1))
+        else:
+            step = amount * (c.max - c.min) / 100 if pct else amount
         target = max(c.min, min(c.max, cur + direction * step))
         if c.type == "int":
             target = int(round(target))
