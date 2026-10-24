@@ -31,5 +31,6 @@ export const baseRoutes = (role: Role = "admin", eps: Endpoint[] = [lamp, blind,
   route("post", "/auth/login", () => ({ json: tokens(role) })),
   route("post", "/auth/refresh", () => ({ json: tokens(role) })),
   route("get", "/devices", () => ({ json: eps })),
+  route("get", "/notifications", () => ({ json: { items: [], next_cursor: null } })),
   route("post", "/ws/ticket", () => ({ json: { ticket: "A".repeat(43), expires_in_s: 30 } })),
 ];
