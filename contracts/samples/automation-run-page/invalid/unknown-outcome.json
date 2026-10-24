@@ -1,0 +1,15 @@
+{
+  "items": [
+    {
+      "run_id": 17,
+      "rule_id": "ru_0a1b2c3d",
+      "ts": 1767225600,
+      "outcome": "executed",
+      "action_status": "done",
+      "action_log_id": 301,
+      "call_id": "auto-17",
+      "error": null
+    }
+  ],
+  "next_cursor": null
+}

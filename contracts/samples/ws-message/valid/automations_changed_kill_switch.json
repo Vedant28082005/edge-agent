@@ -1,0 +1,6 @@
+{
+  "type": "automations_changed",
+  "rule_id": null,
+  "change": "kill_switch",
+  "automations_enabled": false
+}

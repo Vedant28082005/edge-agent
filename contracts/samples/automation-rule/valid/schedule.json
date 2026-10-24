@@ -1,0 +1,29 @@
+{
+  "rule_id": "ru_44444444",
+  "name": "Hourly check",
+  "owner": "u_admin1",
+  "enabled": true,
+  "trigger": {
+    "type": "schedule",
+    "every_s": 3600,
+    "between": {
+      "from": "08:00",
+      "to": "20:00"
+    }
+  },
+  "action": {
+    "type": "notify",
+    "text": "Hourly reminder"
+  },
+  "cooldown_s": 300,
+  "max_runs_per_day": 4,
+  "status": "approved",
+  "created_by": "user",
+  "approved_by": "u_admin1",
+  "approved_at": 1767225600,
+  "created_at": 1767225600,
+  "updated_at": 1767225600,
+  "rooms": [
+    "hall"
+  ]
+}

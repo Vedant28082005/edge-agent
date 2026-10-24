@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.11.0
+  version: 2.12.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -18,6 +18,8 @@ tags:
   - name: scenes
   - name: chat
   - name: system
+  - name: automations
+    description: Rules engine API (contracts/automations.md). Admin and member; guests get 403 on every route here.
   - name: admin
     description: Admin role only. Device management and user management.
   - name: internal
@@ -340,6 +342,192 @@ paths:
       operationId: deleteMyMemory
       responses:
         '204': {description: Deleted}
+  # ------------------------------------------------------------ automations (contracts/automations.md)
+  /automations:
+    get:
+      tags: [automations]
+      operationId: listAutomations
+      x-forbidden-roles: [guest]
+      description: |
+        Rules visible to the caller. Admin: all. Member: rules they own plus rules whose `rooms` are all inside their rooms.
+        Guest: always 403. Filters combine with AND.
+      parameters:
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/AutomationStatus'}}
+        - {name: created_by, in: query, schema: {$ref: '#/components/schemas/AutomationCreatedBy'}}
+      responses:
+        '200': {description: Rules, content: {application/json: {schema: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/AutomationRule'}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [automations]
+      operationId: createAutomation
+      x-forbidden-roles: [guest]
+      description: |
+        Admin or member; guest never (403). Every endpoint the rule reads or acts on must be in the caller's rooms
+        (403 `out_of_scope`; a member cannot create room-less rules). A `set_state` action on a
+        `risk: confirm` endpoint is refused (409 `confirm_endpoint_not_allowed`): such a rule can only `notify`. Capability,
+        type and range are validated against the live registry (400 `bad_rule`). At most 100 rules in total (409 `rule_limit`).
+        `source: user` creates the rule `approved` (the caller is the approver). `source: llm_proposal` is for saving a rule
+        the LLM proposed as JSON in its reply: the rule is stored with `created_by: llm`, `status: proposed` and **cannot run
+        until a user approves it** (`POST /automations/{rule_id}/approve`). The caller can never choose `status` or `created_by`.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AutomationRuleInput'}}}
+      responses:
+        '201': {description: Created, content: {application/json: {schema: {$ref: '#/components/schemas/AutomationRule'}}}}
+        '400': {description: "Invalid rule (`bad_rule`)", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: "`confirm_endpoint_not_allowed` or `rule_limit`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /automations/{rule_id}:
+    parameters:
+      - {$ref: '#/components/parameters/RuleId'}
+    get:
+      tags: [automations]
+      operationId: getAutomation
+      x-forbidden-roles: [guest]
+      responses:
+        '200': {description: Rule, content: {application/json: {schema: {$ref: '#/components/schemas/AutomationRule'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [automations]
+      operationId: updateAutomation
+      x-forbidden-roles: [guest]
+      description: |
+        Admin any rule; member only rules they own and only inside their rooms (re-checked now). Same validation as create.
+        **Any edit of an `approved` rule resets it to `proposed`, `enabled: false`, and clears the approval**: edited content
+        never runs on the strength of an earlier approval. `created_by` is unchanged.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AutomationRuleInput'}}}
+      responses:
+        '200': {description: Updated, content: {application/json: {schema: {$ref: '#/components/schemas/AutomationRule'}}}}
+        '400': {description: "`bad_rule`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: "`confirm_endpoint_not_allowed`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    delete:
+      tags: [automations]
+      operationId: deleteAutomation
+      x-forbidden-roles: [guest]
+      description: Admin any rule; member own rules only. Run history is kept (marked `rule_deleted`) for audit.
+      responses:
+        '204': {description: Deleted}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /automations/{rule_id}/approve:
+    parameters:
+      - {$ref: '#/components/parameters/RuleId'}
+    post:
+      tags: [automations]
+      operationId: approveAutomation
+      x-forbidden-roles: [guest]
+      description: |
+        `proposed` or `disabled` -> `approved`, `enabled: true`. Only a **user** can call this: admin, or member for a rule whose
+        rooms are all inside their rooms. Guest never (403); no service secret and no agent route exists for it. The gateway
+        re-validates the rule against the live registry first (nothing changes on failure) and records
+        `approved_by` / `approved_at`. A broken rule cannot be approved (409 `rule_broken`). Approval does not bypass the
+        `risk: confirm` ban (409 `confirm_endpoint_not_allowed`, re-checked here because risk levels can change).
+      responses:
+        '200': {description: Approved, content: {application/json: {schema: {$ref: '#/components/schemas/AutomationRule'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: "`rule_broken` or `confirm_endpoint_not_allowed`", content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /automations/{rule_id}/disable:
+    parameters:
+      - {$ref: '#/components/parameters/RuleId'}
+    post:
+      tags: [automations]
+      operationId: disableAutomation
+      x-forbidden-roles: [guest]
+      description: "Sets `status: disabled`, `enabled: false`. Admin any rule; member rules they own or that are inside their rooms. Idempotent."
+      responses:
+        '200': {description: Disabled, content: {application/json: {schema: {$ref: '#/components/schemas/AutomationRule'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /automations/{rule_id}/runs:
+    parameters:
+      - {$ref: '#/components/parameters/RuleId'}
+    get:
+      tags: [automations]
+      operationId: listAutomationRuns
+      x-forbidden-roles: [guest]
+      description: Run history of one rule, newest first, retained 30 days. Same visibility as the rule. Pagination by opaque `cursor`; `limit` default 50, max 200.
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 256}}
+      responses:
+        '200': {description: One page, content: {application/json: {schema: {$ref: '#/components/schemas/AutomationRunPage'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /notifications:
+    get:
+      tags: [automations]
+      operationId: listNotifications
+      x-forbidden-roles: [guest]
+      description: |
+        Persisted notifications (automation and system), newest first, retained 30 days, filtered by the caller's role and rooms
+        (a member sees only those about endpoints in their rooms or rules they own; admin sees all). Guests get 403.
+        The same objects are pushed live as WebSocket `automation_notification`.
+      parameters:
+        - {name: unread, in: query, schema: {type: boolean, default: false}}
+        - {name: rule_id, in: query, schema: {$ref: '#/components/schemas/RuleId'}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 256}}
+      responses:
+        '200': {description: One page, content: {application/json: {schema: {$ref: '#/components/schemas/NotificationPage'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /notifications/read:
+    post:
+      tags: [automations]
+      operationId: markNotificationsRead
+      x-forbidden-roles: [guest]
+      description: Marks the caller's own read state (per user, not global).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [notification_ids]
+              properties:
+                notification_ids: {type: array, minItems: 1, maxItems: 200, uniqueItems: true, items: {$ref: '#/components/schemas/NotificationId'}}
+      responses:
+        '204': {description: Marked}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /admin/automations/kill-switch:
+    get:
+      tags: [admin]
+      operationId: adminGetAutomationKillSwitch
+      x-required-role: admin
+      responses:
+        '200': {description: State, content: {application/json: {schema: {$ref: '#/components/schemas/AutomationKillSwitch'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    put:
+      tags: [admin]
+      operationId: adminSetAutomationKillSwitch
+      x-required-role: admin
+      description: |
+        Global kill switch. `automations_enabled: false` makes the engine execute nothing at all: no `set_state`, no `notify`
+        (triggers are not even evaluated; the engine emits one `kill_switch` notification). Rules keep their status.
+        Takes effect before the next action starts; an action already sent is not recalled. The state is persisted and
+        **survives restarts**; the default on first boot is enabled. Audit-logged with the admin's user id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [automations_enabled]
+              properties:
+                automations_enabled: {type: boolean}
+      responses:
+        '200': {description: New state, content: {application/json: {schema: {$ref: '#/components/schemas/AutomationKillSwitch'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
   /system/health:
     get:
       tags: [system]
@@ -352,7 +540,7 @@ paths:
       operationId: websocket
       description: |
         WebSocket upgrade. The server pushes JSON messages `{type, ...}` filtered by the caller's role and rooms.
-        Types: `state`, `perception`, `scenes_changed`, `registry_changed`, `notification`, `async_result` (late VLM answer) and the
+        Types: `state`, `perception`, `scenes_changed`, `registry_changed`, `notification`, `automation_notification`, `automations_changed`, `async_result` (late VLM answer) and the
         confirmation and settle messages below. Settle events are **their own types and are NOT generic notifications**.
 
         * `confirmation_request` `{request_id, summary, action, action_hash, expires_in_s}`: a `risk: confirm` action awaits this user.
@@ -365,6 +553,8 @@ paths:
           visible to them, evaluated at delivery time; for `deleted`, by visibility just before deletion); everyone else gets nothing.
           The message carries no scene content: the client refetches `GET /scenes`.
         * `notification` `{level, text}` is for everything else (e.g. `level: action_blocked`).
+        * `automation_notification` = a persisted `Notification` (`notification_id, ts, level, source, rule_id?, endpoint_id?, text`) from the rules engine, the same object `GET /notifications` lists. Delivered to admins and to members who can see the rule or the endpoint; never to guests.
+        * `automations_changed` `{rule_id, change, automations_enabled?}` (`change`: `created|updated|deleted|approved|disabled|broken|kill_switch`): carries no rule content, clients refetch `GET /automations`. Same visibility as the rule; `kill_switch` goes to admins and members.
         Payloads match `agent-events.md`. Every message is exactly one member of the `WsMessage` schema (discriminator `type`),
         so clients can generate types from it; `state` is `{type, endpoint_id, values, ts}`.
 
@@ -781,6 +971,7 @@ components:
   parameters:
     EndpointId: {name: endpoint_id, in: path, required: true, schema: {$ref: '#/components/schemas/EndpointId'}}
     NodeId: {name: node_id, in: path, required: true, schema: {$ref: '#/components/schemas/NodeId'}}
+    RuleId: {name: rule_id, in: path, required: true, schema: {$ref: '#/components/schemas/RuleId'}}
   responses:
     Unauthorized: {description: Missing or invalid token, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     Forbidden: {description: Role not allowed, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
@@ -917,7 +1108,7 @@ components:
         id: {type: integer}
         ts: {type: integer, description: Unix seconds the action was requested}
         user_id: {type: string, description: "Requesting user id; `household` for non-user triggers (automations, perception)"}
-        source: {type: string, enum: [direct, agent, scene, automation, admin]}
+        source: {type: string, pattern: '^(direct|agent|scene|admin|automation:ru_[0-9a-f]{8})$', maxLength: 32, description: "Who caused the action. An automation is always logged as `automation:<rule_id>` (never a bare `automation`); `user_id` is then `household`."}
         kind: {type: string, enum: [set_state, run_scene]}
         node_id: {oneOf: [{$ref: '#/components/schemas/NodeId'}, {type: 'null'}]}
         endpoint_id: {oneOf: [{$ref: '#/components/schemas/EndpointId'}, {type: 'null'}]}
@@ -1072,6 +1263,21 @@ components:
         - type: object
           unevaluatedProperties: false
           allOf:
+            - {$ref: '#/components/schemas/NotificationFields'}
+            - type: object
+              required: [type]
+              properties: {type: {const: automation_notification}}
+        - type: object
+          additionalProperties: false
+          required: [type, change]
+          properties:
+            type: {const: automations_changed}
+            rule_id: {oneOf: [{$ref: '#/components/schemas/RuleId'}, {type: 'null'}], description: null for `kill_switch`}
+            change: {type: string, enum: [created, updated, deleted, approved, disabled, broken, kill_switch]}
+            automations_enabled: {type: boolean, description: "Present with `change: kill_switch`"}
+        - type: object
+          unevaluatedProperties: false
+          allOf:
             - {$ref: '#/components/schemas/AsyncResultFields'}
             - {type: object, required: [type], properties: {type: {const: async_result}}}
         - type: object
@@ -1214,6 +1420,217 @@ components:
           properties:
             event: {const: action_settle_timeout}
             data: {allOf: [{$ref: '#/components/schemas/SseEnvelope'}, {$ref: '#/components/schemas/SettleTimeoutFields'}]}
+    RuleId: {type: string, pattern: '^ru_[0-9a-f]{8}$'}
+    NotificationId: {type: string, pattern: '^nt_[0-9a-f]{12}$'}
+    AutomationStatus: {type: string, enum: [proposed, approved, disabled]}
+    AutomationCreatedBy: {type: string, enum: [user, llm]}
+    TimeOfDay: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$', description: "24 h `HH:MM` in the household time zone (a gateway setting)"}
+    Weekday: {type: string, enum: [mon, tue, wed, thu, fri, sat, sun]}
+    Weekdays: {type: array, minItems: 1, maxItems: 7, uniqueItems: true, items: {$ref: '#/components/schemas/Weekday'}, description: Absent means every day}
+    AutomationTrigger:
+      description: Closed set. `endpoint_id` is the permanent id; the gateway resolves rooms from it. Scalars are validated against the capability at save time.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, endpoint_id, capability]
+          properties:
+            type: {const: device_state_change}
+            endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            capability: {type: string, maxLength: 64}
+            to: {$ref: '#/components/schemas/Scalar'}
+            from: {$ref: '#/components/schemas/Scalar'}
+        - type: object
+          additionalProperties: false
+          required: [type, endpoint_id]
+          properties:
+            type: {const: device_offline}
+            endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            for_s: {type: integer, minimum: 0, maximum: 86400, default: 60, description: Must stay offline this long before firing}
+        - type: object
+          additionalProperties: false
+          required: [type, endpoint_id, capability, value, for_s]
+          properties:
+            type: {const: duration_in_state}
+            endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            capability: {type: string, maxLength: 64}
+            value: {$ref: '#/components/schemas/Scalar'}
+            for_s: {type: integer, minimum: 10, maximum: 86400}
+        - type: object
+          additionalProperties: false
+          required: [type, at]
+          properties:
+            type: {const: time_of_day}
+            at: {$ref: '#/components/schemas/TimeOfDay'}
+            days: {$ref: '#/components/schemas/Weekdays'}
+        - type: object
+          additionalProperties: false
+          required: [type, every_s]
+          properties:
+            type: {const: schedule}
+            every_s: {type: integer, minimum: 60, maximum: 86400}
+            between:
+              type: object
+              additionalProperties: false
+              required: [from, to]
+              properties:
+                from: {$ref: '#/components/schemas/TimeOfDay'}
+                to: {$ref: '#/components/schemas/TimeOfDay'}
+            days: {$ref: '#/components/schemas/Weekdays'}
+    AutomationClause:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, endpoint_id, capability, op, value]
+          properties:
+            type: {const: device_state}
+            endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            capability: {type: string, maxLength: 64}
+            op: {type: string, enum: [eq, ne, gt, ge, lt, le]}
+            value: {$ref: '#/components/schemas/Scalar'}
+        - type: object
+          additionalProperties: false
+          required: [type, after, before]
+          properties:
+            type: {const: time_window}
+            after: {$ref: '#/components/schemas/TimeOfDay'}
+            before: {$ref: '#/components/schemas/TimeOfDay'}
+            days: {$ref: '#/components/schemas/Weekdays'}
+    AutomationCondition:
+      type: object
+      additionalProperties: false
+      required: [all]
+      description: All clauses must hold when the trigger fires (AND only; no nesting, no OR).
+      properties:
+        all: {type: array, minItems: 1, maxItems: 4, items: {$ref: '#/components/schemas/AutomationClause'}}
+    AutomationAction:
+      description: |
+        Exactly one action. `set_state` is refused for `risk: confirm` endpoints at save, at approval and again at every run
+        (on a hit the run is `blocked_confirm` and a notification is sent; nothing executes, no confirmation request is created).
+        `text` is author-written plain text (at most 120 chars, no placeholders), shown by clients as text and never put in an LLM prompt.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, text]
+          properties:
+            type: {const: notify}
+            level: {type: string, enum: [info, warning], default: info}
+            text: {type: string, minLength: 1, maxLength: 120}
+        - type: object
+          additionalProperties: false
+          required: [type, endpoint_id, capability, value]
+          properties:
+            type: {const: set_state}
+            endpoint_id: {$ref: '#/components/schemas/EndpointId'}
+            capability: {type: string, maxLength: 64}
+            value: {$ref: '#/components/schemas/Scalar'}
+    AutomationRuleInput:
+      type: object
+      additionalProperties: false
+      required: [name, source, trigger, action, cooldown_s, max_runs_per_day]
+      description: Body of create/update. `status`, `created_by`, `owner`, `enabled` and approval fields are server-set and rejected here.
+      properties:
+        name: {type: string, minLength: 1, maxLength: 48}
+        source: {type: string, enum: [user, llm_proposal], description: "`llm_proposal` forces `created_by: llm`, `status: proposed` (ignored on update: `created_by` never changes)"}
+        trigger: {$ref: '#/components/schemas/AutomationTrigger'}
+        condition: {$ref: '#/components/schemas/AutomationCondition'}
+        action: {$ref: '#/components/schemas/AutomationAction'}
+        cooldown_s: {type: integer, minimum: 10, maximum: 86400, description: Minimum seconds between two executions of this rule}
+        max_runs_per_day: {type: integer, minimum: 1, maximum: 1000, description: Executions per household day (midnight to midnight); further runs are `skipped_daily_limit`}
+    AutomationRule:
+      type: object
+      additionalProperties: false
+      required: [rule_id, name, owner, enabled, trigger, action, cooldown_s, max_runs_per_day, status, created_by, created_at, updated_at]
+      properties:
+        rule_id: {$ref: '#/components/schemas/RuleId'}
+        name: {type: string, minLength: 1, maxLength: 48}
+        owner: {type: string, maxLength: 64, description: "User id of the user who saved the rule (for `created_by: llm` the user who saved the proposal)"}
+        enabled: {type: boolean, description: "True only while `status` is `approved`"}
+        trigger: {$ref: '#/components/schemas/AutomationTrigger'}
+        condition: {$ref: '#/components/schemas/AutomationCondition'}
+        action: {$ref: '#/components/schemas/AutomationAction'}
+        cooldown_s: {type: integer, minimum: 10, maximum: 86400}
+        max_runs_per_day: {type: integer, minimum: 1, maximum: 1000}
+        status: {$ref: '#/components/schemas/AutomationStatus'}
+        created_by: {$ref: '#/components/schemas/AutomationCreatedBy'}
+        approved_by: {type: string, maxLength: 64, description: User id of the approving user. Required when `status` is `approved`; never a service or `llm`.}
+        approved_at: {type: integer, minimum: 1000000000}
+        created_at: {type: integer, minimum: 1000000000}
+        updated_at: {type: integer, minimum: 1000000000}
+        rooms: {type: array, maxItems: 16, uniqueItems: true, items: {type: string, maxLength: 48}, description: Read-only. Rooms of every endpoint the rule reads or acts on, resolved by the gateway.}
+        broken: {type: boolean, description: Read-only. Set by the registry re-validation (forgotten or incompatible endpoint, now a risk:confirm target, capability gone). A broken rule never runs.}
+      allOf:
+        - if: {properties: {status: {const: approved}}, required: [status]}
+          then: {required: [approved_by, approved_at], properties: {enabled: {const: true}}}
+        - if: {properties: {status: {enum: [proposed, disabled]}}, required: [status]}
+          then: {properties: {enabled: {const: false}}}
+    AutomationOutcome:
+      type: string
+      enum: [fired, skipped_condition, skipped_cooldown, skipped_daily_limit, skipped_offline, blocked_confirm, blocked_scope, failed, suppressed_kill_switch]
+      description: |
+        `fired`: the action was sent (notify: delivered); the final device result is `action_status`. `blocked_confirm`: the target is
+        `risk: confirm` (or became so); notification sent, nothing executed. `blocked_scope`: the owner lost access to a room of the
+        rule; nothing executed. `suppressed_kill_switch` is recorded only for a trigger that arrived while the switch was off and is
+        sampled at most once per rule per hour.
+    AutomationRun:
+      type: object
+      additionalProperties: false
+      required: [run_id, rule_id, ts, outcome]
+      properties:
+        run_id: {type: integer}
+        rule_id: {$ref: '#/components/schemas/RuleId'}
+        ts: {type: integer, minimum: 1000000000}
+        outcome: {$ref: '#/components/schemas/AutomationOutcome'}
+        action_status: {oneOf: [{$ref: '#/components/schemas/ActionStatus'}, {type: 'null'}], description: Final status of the `set_state` (same values as the action log); null for notify or when nothing was sent}
+        action_log_id: {type: [integer, 'null'], description: "Row in the action log (`source: automation:<rule_id>`)"}
+        call_id: {type: [string, 'null'], maxLength: 64}
+        error: {type: [string, 'null'], maxLength: 64, description: Error code from mcp-tools.md, never free text}
+        rule_deleted: {type: boolean, description: True once the rule no longer exists}
+    AutomationRunPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/AutomationRun'}}
+        next_cursor: {type: [string, 'null'], maxLength: 256}
+    NotificationLevel:
+      type: string
+      enum: [info, warning, action_blocked, rule_proposed, rule_broken, rule_limit, kill_switch]
+      description: "Closed. Clients treat an unknown value as `info`, so a later level is not breaking."
+    Notification:
+      allOf:
+        - $ref: '#/components/schemas/NotificationFields'
+      unevaluatedProperties: false
+    NotificationFields:
+      type: object
+      required: [notification_id, ts, level, source, text]
+      description: |
+        A persisted notification. `text` is server-built or the rule's own `notify` text (at most 500 chars), displayed as plain text,
+        never interpreted and never given to an LLM. It carries no secret, token or raw device string; endpoint and rule names are
+        admin-set labels, sanitized.
+      properties:
+        notification_id: {$ref: '#/components/schemas/NotificationId'}
+        ts: {type: integer, minimum: 1000000000}
+        level: {$ref: '#/components/schemas/NotificationLevel'}
+        source: {type: string, pattern: '^(system|automation:ru_[0-9a-f]{8})$', maxLength: 32}
+        rule_id: {oneOf: [{$ref: '#/components/schemas/RuleId'}, {type: 'null'}], description: Present exactly when `source` is `automation:<rule_id>`}
+        endpoint_id: {oneOf: [{$ref: '#/components/schemas/EndpointId'}, {type: 'null'}]}
+        text: {type: string, minLength: 1, maxLength: 500}
+        read: {type: boolean, description: For the calling user; absent in WebSocket pushes}
+    NotificationPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/Notification'}}
+        next_cursor: {type: [string, 'null'], maxLength: 256}
+    AutomationKillSwitch:
+      type: object
+      additionalProperties: false
+      required: [automations_enabled]
+      properties:
+        automations_enabled: {type: boolean}
+        changed_by: {type: [string, 'null'], maxLength: 64}
+        changed_at: {type: [integer, 'null']}
     ConsumeRequest:
       type: object
       additionalProperties: false

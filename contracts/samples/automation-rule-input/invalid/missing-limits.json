@@ -1,0 +1,14 @@
+{
+  "name": "Night hall light",
+  "source": "user",
+  "trigger": {
+    "type": "time_of_day",
+    "at": "22:30"
+  },
+  "action": {
+    "type": "set_state",
+    "endpoint_id": "ep_3fa91c02",
+    "capability": "power",
+    "value": false
+  }
+}

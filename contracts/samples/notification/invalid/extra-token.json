@@ -1,0 +1,11 @@
+{
+  "notification_id": "nt_0123456789ab",
+  "ts": 1767225600,
+  "level": "action_blocked",
+  "source": "automation:ru_0a1b2c3d",
+  "rule_id": "ru_0a1b2c3d",
+  "endpoint_id": "ep_1b2c3d4e",
+  "text": "Rule 'Night hall light' wanted to unlock Front door. Needs your confirmation; open the app to do it yourself.",
+  "read": false,
+  "confirmation_token": "x"
+}
