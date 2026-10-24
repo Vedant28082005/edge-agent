@@ -19,9 +19,10 @@ from .prompt import PromptBudgetError, PromptBuilder, render_result
 from .render import ambient_clarifying_text, describe_outcomes, describe_reads
 from .render import name as _name
 from .reqctx import ReqCtx
-from .schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, is_question_intent,
-                     plan_domain_direction, repair_plan_calls, strip_writes_for_question)
-from .sched.scheduler import Scheduler
+from .schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
+                     is_question_intent, is_short_confirmation, plan_domain_direction, repair_plan_calls,
+                     strip_writes_for_question)
+from .sched.scheduler import Routed, Scheduler
 from .sched.trace import TurnTrace
 from .store import Store
 from .views import ScopedViews
@@ -107,6 +108,24 @@ def compose_final(say: str, outs: list[CallOutcome], reg: DeviceRegistry) -> str
     return " ".join(parts)
 
 
+def apply_hb_failures(final: str, hb_failures: list[str], outs: list[CallOutcome], reg: DeviceRegistry) -> str:
+    """Fold homebench's `plan.failures` (error_input / unparsed-part notes) into the turn's reply.
+
+    - Nothing to fold, or an action already ran this turn (fast path, the ambient fallback, or the homebench
+      calls themselves) -- that result IS the reply; a parse failure elsewhere in the same reply adds no error
+      line on top of it.
+    - A bare error_input (one or more, nothing else wrong and nothing else ran): one clear reply, never
+      "Couldn't do this part: could not do this part." stacked onto the generic "I couldn't work out" text --
+      that repeats the same non-information twice.
+    - Any other failure (unknown method, invalid value, ...) carries real diagnostic text, so it is still
+      appended when nothing else ran."""
+    if not hb_failures or outs:
+        return final
+    if set(hb_failures) == {"could not do this part"}:
+        return no_plan_text(reg)
+    return final + " " + " ".join(f"Couldn't do this part: {f}." for f in hb_failures)
+
+
 class ChatService:
     def __init__(self, registry: DeviceRegistry, builder: PromptBuilder, planner: Planner, executor: Executor,
                  store: Store, metrics: Metrics, settle_wait_s: float = 150.0, max_queued_turns: int = 2,
@@ -164,6 +183,7 @@ class ChatService:
             return None
         if len(devs) > 1:
             self.metrics.ambient_clarifications += 1
+            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction})
             return ambient_clarifying_text(domain, reg)
         call = ambient_default_call(domain, direction, devs[0])
         if call is None:
@@ -174,6 +194,31 @@ class ChatService:
             trace.note_calls([call])
             trace.note_executed(new)
         return " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or None
+
+    async def _resolve_pending_confirmation(self, ctx: ReqCtx, text: str, reg: DeviceRegistry,
+                                            trace: TurnTrace | None) -> "Routed | None":
+        """A bare "yes"-shaped reply to the clarifying question this session was just asked (ambient domain +
+        direction, stashed by whichever side asked it: the scheduler's fast path or this service's own LLM-loop
+        polarity check below) resolves using THAT original intent, never the confirmation text itself (which names
+        no domain/direction/device). Discards the pending entry on any reply, confirmation or not -- a changed
+        subject abandons the question rather than leaving it to misfire on some later, unrelated "yes"."""
+        pending = self.store.pop_pending(ctx.user_id, ctx.session_id)
+        if not pending or not is_short_confirmation(text):
+            return None
+        devs = ambient_domain_devices(reg, pending["domain"])
+        if len(devs) != 1:
+            return None            # still ambiguous: a bare "yes" cannot pick which device, so this does nothing
+        call = ambient_default_call(pending["domain"], pending["direction"], devs[0])
+        if call is None:
+            return None
+        calls = ensure_power_dependency([call], reg)
+        if trace is not None:
+            trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
+            trace.note_calls(calls)
+        outs = await self.executor.run_calls(ctx, calls)
+        if trace is not None:
+            trace.note_executed(outs)
+        return Routed(outs=outs, say=describe_outcomes(outs, reg))
 
     async def on_user_message(self, event: Event) -> None:
         ctx: ReqCtx = event.data["ctx"]
@@ -222,7 +267,9 @@ class ChatService:
         view = self.views.get(ctx.scope)               # what THIS caller may see: names outside the scope never reach the model
         reg = view.registry
         route_t0 = time.monotonic()
-        routed = await self.sched.route(ctx, text, trace) if self.sched else None
+        routed = await self._resolve_pending_confirmation(ctx, text, reg, trace)
+        if routed is None:
+            routed = await self.sched.route(ctx, text, trace) if self.sched else None
         if trace is not None:
             trace.add_stage("route_ms", (time.monotonic() - route_t0) * 1000)
         outs: list[CallOutcome] = []
@@ -328,6 +375,7 @@ class ChatService:
                                             "wording asked for. Reconsider the direction, or ask instead.")
                             continue
                         self.metrics.ambient_clarifications += 1
+                        self.store.set_pending(user, sess, {"domain": domain, "direction": expected})
                         say = ambient_clarifying_text(domain, reg)
                         break
                 # (S8l) loop guard: never re-run a get_state/read_sensor call this turn already has a verified
@@ -386,9 +434,7 @@ class ChatService:
                 tool_results = "\n".join(render_result(o.tool, o.args, o.result, reg, aliases) for o in new if o.ok)
             if homebench_question:
                 say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
-            final = compose_final(say, outs, reg)
-            if hb_failures:
-                final += " " + " ".join(f"Couldn't do this part: {f}." for f in hb_failures)
+            final = apply_hb_failures(compose_final(say, outs, reg), hb_failures, outs, reg)
         if ctx.images and route not in ("vlm", "yolo"):        # those routes already answered using the image
             final += " (I can't analyse images yet.)"
         words = final.split(" ")

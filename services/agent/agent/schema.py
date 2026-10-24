@@ -157,6 +157,19 @@ def ambient_domain_devices(reg: DeviceRegistry, domain: str) -> list:
     return [d for d in reg.devices.values() if d.type == typ] if typ else []
 
 
+# A short confirmation reply to a pending clarifying question (e.g. "Did you mean the Bedroom light?") -- never
+# itself a fresh ambient complaint or command, so it carries no words `ambient_request_signal` would match.
+_CONFIRM_WORDS = {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "haan", "hanji", "ji", "correct", "right"}
+
+
+def is_short_confirmation(user_text: str) -> bool:
+    """A bare "yes"-shaped reply (at most 3 words, every word a confirmation word) -- the signal that the previous
+    turn's pending clarification (stored by the caller) should be resolved using its ORIGINAL intent, never
+    re-derived from this text (which says nothing about domain/direction/device on its own)."""
+    toks = re.findall(r"[a-z']+", (user_text or "").lower())
+    return bool(toks) and len(toks) <= 3 and all(t in _CONFIRM_WORDS for t in toks)
+
+
 def ambient_request_signal(user_text: str, reg: DeviceRegistry | None = None) -> tuple[str, int] | None:
     """(domain, expected direction) for a vague ambient complaint, or None when the text names an explicit level
     (a number/percent/"zero", see `_LEVEL_NAMED_RE`), names a device by its own registry name, or matches more than
