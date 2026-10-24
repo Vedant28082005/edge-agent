@@ -132,3 +132,37 @@ def test_cli_serve_binds_the_internal_listener_to_a_unix_socket_when_configured(
     p.write_text('{"internal": {"uds": "/run/edge-agent/gateway-internal.sock"}}', encoding="utf-8")
     cfg = load_config(str(p))
     assert cfg.internal.uds == "/run/edge-agent/gateway-internal.sock" and cfg.public.host == "127.0.0.1" and cfg.public.port == 8000
+
+
+def test_chat_abort_closes_the_upstream_agent_request():
+    """(S8o) The browser drops the SSE stream: the gateway must close its request to the agent, so the agent sees the
+    disconnect and cancels the turn."""
+    state = {"started": False, "cancelled": False}
+    slow = FastAPI()
+
+    @slow.post("/v1/chat")
+    async def chat():
+        async def g():
+            state["started"] = True
+            try:
+                yield b"event: status\ndata: {\"text\": \"first\", \"seq\": 1}\n\n"
+                await asyncio.sleep(30)
+                yield b"event: final\ndata: {\"text\": \"done\", \"seq\": 2}\n\n"
+            except (asyncio.CancelledError, GeneratorExit):
+                state["cancelled"] = True
+                raise
+        return StreamingResponse(g(), media_type="text/event-stream")
+
+    m = build_mock()
+    with Srv(slow, free_port()) as agent:
+        m.ctx.agent = m.ctx.confirm.agent = AgentClient(agent.url, None)
+        app = create_public_app(m.ctx)
+        with Srv(app, free_port()) as gw:
+            access = httpx.post(gw.url + "/auth/login", json={"username": "member", "password": m.passwords["member"]}).json()["access_token"]
+            with httpx.stream("POST", gw.url + "/chat", json={"text": "hi"}, headers={"Authorization": "Bearer " + access}, timeout=10) as r:
+                next(l for l in r.iter_lines() if l.startswith("data:"))
+            for _ in range(100):                             # the browser is gone now
+                if state["cancelled"]:
+                    break
+                time.sleep(0.05)
+            assert state["started"] and state["cancelled"], "the agent request was not closed"

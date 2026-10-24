@@ -156,6 +156,7 @@ def create_app(agent: Agent, auth: ApiAuth | None) -> Starlette:
                     yield sse(*item)
             finally:
                 ctx.detached = True            # client gone: later events go to the gateway event ring
+                ctx.cancel()                   # (S8o) aborted before `final`: stop the LLM wait and the remaining tool calls
 
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

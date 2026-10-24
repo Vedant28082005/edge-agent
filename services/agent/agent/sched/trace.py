@@ -29,7 +29,7 @@ class TurnTrace:
     cache_hit: bool | None = None            # None = no LLM call this turn
     prefix_hash: str = ""
     constrained: bool = False
-    outcome: str = "ok"                      # ok | partial | failed | needs_confirmation | denied | error:<code>
+    outcome: str = "ok"                      # ok | partial | failed | needs_confirmation | denied | cancelled | error:<code>
     flags: dict = field(default_factory=dict)
     fallbacks: list = field(default_factory=list)    # sources tried and failed before the final one
     llm_raw: str = ""                        # (S8f) the last LLM reply this turn, truncated; "" when no LLM call ran

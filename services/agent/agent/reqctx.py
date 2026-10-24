@@ -51,6 +51,10 @@ class Budget:
         return True
 
 
+class TurnCancelled(Exception):
+    """The chat client went away before `final`: the turn stops at its next await point (see ReqCtx.cancel)."""
+
+
 class ReqCtx:
     def __init__(self, user_id: str, session_id: str, text: str, trigger: Trigger, budget: Budget,
                  req_id: str | None = None, role: str = "member", images: int = 0, sink=None, scope: Scope = UNRESTRICTED,
@@ -69,6 +73,9 @@ class ReqCtx:
         self._seq = 0
         self.detached = False               # the HTTP client went away: late events go to the notifier instead
         self.closed = False
+        self.cancelled = False              # (S8o) the client aborted the stream before `final`: no more LLM rounds or tool calls
+        self.final_sent = False             # once `final` is out the answer is complete; a later disconnect cancels nothing
+        self._cancel_ev = asyncio.Event()
         self.pending_settles = 0
         self._settled = asyncio.Event()
         self._settled.set()
@@ -84,9 +91,42 @@ class ReqCtx:
                 self.sink(name, {**data, "req_id": self.req_id}, self.user_id if self.trigger.is_user else None)
                 return True
             return False
+        if name == "final":
+            self.final_sent = True
         self._seq += 1
         await self.out.put((name, {**data, "seq": self._seq, "req_id": self.req_id}))
         return True
+
+    def cancel(self) -> bool:
+        """The HTTP client aborted the stream. True if a turn was still in progress (no `final` yet) and is now cancelled.
+        Calls already executed stay; a pending confirmation is untouched (it keeps its own expiry)."""
+        if self.cancelled or self.final_sent or self.closed:
+            return False
+        self.cancelled = True
+        self._cancel_ev.set()
+        return True
+
+    def check_cancelled(self) -> None:
+        if self.cancelled:
+            raise TurnCancelled()
+
+    async def await_cancellable(self, coro):
+        """Await `coro`, but give up the moment the turn is cancelled: the pending await (e.g. the llama-server request) is
+        cancelled, which closes its HTTP connection and so stops generation."""
+        self.check_cancelled()
+        task = asyncio.ensure_future(coro)
+        waiter = asyncio.ensure_future(self._cancel_ev.wait())
+        try:
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise TurnCancelled()
+            return task.result()
+        finally:
+            waiter.cancel()
+            if not task.done():                              # the turn task itself was cancelled (shutdown)
+                task.cancel()
 
     def drop_images(self) -> None:
         """Release the image bytes (called when the turn ends). They are never persisted, logged or kept in a trace."""

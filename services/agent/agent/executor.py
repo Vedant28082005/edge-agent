@@ -89,6 +89,8 @@ class Executor:
         ordered = [c for c in calls if not risky(c)] + [c for c in calls if risky(c)]
         out: list[CallOutcome] = []
         for c in ordered:
+            if ctx.cancelled:                       # (S8o) client gone: skip the remaining calls; executed ones stay
+                break
             tool, args = (c.get("tool"), c.get("args")) if isinstance(c, dict) else (None, None)
             out.append(await self.run_call(ctx, tool, args))
         return out
