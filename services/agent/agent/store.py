@@ -48,6 +48,11 @@ class Store:
         self._db.executescript(SCHEMA)
         self._guest: OrderedDict[tuple[str, str], list[tuple[str, str]]] = OrderedDict()
         self._guest_cache = guest_cache
+        # Pending clarification per (user_id, session_id): the ORIGINAL intent (ambient domain+direction, so far)
+        # behind a clarifying question just asked, so a short "yes"-shaped follow-up can resolve it without
+        # re-deriving anything from that follow-up's own (near-empty) text. Chat state, not conversation history:
+        # never persisted, and cleared the moment it is read (one shot, like the question itself).
+        self._pending: dict[tuple[str, str], dict] = {}
 
     def close(self) -> None:
         self._db.close()
@@ -126,6 +131,15 @@ class Store:
     def forget_user(self, user_id: str) -> None:
         for t in ("messages", "summaries", "memories"):
             self._q(f"DELETE FROM {t} WHERE user_id=?", (user_id,))
+        for key in [k for k in self._pending if k[0] == user_id]:
+            del self._pending[key]
+
+    # ------------------------------------------------------------------------------------------ pending clarification
+    def set_pending(self, user_id: str, session_id: str, intent: dict) -> None:
+        self._pending[(user_id, session_id)] = intent
+
+    def pop_pending(self, user_id: str, session_id: str) -> dict | None:
+        return self._pending.pop((user_id, session_id), None)
 
     # ------------------------------------------------------------------------------------------ memories (/v1/memory)
     def add_memory(self, user_id: str, text: str, guest: bool = False) -> dict | None:

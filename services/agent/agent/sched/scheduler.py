@@ -159,6 +159,7 @@ class Scheduler:
         trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
         if len(devs) > 1:
             self.executor.metrics.ambient_clarifications += 1
+            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction})
             return Routed(text=ambient_clarifying_text(domain, reg))
         call = ambient_default_call(domain, direction, devs[0])
         if call is None:
