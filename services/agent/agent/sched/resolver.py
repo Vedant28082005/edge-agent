@@ -50,6 +50,7 @@ _BY_AMOUNT_RE = re.compile(r"\bby\s+(\d+(?:\.\d+)?)\s*(%|percent)?")
 _PRONOUN = {"it", "them", "this", "that"}
 _SCENE_WORDS = {"scene", "mode", "routine", "preset"}
 _SCENE_VERBS = {"run", "play", "start", "activate", "launch", "trigger", "set", "enable", "execute"}
+_STATUS_WORDS = {"status", "state"}
 
 
 @dataclass
@@ -120,6 +121,43 @@ class FastPathResolver:
         if cmd.kind == "relative":
             return self._relative_plan(cmd, reg, role)
         return self._device_plan(cmd, reg, role, text)
+
+    # ------------------------------------------------------------------------------------------ status questions (S8j)
+    def resolve_status(self, text: str, reg: DeviceRegistry) -> Resolution | None:
+        """"what is the device status?" / "how is the ceiling light?" / "what's the status of all the devices?" --
+        a pure status/state question, answered with get_state and no LLM: exactly one named device, or an explicit
+        "all"/"every" (or no device named at all -- "what is THE device status" names none) means every device in
+        scope, up to `fast_max_group`. None (fall through to the router/LLM) when there is no "status"/"state" word,
+        the target is ambiguous between devices, or there are too many devices to list without a room/name filter."""
+        if not reg.devices:
+            return None
+        s = strip_polite(normalise(text))
+        toks = s.split()
+        if not toks or not (toks[0] in QUESTION or text.strip().endswith("?")):
+            return None
+        if not (set(toks) & _STATUS_WORDS):
+            return None
+        xs = self._clean([t for t in toks if t not in QUESTION and t not in _STATUS_WORDS
+                          and t not in ("device", "devices")])
+        if not xs or set(toks) & QUANT:
+            eps = sorted(reg.devices)
+            if len(eps) > self.cfg.fast_max_group:
+                return None
+        else:
+            scored = [(sc, d) for d in reg.devices.values() for sc, ident in (score_device(xs, d),) if sc > 0 and ident]
+            scored.sort(key=lambda t: (-t[0], t[1].endpoint_id))
+            if not scored:
+                return None
+            top = scored[0][0]
+            if top < self.cfg.fast_threshold:
+                return None
+            winners = [d for sc, d in scored if sc >= top - 1e-9]
+            runner = max((sc for sc, d in scored if sc < top - 1e-9), default=0.0)
+            if len(winners) > 1 or top - runner < self.cfg.fast_margin:
+                return None
+            eps = [winners[0].endpoint_id]
+        calls = [{"tool": "get_state", "args": {"endpoint_id": ep}} for ep in eps]
+        return Resolution(PLAN, calls, "", 1.0, "status_question", "status", [(ep, 1.0) for ep in eps[:5]])
 
     # ------------------------------------------------------------------------------------------ intent
     def _parse(self, s: str, toks: list[str], reg: DeviceRegistry) -> _Cmd | str:

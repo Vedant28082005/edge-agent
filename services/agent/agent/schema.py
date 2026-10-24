@@ -214,6 +214,71 @@ def contradicts_ambient_request(calls: list[dict], user_text: str, reg: DeviceRe
     return actual is not None and actual == -expected
 
 
+# domain -> whether the default action is the boolean `power` capability (light/air) or `temp`'s `mode` enum
+_AMBIENT_POWER_DOMAINS = ("light", "air")
+
+
+def ambient_default_call(domain: str, direction: int, d) -> dict | None:
+    """(S8j) The one call the fast path (no LLM) may issue for an ambient domain+direction on a single candidate
+    device `d`: `power` for light/air (dark/stuffy -> on, bright/suffocating -> off), `heat`/`cool` mode for temp.
+    None when `d` has no such capability at all -- the fast path never guesses a capability the device never
+    announced; the LLM keeps the turn instead."""
+    if domain in _AMBIENT_POWER_DOMAINS:
+        c = d.cap("power")
+        if c is not None and c.kind == "actuator" and c.type == "bool":
+            return {"tool": "set_state", "args": {"endpoint_id": d.endpoint_id, "capability": "power", "value": direction > 0}}
+        return None
+    if domain == "temp":
+        c = d.cap("mode")
+        if c is not None and c.kind == "actuator" and c.type == "enum" and {"heat", "cool"} <= set(c.values or ()):
+            return {"tool": "set_state", "args": {"endpoint_id": d.endpoint_id, "capability": "mode",
+                                                  "value": "heat" if direction > 0 else "cool"}}
+        return None
+    return None
+
+
+# --------------------------------------------------------------------------------------------- question intent gate (S8j)
+# Bug: "what is the device status?" produced get_state *and* a stray set_state that turned a light off. A question
+# or status request must never cause a write, whatever the model (or a fast-path bug) proposes for it.
+_QUESTION_STARTERS = {"what", "whats", "is", "are", "which", "how", "hows", "does"}
+_CAN_YOU_TELL_RE = re.compile(r"^can you tell\b")
+_STATE_NOUNS = {"status", "state", "reading", "value"}
+_ACTION_VERBS = {"turn", "switch", "set", "dim", "open", "close", "lock", "unlock", "run", "start", "stop", "activate",
+                 "deactivate", "disable", "enable", "increase", "decrease", "raise", "lower", "adjust", "change",
+                 "make", "put", "play", "launch", "trigger", "brighten", "flip", "shut", "resume", "kill", "do"}
+
+
+def is_question_intent(user_text: str) -> bool:
+    """A question or status request (starts with what/is/are/which/how/does, starts with "can you tell", ends with
+    "?", or names a state noun like "status") that contains no imperative action verb anywhere in the text -- a
+    mixed request like "is it on? turn it off" still has one, so it is never gated, and a bare imperative like
+    "do both" (starting with "do", never a question word on its own) is never gated either. Used to decide when a
+    plan may contain only read tools, never to decide WHAT the plan should be."""
+    text = (user_text or "").strip()
+    if not text:
+        return False
+    low = text.lower()
+    toks = re.findall(r"[a-z']+", low)
+    if not toks or set(toks) & _ACTION_VERBS:
+        return False
+    if toks[0] in _QUESTION_STARTERS or _CAN_YOU_TELL_RE.match(low) or text.endswith("?"):
+        return True
+    return bool(set(toks) & _STATE_NOUNS)
+
+
+def strip_writes_for_question(calls: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(kept, stripped). Split a plan's calls into the reads it may keep and the set_state/run_scene calls it may
+    never keep -- called only when `is_question_intent` said this turn's own text is a question/status request."""
+    kept: list[dict] = []
+    stripped: list[dict] = []
+    for c in calls:
+        if isinstance(c, dict) and c.get("tool") in ("set_state", "run_scene"):
+            stripped.append(c)
+        else:
+            kept.append(c)
+    return kept, stripped
+
+
 # Actuator capabilities whose own meaning already covers the endpoint's on/off state, so this rule never touches
 # them: `power` is the dependency itself, `lock` is a security state unrelated to electrical power.
 POWER_INDEPENDENT_CAPS = ("power", "lock")

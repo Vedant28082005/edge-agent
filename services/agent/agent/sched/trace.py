@@ -35,6 +35,7 @@ class TurnTrace:
     llm_raw: str = ""                        # (S8f) the last LLM reply this turn, truncated; "" when no LLM call ran
     planned_calls: list = field(default_factory=list)   # (S8g) [{"tool","endpoint_id"?,"capability"?}], never values
     executed: list = field(default_factory=list)        # (S8g) [{"tool","endpoint_id"?,"capability"?,"ok","state"}]
+    stripped_writes: list = field(default_factory=list)  # (S8j) set_state/run_scene calls stripped from a question turn: shape only
     stage_ms: dict = field(default_factory=dict)        # (S8g) {"route_ms","llm_ms","exec_ms"}: time spent per stage
     _t0: float = field(default_factory=time.monotonic, repr=False)
     _emitted: bool = field(default=False, repr=False)
@@ -55,6 +56,20 @@ class TurnTrace:
                 if isinstance(a.get("scene"), str):
                     row["scene"] = a["scene"]
             self.planned_calls.append(row)
+
+    def note_stripped_writes(self, calls: list[dict]) -> None:
+        """Shape only (tool/endpoint_id/capability/scene), same as `note_calls`: never the value that was stripped."""
+        for c in calls[:MAX_TRACE_CALLS]:
+            a = c.get("args") if isinstance(c, dict) else None
+            row = {"tool": c.get("tool") if isinstance(c, dict) else None}
+            if isinstance(a, dict):
+                if isinstance(a.get("endpoint_id"), str):
+                    row["endpoint_id"] = a["endpoint_id"]
+                if isinstance(a.get("capability"), str):
+                    row["capability"] = a["capability"]
+                if isinstance(a.get("scene"), str):
+                    row["scene"] = a["scene"]
+            self.stripped_writes.append(row)
 
     def note_executed(self, outs: list) -> None:
         for o in outs[:MAX_TRACE_CALLS]:

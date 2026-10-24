@@ -42,6 +42,7 @@ class Metrics:
     calls_executed: int = 0
     stripped_fields: int = 0
     ambient_clarifications: int = 0   # an ambient complaint (dark/bright/hot/...) was asked about instead of acted on (S8h)
+    writes_stripped_for_question: int = 0   # a set_state/run_scene call was stripped from a question/status turn (S8j)
 
     def reject(self, code: str) -> None:
         self.calls_rejected[code] = self.calls_rejected.get(code, 0) + 1
@@ -50,7 +51,8 @@ class Metrics:
         return {"plans": self.plans, "plan_parse_failures": self.plan_parse_failures,
                 "calls_proposed": self.calls_proposed, "calls_rejected": dict(self.calls_rejected),
                 "calls_rejected_total": sum(self.calls_rejected.values()), "calls_executed": self.calls_executed,
-                "stripped_fields": self.stripped_fields, "ambient_clarifications": self.ambient_clarifications}
+                "stripped_fields": self.stripped_fields, "ambient_clarifications": self.ambient_clarifications,
+                "writes_stripped_for_question": self.writes_stripped_for_question}
 
 
 @dataclass

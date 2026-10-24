@@ -17,8 +17,10 @@ from dataclasses import dataclass, field
 from ..devices import DeviceRegistry
 from ..events import Event, EventBus
 from ..executor import CallOutcome, Executor
+from ..render import ambient_clarifying_text, describe_outcomes, describe_reads
 from ..reqctx import ReqCtx
-from ..schema import ensure_power_dependency, validate_call
+from ..schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
+                      validate_call)
 from ..scope import UNRESTRICTED, Scope
 from ..store import Store
 from ..views import ScopedViews
@@ -90,6 +92,9 @@ class Scheduler:
 
     async def _fast(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
         reg = self.views.get(ctx.scope).registry          # scoped: the resolver cannot even name an out-of-scope device or scene
+        status = self.resolver.resolve_status(text, reg)
+        if status is not None:
+            return await self._status(ctx, status, trace, reg)
         res = self.resolver.resolve(text, reg, ctx.role, reg.scene_names())
         trace.fast_reason, trace.confidence = res.reason, round(res.confidence, 3)
         trace.candidates = [list(c) for c in res.candidates]
@@ -106,12 +111,48 @@ class Scheduler:
             trace.fast_reason = "relative_state_unavailable"
             return None                                     # cannot compute a target safely: let the LLM take it
         if res.status != PLAN:
-            return None
+            if res.reason == "relative":
+                return None      # an explicit relative command word (e.g. "brighter") overlapping an ambient word
+                                 # ("too bright") is a real command the resolver already recognised, never a complaint
+            return await self._ambient(ctx, text, trace, reg)
         ctx.reason = f"user request (fast path): {text[:80]}"
         trace.note_calls(res.calls)
         outs = await self.executor.run_calls(ctx, res.calls)
         trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
         return Routed(outs=outs, say=res.say)
+
+    async def _status(self, ctx: ReqCtx, status, trace: TurnTrace, reg: DeviceRegistry) -> Routed:
+        """(S8j) "what is the device status?" -- a question, answered with get_state and no LLM, never a write."""
+        trace.fast_reason, trace.confidence = status.reason, round(status.confidence, 3)
+        trace.candidates = [list(c) for c in status.candidates]
+        trace.note_calls(status.calls)
+        outs = await self.executor.run_calls(ctx, status.calls)
+        trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
+        return Routed(outs=outs, text=describe_reads(outs, reg) or "I don't have a reading for that yet.")
+
+    async def _ambient(self, ctx: ReqCtx, text: str, trace: TurnTrace, reg: DeviceRegistry) -> Routed | None:
+        """(S8j) "it's dark/bright/hot/cold/stuffy in here", no device named: act without the LLM when exactly one
+        device in that domain can answer and has the capability the direction needs; ask (naming real devices) when
+        more than one could; None (fall through to the router/LLM) for anything else, including a domain no device
+        in scope can answer at all."""
+        sig = ambient_request_signal(text, reg)
+        if sig is None:
+            return None
+        domain, direction = sig
+        devs = ambient_domain_devices(reg, domain)
+        if not devs:
+            return None
+        trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
+        if len(devs) > 1:
+            self.executor.metrics.ambient_clarifications += 1
+            return Routed(text=ambient_clarifying_text(domain, reg))
+        call = ambient_default_call(domain, direction, devs[0])
+        if call is None:
+            return None
+        calls = ensure_power_dependency([call], reg)
+        trace.note_calls(calls)
+        outs = await self.executor.run_calls(ctx, calls)
+        return Routed(outs=outs, say=describe_outcomes(outs, reg))
 
     async def _relative(self, ctx: ReqCtx, res, trace: TurnTrace) -> Routed | None:
         """"raise the fan speed by 2": the resolver named the endpoint and capability but never reads live state

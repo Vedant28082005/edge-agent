@@ -64,7 +64,8 @@ FEW_SHOT = (
     "U:too bright->[[\"s\",\"e1\",\"power\",false]]\n"
     "U:freezing->[[\"s\",\"e2\",\"mode\",\"heat\"]]\n"
     "U:stuffy->[[\"s\",\"e3\",\"power\",true]]\n"
-    "U:dim the lights->[]"
+    "U:dim the lights->[]\n"
+    "U:what is the ceiling light status?->[[\"g\",\"e1\"]]"      # a question: read only, never a set_state/run_scene
 )
 
 TOOLS_TEXT = (
