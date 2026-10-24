@@ -47,7 +47,7 @@ async def custom_env(tmp_path, devices):
     server = LocalServer(fake.app())
     url = await server.start()
     cfg = AgentConfig(hub_url=url, hub_secret_file=str(secret_file), db_path=":memory:", confirmation_ttl_s=2.0,
-                      settle_wait_s=2.0, sched={})
+                      settle_wait_s=2.0, warm_prefix=False, sched={})
     llm = ScriptedLLM(cfg.constrained)
     agent = Agent.from_config(cfg, llm)
     await agent.start()

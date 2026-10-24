@@ -243,7 +243,8 @@ async def test_out_of_scope_names_never_reach_the_model(env):
 async def test_decoding_schema_is_scoped_and_the_unrestricted_prefix_stays_stable(env):
     full = env.agent.plan_schema(UNRESTRICTED)
     scoped = env.agent.plan_schema(BEDROOM)
-    assert LOCK in schema_endpoint_ids(full) and LOCK not in schema_endpoint_ids(scoped) and FAN in schema_endpoint_ids(scoped)
+    assert (LOCK in schema_endpoint_ids(full, full.aliases) and LOCK not in schema_endpoint_ids(scoped, scoped.aliases)
+            and FAN in schema_endpoint_ids(scoped, scoped.aliases))
     assert "Good night" not in json.dumps(scoped) and "Good night" in json.dumps(full)
     assert env.agent.plan_schema(BEDROOM) is scoped and env.agent.plan_schema(UNRESTRICTED) is full      # cached per scope
     before = env.agent.builder.prefix

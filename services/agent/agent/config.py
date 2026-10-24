@@ -29,6 +29,7 @@ class AgentConfig:
     max_text_chars: int = 4000
     max_queued_turns: int = 2
     include_state_events: bool = False
+    warm_prefix: bool = True                  # (S8i) one throwaway request on startup/registry change to pre-fill the KV cache
     sched: dict = field(default_factory=dict)   # scheduler: see sched/config.py (flags, thresholds, cost table)
 
 
