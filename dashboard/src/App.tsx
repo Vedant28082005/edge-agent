@@ -2,13 +2,15 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { logout, refreshSession, session } from "./api/client";
 import { PendingConfirmations } from "./Confirmation";
 import { LiveProvider } from "./live";
+import { NotificationBell } from "./Notifications";
 import { Activity } from "./views/Activity";
 import { Admin } from "./views/Admin";
+import { Automations } from "./views/Automations";
 import { Login, Setup } from "./views/Auth";
 import { Chat } from "./views/Chat";
 import { Devices } from "./views/Devices";
 
-type Tab = "devices" | "chat" | "activity" | "admin";
+type Tab = "devices" | "chat" | "automations" | "activity" | "admin";
 
 function useTheme() {
   const [theme, setTheme] = useState<"light" | "dark" | "auto">(() => {
@@ -25,17 +27,19 @@ function useTheme() {
 function Shell() {
   const [tab, setTab] = useState<Tab>("devices");
   const [theme, cycle] = useTheme();
+  const canAutomate = session.role !== "guest"; // guests get 403 on every automation route: no tab, no bell
   const isAdmin = session.role === "admin"; // cosmetic only: the API enforces roles and we render only what it returns
   return (
     <div className="shell">
       <header className="top">
         <strong className="brand">Home</strong>
         <nav aria-label="Main">
-          {(["devices", "chat", "activity", ...(isAdmin ? ["admin"] : [])] as Tab[]).map((t) => (
+          {(["devices", "chat", ...(canAutomate ? ["automations"] : []), "activity", ...(isAdmin ? ["admin"] : [])] as Tab[]).map((t) => (
             <button key={t} aria-current={tab === t} onClick={() => setTab(t)}>{t}</button>
           ))}
         </nav>
         <span className="spacer" />
+        {canAutomate && <NotificationBell />}
         <button className="ghost sm" onClick={cycle} aria-label="Toggle theme">theme: {theme}</button>
         <button className="ghost sm" onClick={logout}>Log out</button>
       </header>
@@ -43,6 +47,7 @@ function Shell() {
       <main className="content">
         {tab === "devices" && <Devices />}
         {tab === "chat" && <Chat />}
+        {tab === "automations" && canAutomate && <Automations />}
         {tab === "activity" && <Activity />}
         {tab === "admin" && isAdmin && <Admin />}
       </main>

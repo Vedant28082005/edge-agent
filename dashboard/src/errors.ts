@@ -25,6 +25,12 @@ const MESSAGES: Record<string, string> = {
   budget_exceeded: "The assistant ran out of steps for this request.",
   bad_request: "The request was not valid.",
   unauthorized: "Session expired, sign in again.",
+  // automations (gateway.yaml tag automations)
+  bad_rule: "That rule is not valid for the devices it uses. Check the values and try again.",
+  confirm_endpoint_not_allowed: "Automations cannot control devices that need your confirmation, such as locks. Use a notification instead.",
+  rule_limit: "The rule limit is reached. Delete a rule first.",
+  rule_broken: "This rule uses a device that was removed or changed. Edit it before approving.",
+  out_of_scope: "That rule uses a room you do not have access to.",
 };
 
 export function explain(e: unknown): string {

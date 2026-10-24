@@ -296,6 +296,182 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/automations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * @description Rules visible to the caller. Admin: all. Member: rules they own plus rules whose `rooms` are all inside their rooms.
+         *     Guest: always 403. Filters combine with AND.
+         */
+        get: operations["listAutomations"];
+        put?: never;
+        /**
+         * @description Admin or member; guest never (403). Every endpoint the rule reads or acts on must be in the caller's rooms
+         *     (403 `out_of_scope`; a member cannot create room-less rules). A `set_state` action on a
+         *     `risk: confirm` endpoint is refused (409 `confirm_endpoint_not_allowed`): such a rule can only `notify`. Capability,
+         *     type and range are validated against the live registry (400 `bad_rule`). At most 100 rules in total (409 `rule_limit`).
+         *     `source: user` creates the rule `approved` (the caller is the approver). `source: llm_proposal` is for saving a rule
+         *     the LLM proposed as JSON in its reply: the rule is stored with `created_by: llm`, `status: proposed` and **cannot run
+         *     until a user approves it** (`POST /automations/{rule_id}/approve`). The caller can never choose `status` or `created_by`.
+         */
+        post: operations["createAutomation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/automations/{rule_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        get: operations["getAutomation"];
+        /**
+         * @description Admin any rule; member only rules they own and only inside their rooms (re-checked now). Same validation as create.
+         *     **Any edit of an `approved` rule resets it to `proposed`, `enabled: false`, and clears the approval**: edited content
+         *     never runs on the strength of an earlier approval. `created_by` is unchanged.
+         */
+        put: operations["updateAutomation"];
+        post?: never;
+        /** @description Admin any rule; member own rules only. Run history is kept (marked `rule_deleted`) for audit. */
+        delete: operations["deleteAutomation"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/automations/{rule_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * @description `proposed` or `disabled` -> `approved`, `enabled: true`. Only a **user** can call this: admin, or member for a rule whose
+         *     rooms are all inside their rooms. Guest never (403); no service secret and no agent route exists for it. The gateway
+         *     re-validates the rule against the live registry first (nothing changes on failure) and records
+         *     `approved_by` / `approved_at`. A broken rule cannot be approved (409 `rule_broken`). Approval does not bypass the
+         *     `risk: confirm` ban (409 `confirm_endpoint_not_allowed`, re-checked here because risk levels can change).
+         */
+        post: operations["approveAutomation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/automations/{rule_id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Sets `status: disabled`, `enabled: false`. Admin any rule; member rules they own or that are inside their rooms. Idempotent. */
+        post: operations["disableAutomation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/automations/{rule_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        /** @description Run history of one rule, newest first, retained 30 days. Same visibility as the rule. Pagination by opaque `cursor`; `limit` default 50, max 200. */
+        get: operations["listAutomationRuns"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * @description Persisted notifications (automation and system), newest first, retained 30 days, filtered by the caller's role and rooms
+         *     (a member sees only those about endpoints in their rooms or rules they own; admin sees all). Guests get 403.
+         *     The same objects are pushed live as WebSocket `automation_notification`.
+         */
+        get: operations["listNotifications"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Marks the caller's own read state (per user, not global). */
+        post: operations["markNotificationsRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/automations/kill-switch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["adminGetAutomationKillSwitch"];
+        /**
+         * @description Global kill switch. `automations_enabled: false` makes the engine execute nothing at all: no `set_state`, no `notify`
+         *     (triggers are not even evaluated; the engine emits one `kill_switch` notification). Rules keep their status.
+         *     Takes effect before the next action starts; an action already sent is not recalled. The state is persisted and
+         *     **survives restarts**; the default on first boot is enabled. Audit-logged with the admin's user id.
+         */
+        put: operations["adminSetAutomationKillSwitch"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/system/health": {
         parameters: {
             query?: never;
@@ -321,7 +497,7 @@ export interface paths {
         };
         /**
          * @description WebSocket upgrade. The server pushes JSON messages `{type, ...}` filtered by the caller's role and rooms.
-         *     Types: `state`, `perception`, `scenes_changed`, `registry_changed`, `notification`, `async_result` (late VLM answer) and the
+         *     Types: `state`, `perception`, `scenes_changed`, `registry_changed`, `notification`, `automation_notification`, `automations_changed`, `async_result` (late VLM answer) and the
          *     confirmation and settle messages below. Settle events are **their own types and are NOT generic notifications**.
          *
          *     * `confirmation_request` `{request_id, summary, action, action_hash, expires_in_s}`: a `risk: confirm` action awaits this user.
@@ -334,6 +510,8 @@ export interface paths {
          *       visible to them, evaluated at delivery time; for `deleted`, by visibility just before deletion); everyone else gets nothing.
          *       The message carries no scene content: the client refetches `GET /scenes`.
          *     * `notification` `{level, text}` is for everything else (e.g. `level: action_blocked`).
+         *     * `automation_notification` = a persisted `Notification` (`notification_id, ts, level, source, rule_id?, endpoint_id?, text`) from the rules engine, the same object `GET /notifications` lists. Delivered to admins and to members who can see the rule or the endpoint; never to guests.
+         *     * `automations_changed` `{rule_id, change, automations_enabled?}` (`change`: `created|updated|deleted|approved|disabled|broken|kill_switch`): carries no rule content, clients refetch `GET /automations`. Same visibility as the rule; `kill_switch` goes to admins and members.
          *     Payloads match `agent-events.md`. Every message is exactly one member of the `WsMessage` schema (discriminator `type`),
          *     so clients can generate types from it; `state` is `{type, endpoint_id, values, ts}`.
          *
@@ -761,8 +939,8 @@ export interface components {
             ts: number;
             /** @description Requesting user id; `household` for non-user triggers (automations, perception) */
             user_id: string;
-            /** @enum {string} */
-            source: "direct" | "agent" | "scene" | "automation" | "admin";
+            /** @description Who caused the action. An automation is always logged as `automation:<rule_id>` (never a bare `automation`); `user_id` is then `household`. */
+            source: string;
             /** @enum {string} */
             kind: "set_state" | "run_scene";
             node_id?: components["schemas"]["NodeId"] | null;
@@ -889,6 +1067,18 @@ export interface components {
             /** @description Open vocabulary, e.g. `info`, `action_blocked`; unknown levels display as info */
             level: string;
             text: string;
+        } | (components["schemas"]["NotificationFields"] & {
+            /** @constant */
+            type: "automation_notification";
+        }) | {
+            /** @constant */
+            type: "automations_changed";
+            /** @description null for `kill_switch` */
+            rule_id?: components["schemas"]["RuleId"] | null;
+            /** @enum {string} */
+            change: "created" | "updated" | "deleted" | "approved" | "disabled" | "broken" | "kill_switch";
+            /** @description Present with `change: kill_switch` */
+            automations_enabled?: boolean;
         } | (components["schemas"]["AsyncResultFields"] & {
             /** @constant */
             type: "async_result";
@@ -992,6 +1182,196 @@ export interface components {
             /** @constant */
             event: "action_settle_timeout";
             data: components["schemas"]["SseEnvelope"] & components["schemas"]["SettleTimeoutFields"];
+        };
+        RuleId: string;
+        NotificationId: string;
+        /** @enum {string} */
+        AutomationStatus: "proposed" | "approved" | "disabled";
+        /** @enum {string} */
+        AutomationCreatedBy: "user" | "llm";
+        /** @description 24 h `HH:MM` in the household time zone (a gateway setting) */
+        TimeOfDay: string;
+        /** @enum {string} */
+        Weekday: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+        /** @description Absent means every day */
+        Weekdays: components["schemas"]["Weekday"][];
+        /** @description Closed set. `endpoint_id` is the permanent id; the gateway resolves rooms from it. Scalars are validated against the capability at save time. */
+        AutomationTrigger: {
+            /** @constant */
+            type: "device_state_change";
+            endpoint_id: components["schemas"]["EndpointId"];
+            capability: string;
+            to?: components["schemas"]["Scalar"];
+            from?: components["schemas"]["Scalar"];
+        } | {
+            /** @constant */
+            type: "device_offline";
+            endpoint_id: components["schemas"]["EndpointId"];
+            /**
+             * @description Must stay offline this long before firing
+             * @default 60
+             */
+            for_s: number;
+        } | {
+            /** @constant */
+            type: "duration_in_state";
+            endpoint_id: components["schemas"]["EndpointId"];
+            capability: string;
+            value: components["schemas"]["Scalar"];
+            for_s: number;
+        } | {
+            /** @constant */
+            type: "time_of_day";
+            at: components["schemas"]["TimeOfDay"];
+            days?: components["schemas"]["Weekdays"];
+        } | {
+            /** @constant */
+            type: "schedule";
+            every_s: number;
+            between?: {
+                from: components["schemas"]["TimeOfDay"];
+                to: components["schemas"]["TimeOfDay"];
+            };
+            days?: components["schemas"]["Weekdays"];
+        };
+        AutomationClause: {
+            /** @constant */
+            type: "device_state";
+            endpoint_id: components["schemas"]["EndpointId"];
+            capability: string;
+            /** @enum {string} */
+            op: "eq" | "ne" | "gt" | "ge" | "lt" | "le";
+            value: components["schemas"]["Scalar"];
+        } | {
+            /** @constant */
+            type: "time_window";
+            after: components["schemas"]["TimeOfDay"];
+            before: components["schemas"]["TimeOfDay"];
+            days?: components["schemas"]["Weekdays"];
+        };
+        /** @description All clauses must hold when the trigger fires (AND only; no nesting, no OR). */
+        AutomationCondition: {
+            all: components["schemas"]["AutomationClause"][];
+        };
+        /**
+         * @description Exactly one action. `set_state` is refused for `risk: confirm` endpoints at save, at approval and again at every run
+         *     (on a hit the run is `blocked_confirm` and a notification is sent; nothing executes, no confirmation request is created).
+         *     `text` is author-written plain text (at most 120 chars, no placeholders), shown by clients as text and never put in an LLM prompt.
+         */
+        AutomationAction: {
+            /** @constant */
+            type: "notify";
+            /**
+             * @default info
+             * @enum {string}
+             */
+            level: "info" | "warning";
+            text: string;
+        } | {
+            /** @constant */
+            type: "set_state";
+            endpoint_id: components["schemas"]["EndpointId"];
+            capability: string;
+            value: components["schemas"]["Scalar"];
+        };
+        /** @description Body of create/update. `status`, `created_by`, `owner`, `enabled` and approval fields are server-set and rejected here. */
+        AutomationRuleInput: {
+            name: string;
+            /**
+             * @description `llm_proposal` forces `created_by: llm`, `status: proposed` (ignored on update: `created_by` never changes)
+             * @enum {string}
+             */
+            source: "user" | "llm_proposal";
+            trigger: components["schemas"]["AutomationTrigger"];
+            condition?: components["schemas"]["AutomationCondition"];
+            action: components["schemas"]["AutomationAction"];
+            /** @description Minimum seconds between two executions of this rule */
+            cooldown_s: number;
+            /** @description Executions per household day (midnight to midnight); further runs are `skipped_daily_limit` */
+            max_runs_per_day: number;
+        };
+        AutomationRule: {
+            rule_id: components["schemas"]["RuleId"];
+            name: string;
+            /** @description User id of the user who saved the rule (for `created_by: llm` the user who saved the proposal) */
+            owner: string;
+            /** @description True only while `status` is `approved` */
+            enabled: boolean;
+            trigger: components["schemas"]["AutomationTrigger"];
+            condition?: components["schemas"]["AutomationCondition"];
+            action: components["schemas"]["AutomationAction"];
+            cooldown_s: number;
+            max_runs_per_day: number;
+            status: components["schemas"]["AutomationStatus"];
+            created_by: components["schemas"]["AutomationCreatedBy"];
+            /** @description User id of the approving user. Required when `status` is `approved`; never a service or `llm`. */
+            approved_by?: string;
+            approved_at?: number;
+            created_at: number;
+            updated_at: number;
+            /** @description Read-only. Rooms of every endpoint the rule reads or acts on */
+            rooms?: string[];
+            /** @description Read-only. Set by the registry re-validation (forgotten or incompatible endpoint */
+            broken?: boolean;
+        } & (unknown & unknown);
+        /**
+         * @description `fired`: the action was sent (notify: delivered); the final device result is `action_status`. `blocked_confirm`: the target is
+         *     `risk: confirm` (or became so); notification sent, nothing executed. `blocked_scope`: the owner lost access to a room of the
+         *     rule; nothing executed. `suppressed_kill_switch` is recorded only for a trigger that arrived while the switch was off and is
+         *     sampled at most once per rule per hour.
+         * @enum {string}
+         */
+        AutomationOutcome: "fired" | "skipped_condition" | "skipped_cooldown" | "skipped_daily_limit" | "skipped_offline" | "blocked_confirm" | "blocked_scope" | "failed" | "suppressed_kill_switch";
+        AutomationRun: {
+            run_id: number;
+            rule_id: components["schemas"]["RuleId"];
+            ts: number;
+            outcome: components["schemas"]["AutomationOutcome"];
+            /** @description Final status of the `set_state` (same values as the action log); null for notify or when nothing was sent */
+            action_status?: components["schemas"]["ActionStatus"] | null;
+            /** @description Row in the action log (`source: automation:<rule_id>`) */
+            action_log_id?: number | null;
+            call_id?: string | null;
+            /** @description Error code from mcp-tools.md */
+            error?: string | null;
+            /** @description True once the rule no longer exists */
+            rule_deleted?: boolean;
+        };
+        AutomationRunPage: {
+            items: components["schemas"]["AutomationRun"][];
+            next_cursor: string | null;
+        };
+        /**
+         * @description Closed. Clients treat an unknown value as `info`, so a later level is not breaking.
+         * @enum {string}
+         */
+        NotificationLevel: "info" | "warning" | "action_blocked" | "rule_proposed" | "rule_broken" | "rule_limit" | "kill_switch";
+        Notification: components["schemas"]["NotificationFields"];
+        /**
+         * @description A persisted notification. `text` is server-built or the rule's own `notify` text (at most 500 chars), displayed as plain text,
+         *     never interpreted and never given to an LLM. It carries no secret, token or raw device string; endpoint and rule names are
+         *     admin-set labels, sanitized.
+         */
+        NotificationFields: {
+            notification_id: components["schemas"]["NotificationId"];
+            ts: number;
+            level: components["schemas"]["NotificationLevel"];
+            source: string;
+            /** @description Present exactly when `source` is `automation:<rule_id>` */
+            rule_id?: components["schemas"]["RuleId"] | null;
+            endpoint_id?: components["schemas"]["EndpointId"] | null;
+            text: string;
+            /** @description For the calling user; absent in WebSocket pushes */
+            read?: boolean;
+        };
+        NotificationPage: {
+            items: components["schemas"]["Notification"][];
+            next_cursor: string | null;
+        };
+        AutomationKillSwitch: {
+            automations_enabled: boolean;
+            changed_by?: string | null;
+            changed_at?: number | null;
         };
         ConsumeRequest: {
             /** @description 256-bit random */
@@ -1218,6 +1598,7 @@ export interface components {
     parameters: {
         EndpointId: components["schemas"]["EndpointId"];
         NodeId: components["schemas"]["NodeId"];
+        RuleId: components["schemas"]["RuleId"];
     };
     requestBodies: never;
     headers: never;
@@ -1754,6 +2135,351 @@ export interface operations {
                 };
                 content?: never;
             };
+        };
+    };
+    listAutomations: {
+        parameters: {
+            query?: {
+                status?: components["schemas"]["AutomationStatus"];
+                created_by?: components["schemas"]["AutomationCreatedBy"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Rules */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutomationRule"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createAutomation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutomationRuleInput"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutomationRule"];
+                };
+            };
+            /** @description Invalid rule (`bad_rule`) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description `confirm_endpoint_not_allowed` or `rule_limit` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getAutomation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Rule */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutomationRule"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateAutomation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutomationRuleInput"];
+            };
+        };
+        responses: {
+            /** @description Updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutomationRule"];
+                };
+            };
+            /** @description `bad_rule` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description `confirm_endpoint_not_allowed` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    deleteAutomation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    approveAutomation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Approved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutomationRule"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description `rule_broken` or `confirm_endpoint_not_allowed` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    disableAutomation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Disabled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutomationRule"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listAutomationRuns: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                rule_id: components["parameters"]["RuleId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutomationRunPage"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listNotifications: {
+        parameters: {
+            query?: {
+                unread?: boolean;
+                rule_id?: components["schemas"]["RuleId"];
+                limit?: number;
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationPage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    markNotificationsRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    notification_ids: components["schemas"]["NotificationId"][];
+                };
+            };
+        };
+        responses: {
+            /** @description Marked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    adminGetAutomationKillSwitch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description State */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutomationKillSwitch"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    adminSetAutomationKillSwitch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    automations_enabled: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description New state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutomationKillSwitch"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
         };
     };
     systemHealth: {

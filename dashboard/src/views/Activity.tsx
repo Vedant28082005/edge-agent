@@ -11,6 +11,7 @@ function describe(m: ReturnType<typeof useLive>["feed"][number]["msg"]): string 
     case "confirmation_declined": return `declined: ${m.summary}`;
     case "confirmation_expired": return `expired: ${m.summary}`;
     case "notification": return `${m.level}: ${m.text}`;
+    case "automation_notification": return `${m.level}: ${m.text}`;
     case "async_result": return `async ${m.kind}: ${m.text}`;
     case "registry_changed": return `registry changed (v${m.version})`;
     case "scenes_changed": return `scene ${m.scene_id} ${m.change}`;
