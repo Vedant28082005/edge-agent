@@ -135,7 +135,10 @@ class Scheduler:
             return None
         calls = ensure_power_dependency([{"tool": "set_state", "args": clean}], self.registry)
         outs = await self.executor.run_calls(ctx, calls)
-        return Routed(outs=outs, say="")
+        verb = "raised" if direction > 0 else "lowered"
+        pct = "%" if c.min == 0 and c.max == 100 else ""
+        shown = int(target) if c.type == "int" else target
+        return Routed(outs=outs, say=f"{d.name} {verb} to {shown}{pct}.")
 
     async def _perception(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
         snap = self._snapshot_ref(ctx, text)
