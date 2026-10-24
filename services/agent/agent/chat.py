@@ -35,6 +35,10 @@ KEEPALIVE_S = 8.0      # (S8g) well under any sane SSE/proxy idle timeout, for a
 NO_PLAN_TEXT = "I couldn't work out what to do."
 
 
+def _read_sig(c: dict) -> tuple:
+    return (c.get("tool"), tuple(sorted((c.get("args") or {}).items())))
+
+
 def no_plan_text(reg: DeviceRegistry) -> str:
     """(S8g) The model made no tool call and gave no text either: never silently say "OK", and never invent a
     device -- name one straight from the live registry (any real one; it is only an example of the phrasing)."""
@@ -326,6 +330,25 @@ class ChatService:
                         self.metrics.ambient_clarifications += 1
                         say = ambient_clarifying_text(domain, reg)
                         break
+                # (S8l) loop guard: never re-run a get_state/read_sensor call this turn already has a verified
+                # result for -- a buggy (or merely repetitive) model's plan must not re-read the same endpoint
+                # over and over until the request budget runs out. Also dedupes within this very plan (two
+                # identical read calls in the same round), not just across rounds.
+                seen_reads = {_read_sig({"tool": o.tool, "args": o.args}) for o in outs if o.ok and o.tool in READ_TOOLS}
+                deduped: list[dict] = []
+                for c in plan.calls:
+                    if c.get("tool") in READ_TOOLS:
+                        rsig = _read_sig(c)
+                        if rsig in seen_reads:
+                            continue
+                        seen_reads.add(rsig)
+                    deduped.append(c)
+                if len(deduped) != len(plan.calls):
+                    log.warning("dropped %d duplicate read call(s) already answered this turn", len(plan.calls) - len(deduped))
+                    plan.calls = deduped
+                    if not plan.calls:
+                        say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or say or no_plan_text(reg)
+                        break
                 if trace is not None:
                     trace.note_calls(plan.calls)
                 await ctx.emit("status", {"text": "working on it"})
@@ -349,6 +372,14 @@ class ChatService:
                 if not reads:
                     # a pure action turn (or an action after an earlier read this same turn): the confirmation is
                     # built from the verified results, never the model's (it has none to draft, S8i).
+                    say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or say
+                    break
+                if is_question_intent(text):
+                    # (S8l) loop guard: a question/status turn stops here, as soon as it has a verified read --
+                    # it never goes back to the LLM to ask whether it's done (the model has no text channel to
+                    # answer that with anyway, S8i). This is the other half of the bug fix above: it is what
+                    # stops a model that keeps calling get_state instead of stopping, before it ever gets the
+                    # chance to repeat itself into the request budget limit.
                     say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or say
                     break
                 extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases, hb_table)}]

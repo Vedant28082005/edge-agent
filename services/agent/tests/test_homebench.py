@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import make_env, one
+
 from agent import homebench
 from agent.config import AgentConfig, load_config
 from agent.devices import DeviceRegistry
@@ -198,3 +200,38 @@ def test_render_calls_round_trips_power():
     t = table()
     calls = [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000006", "capability": "power", "value": True}}]
     assert homebench.render_calls(calls, t) == "living_room.light.turn_on(),"
+
+
+# --------------------------------------------------------------------------------------------- end-to-end (S8l merge)
+async def test_homebench_question_still_stops_after_one_read(tmp_path):
+    """(S8l + S8k) The homebench-tuned model has no way to express a read at all (device_method only ever lists
+    set_* methods), so a status question must be answered without it -- by the resolver's status fast path, same
+    as the json format. This is the "stops after one read" guarantee for homebench: the fast path (format-agnostic)
+    answers from a single get_state and the LLM is never even asked."""
+    e = await make_env(tmp_path, sched={"fast_path": True, "router": False}, llm_format="homebench")
+    try:
+        e.fake.state["ep_a1000001"]["power"] = True
+        e.fake.state["ep_a1000001"]["brightness"] = 42
+        ctx, ev = await e.chat("what is the ceiling light status?")
+        final = one(ev, "final")
+        assert final["route"] == "fast" and e.llm.requests == []
+        gets = [c for c in e.fake.calls if c["tool"] == "get_state"]
+        assert len(gets) == 1
+        assert "Ceiling light" in final["text"] and "42" in final["text"]
+        assert not [c for c in e.fake.calls if c["tool"] == "set_state"]
+    finally:
+        await e.close()
+
+
+async def test_homebench_question_with_no_fast_path_match_falls_back_without_calling_the_llm(tmp_path):
+    """Fast path off, no other read mechanism available for homebench's state questions: the turn must still
+    terminate (never loop or hang) and must never send the question to the LLM (it has no way to reply with a
+    read at all, see module docstring)."""
+    e = await make_env(tmp_path, sched={"fast_path": False, "router": False}, llm_format="homebench")
+    try:
+        ctx, ev = await e.chat("what is the ceiling light status?")
+        final = one(ev, "final")
+        assert e.llm.requests == []
+        assert final["text"]
+    finally:
+        await e.close()

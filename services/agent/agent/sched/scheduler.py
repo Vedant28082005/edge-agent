@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from ..devices import DeviceRegistry
 from ..events import Event, EventBus
 from ..executor import CallOutcome, Executor
-from ..render import ambient_clarifying_text, describe_outcomes, describe_reads
+from ..render import ambient_clarifying_text, describe_outcomes, describe_question, describe_reads
 from ..reqctx import ReqCtx
 from ..schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
                       validate_call)
@@ -95,6 +95,9 @@ class Scheduler:
         status = self.resolver.resolve_status(text, reg)
         if status is not None:
             return await self._status(ctx, status, trace, reg)
+        question = self.resolver.resolve_question(text, reg)
+        if question is not None:
+            return await self._question(ctx, question, trace, reg)
         res = self.resolver.resolve(text, reg, ctx.role, reg.scene_names())
         trace.fast_reason, trace.confidence = res.reason, round(res.confidence, 3)
         trace.candidates = [list(c) for c in res.candidates]
@@ -129,6 +132,17 @@ class Scheduler:
         outs = await self.executor.run_calls(ctx, status.calls)
         trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
         return Routed(outs=outs, text=describe_reads(outs, reg) or "I don't have a reading for that yet.")
+
+    async def _question(self, ctx: ReqCtx, res, trace: TurnTrace, reg: DeviceRegistry) -> Routed:
+        """(S8l) "is the ceiling light on?" / "how bright is the lamp?" / "is anything on?" -- a yes/no or
+        single-capability question, answered with get_state and no LLM, never a write."""
+        trace.fast_reason, trace.confidence = res.reason, round(res.confidence, 3)
+        trace.candidates = [list(c) for c in res.candidates]
+        trace.note_calls(res.calls)
+        outs = await self.executor.run_calls(ctx, res.calls)
+        trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
+        text = describe_question(outs, reg, res.question) if res.question else ""
+        return Routed(outs=outs, text=text or "I don't have a reading for that yet.")
 
     async def _ambient(self, ctx: ReqCtx, text: str, trace: TurnTrace, reg: DeviceRegistry) -> Routed | None:
         """(S8j) "it's dark/bright/hot/cold/stuffy in here", no device named: act without the LLM when exactly one
