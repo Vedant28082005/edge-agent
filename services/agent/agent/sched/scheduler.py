@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from ..devices import DeviceRegistry
 from ..events import Event, EventBus
 from ..executor import CallOutcome, Executor
-from ..render import ambient_clarifying_text, describe_outcomes, describe_question, describe_reads
+from ..render import LIST_MAX, ambient_clarifying_text, describe_outcomes, describe_question, describe_reads
+from ..util import clean_label
 from ..reqctx import ReqCtx
 from ..schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
                       validate_call)
@@ -25,6 +26,7 @@ from ..scope import UNRESTRICTED, Scope
 from ..store import Store
 from ..views import ScopedViews
 from .config import SchedConfig
+from .intents import is_identity_intent, is_list_intent
 from .grammar import ConstraintCache, ConstraintSchema, make_backend
 from .memory import MemoryWindow
 from .prefix import PrefixTracker
@@ -35,6 +37,8 @@ from .trace import RAW_TRUNC, TRACE_EVENT, TurnTrace
 log = logging.getLogger("agent.sched")
 
 GUEST_DENIED_TEXT = "Guests can't control devices."
+IDENTITY_TEXT = ("I'm your smart-home assistant: I can control your lights, fans, locks and other devices, run scenes, "
+                 "and tell you what's on.")
 
 
 @dataclass
@@ -56,6 +60,7 @@ class Scheduler:
         self.memory = MemoryWindow(store, cfg.window_tokens, cfg.summary_tokens, max_messages=cfg.window_messages)
         self.prefix = PrefixTracker()
         self.by_route: dict[str, dict] = {}
+        self.model_name = None             # async () -> str | None: the LLM's name (config, else llama-server /props); set by Agent
 
     # ------------------------------------------------------------------------------------------ flags
     def set_flags(self, **flags: bool) -> None:
@@ -80,6 +85,8 @@ class Scheduler:
     # ------------------------------------------------------------------------------------------ routing
     async def route(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
         """A finished non-LLM answer, or None when the LLM must take the turn."""
+        if is_identity_intent(text):                       # a fixed capability line: never a device read, never the LLM
+            return await self._identity(trace)
         if self.executor is None:
             return None
         if self.cfg.fast_path:
@@ -92,6 +99,8 @@ class Scheduler:
 
     async def _fast(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
         reg = self.views.get(ctx.scope).registry          # scoped: the resolver cannot even name an out-of-scope device or scene
+        if is_list_intent(text):
+            return await self._list(ctx, trace, reg)
         status = self.resolver.resolve_status(text, reg)
         if status is not None:
             return await self._status(ctx, status, trace, reg)
@@ -136,6 +145,31 @@ class Scheduler:
             return f"I don't see {art} {name}."
         more = f" and {len(names) - 5} more" if len(names) > 5 else ""
         return f"I don't see {art} {name}. I can control: {', '.join(names[:5])}{more}."
+
+    async def _identity(self, trace: TurnTrace) -> Routed:
+        """"who are you" / "what is the llm name": the fixed capability line plus the model's name when it is known."""
+        name = ""
+        if self.model_name is not None:
+            try:
+                name = clean_label(await self.model_name(), 48)
+            except Exception:                                  # a failed /props lookup only drops the name
+                log.warning("model name lookup failed", exc_info=True)
+        trace.fast_reason, trace.confidence = "identity", 1.0
+        trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
+        return Routed(text=f"{IDENTITY_TEXT} I run on {name}." if name else IDENTITY_TEXT)
+
+    async def _list(self, ctx: ReqCtx, trace: TurnTrace, reg: DeviceRegistry) -> Routed:
+        """"devices" / "list devices" / "what can you control": `list_devices`, then one `get_state` per room of the (at most
+        `LIST_MAX`) devices shown so the reply can say on/off and the level. No LLM."""
+        trace.fast_reason, trace.confidence = "list_devices", 1.0
+        calls: list[dict] = [{"tool": "list_devices", "args": {}}]
+        shown = sorted(reg.devices.values(), key=lambda d: (d.room.lower(), d.name.lower(), d.endpoint_id))[:LIST_MAX]
+        for room in dict.fromkeys(d.room for d in shown):
+            calls.append({"tool": "get_state", "args": {"room": room}})
+        trace.note_calls(calls)
+        outs = await self.executor.run_calls(ctx, calls)
+        trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
+        return Routed(outs=outs, text=describe_reads(outs, reg) or "I don't have a device list yet.")
 
     async def _status(self, ctx: ReqCtx, status, trace: TurnTrace, reg: DeviceRegistry) -> Routed:
         """(S8j) "what is the device status?" -- a question, answered with get_state and no LLM, never a write."""

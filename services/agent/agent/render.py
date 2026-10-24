@@ -64,6 +64,8 @@ def describe_reads(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
     """Text for a pure-read turn (read_sensor / get_state), built from the verified results: the only place a
     read_sensor/get_state value ever reaches the user. Values come straight from the hub's own result fields, never
     a model draft, and are re-sanitised (`clean_label`) like every other device-derived string."""
+    if any(o.ok and o.tool == "list_devices" for o in outs):
+        return describe_list(outs, reg)
     reads = [o for o in outs if o.ok and o.tool in ("read_sensor", "get_state")]
     if not reads:
         return ""
@@ -86,6 +88,50 @@ def describe_reads(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
                 vs = ", ".join(f"{clean_label(k, 24)}={fmt_value(v)}" for k, v in sorted((s.get("values") or {}).items()))
                 parts.append(f"{nm}: {vs}." if vs else f"{nm}: no data.")
     return " ".join(parts)
+
+
+LIST_MAX = 8
+_LIST_LEVELS = (("brightness", "%"), ("speed", ""), ("position", "%"), ("target_temp", ""))
+
+
+def _list_state(values: dict) -> str:
+    """"on at 80%" / "off" / "locked" / "open (40%)" from one get_state `values` dict; "" when it has nothing to say."""
+    power, lock = values.get("power"), values.get("lock")
+    level = next((f"{fmt_value(values[c])}{u}" for c, u in _LIST_LEVELS if isinstance(values.get(c), (int, float))
+                  and not isinstance(values.get(c), bool)), "")
+    if isinstance(power, bool):
+        return ("on" if power else "off") + (f" at {level}" if power and level else "")
+    if isinstance(lock, str):
+        return clean_label(lock, 12)
+    return level
+
+
+def describe_list(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
+    """A `list_devices` outcome rendered for the user: at most `LIST_MAX` devices (name, room, and the current on/off and
+    level when a `get_state` of the same turn supplies it). The hub's cleaned list result carries only a count, so names
+    and rooms come from the (scoped) registry the caller passes, filtered by the call's own room/type arguments."""
+    lists = [o for o in outs if o.ok and o.tool == "list_devices"]
+    if not lists:
+        return ""
+    room, typ = lists[0].args.get("room"), lists[0].args.get("type")
+    devs = sorted((d for d in reg.devices.values() if (not room or d.room == room) and (not typ or d.type == typ)),
+                  key=lambda d: (d.room.lower(), d.name.lower(), d.endpoint_id))
+    if not devs:
+        return "I don't see any devices."
+    live: dict[str, dict] = {}
+    for o in outs:
+        if o.ok and o.tool == "get_state":
+            for s in o.result.get("states") or []:
+                if isinstance(s, dict) and isinstance(s.get("endpoint_id"), str):
+                    live[s["endpoint_id"]] = s
+    items = []
+    for d in devs[:LIST_MAX]:
+        s = live.get(d.endpoint_id)
+        st = "offline" if s is not None and not s.get("online") else (_list_state(s.get("values") or {}) if s else "")
+        items.append(f"{d.name} ({d.room})" + (f" {st}" if st else ""))
+    n, more = len(devs), len(devs) - LIST_MAX
+    head = f"You have {n} device{'s' if n != 1 else ''}: "
+    return head + "; ".join(items) + (f"; and {more} more." if more > 0 else ".")
 
 
 _QUESTION_UNIT = {"brightness": "%", "position": "%"}

@@ -55,6 +55,7 @@ class LlmClient:
         self.prefix_cache, self.id_slot = True, 0                      # cache_prompt + id_slot (sched.prefix_cache)
         self._slot = asyncio.Semaphore(1)
         self._waiting = 0
+        self._model_name = ""
         self._max_queued = max_queued
 
     async def health(self) -> bool:
@@ -63,6 +64,23 @@ class LlmClient:
             return r.status_code == 200
         except httpx.HTTPError:
             return False
+
+    async def props_model(self) -> str:
+        """The served model's name from llama-server's /props (alias, else the GGUF file name); "" when unavailable.
+        Cached once found."""
+        if self._model_name:
+            return self._model_name
+        try:
+            r = await self._http.get(self._base + "/props", timeout=3.0)
+            j = r.json() if r.status_code == 200 else {}
+        except (httpx.HTTPError, ValueError):
+            return ""
+        gen = j.get("default_generation_settings") if isinstance(j, dict) else None
+        cand = (j.get("model_alias") if isinstance(j, dict) else None) or j.get("model_path") or (
+            gen.get("model") if isinstance(gen, dict) else None)
+        name = str(cand or "").replace("\\", "/").rsplit("/", 1)[-1]
+        self._model_name = name.removesuffix(".gguf")
+        return self._model_name
 
     async def aclose(self) -> None:
         if self._own_http:
