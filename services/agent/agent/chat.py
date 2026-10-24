@@ -16,13 +16,16 @@ from .executor import READ_TOOLS, CallOutcome, Executor, Metrics
 from .llm import LlmBusy, LlmError
 from .planner import Plan, Planner
 from .prompt import PromptBudgetError, PromptBuilder, render_result
+from .render import ambient_clarifying_text, describe_outcomes, describe_reads
+from .render import name as _name
 from .reqctx import ReqCtx
-from .schema import ambient_domain_devices, ambient_request_signal, plan_domain_direction, repair_plan_calls
+from .schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, is_question_intent,
+                     plan_domain_direction, repair_plan_calls, strip_writes_for_question)
 from .sched.scheduler import Scheduler
 from .sched.trace import TurnTrace
 from .store import Store
 from .views import ScopedViews
-from .util import clean_label, clean_user_text
+from .util import clean_user_text
 
 log = logging.getLogger("agent.chat")
 
@@ -39,19 +42,6 @@ def no_plan_text(reg: DeviceRegistry) -> str:
     return f"{NO_PLAN_TEXT} Try naming the device, for example: turn on {name}." if name else NO_PLAN_TEXT
 
 
-# S8h: an ambient complaint ("it's dark/bright/hot/cold/stuffy in here") names no device and no number. Acting is
-# only safe when exactly one device answers that domain and the plan's own direction is unambiguous; otherwise ask,
-# naming the real devices from the registry rather than guessing one.
-def ambient_clarifying_text(domain: str, reg: DeviceRegistry) -> str:
-    names = [d.name for d in ambient_domain_devices(reg, domain)]
-    if not names:
-        return "Which device do you mean?"
-    if len(names) == 1:
-        return f"Did you mean {names[0]}?"
-    shown = ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
-    return f"Which one do you mean — {shown}?"
-
-
 ERROR_TEXT = {
     "unknown_endpoint": "that device doesn't exist", "unknown_capability": "that device can't do that",
     "not_actuator": "that can't be controlled", "bad_type": "that value isn't valid for the device",
@@ -64,11 +54,6 @@ ERROR_TEXT = {
     "not_allowed": "guests can't do that", "blocked_notify_only": "needs your confirmation in the app",
     "out_of_scope": "that isn't available to you", "not_sensor": "that isn't a sensor", "bad_tool_result": "the hub returned something unexpected",
 }
-
-
-def _name(reg: DeviceRegistry, ep: object) -> str:
-    d = reg.devices.get(ep) if isinstance(ep, str) else None
-    return d.name if d else "that device"
 
 
 def outcome_of(outs: list) -> str:
@@ -118,82 +103,6 @@ def compose_final(say: str, outs: list[CallOutcome], reg: DeviceRegistry) -> str
     return " ".join(parts)
 
 
-def describe_outcomes(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
-    """The confirmation text for a pure action turn, built by the agent from the verified outcomes (S8f): the model
-    is not trusted to draft it, so its `say` is never used here. Empty when nothing to act on was actually run."""
-    acted = [o for o in outs if o.ok and o.tool in ("set_state", "run_scene")]
-    if not acted:
-        return ""
-    on_eps = {o.args.get("endpoint_id") for o in acted if o.tool == "set_state" and o.args.get("capability") == "power"
-              and o.args.get("value") is True}
-    # (S8g) generic: any other set_state on the same endpoint in this turn is narrated together with the power-on,
-    # not as a separate "turned on." sentence -- whatever capability it is, not just brightness.
-    other_cap_eps = {o.args.get("endpoint_id") for o in acted if o.tool == "set_state" and o.args.get("capability") != "power"}
-    parts: list[str] = []
-    for o in acted:
-        if o.tool == "run_scene":
-            parts.append(f"Running {o.args.get('scene')}.")
-            continue
-        cap, val, ep = o.args.get("capability"), o.args.get("value"), o.args.get("endpoint_id")
-        name = _name(reg, ep)
-        if cap == "power":
-            if val is True and ep in other_cap_eps:
-                continue                          # narrated together with the dependent call below
-            parts.append(f"{name} turned {'on' if val else 'off'}.")
-        elif cap == "lock":
-            parts.append(f"{name} {'unlocked' if val == 'unlocked' else 'locked'}.")
-        elif cap == "position":
-            parts.append(f"{name} {'opened' if val else 'closed'}.")
-        elif cap == "brightness":
-            if ep in on_eps:
-                parts.append(f"{name} turned on at {val}%.")
-            else:
-                parts.append(f"{name} brightness set to {val}.")
-        elif ep in on_eps:
-            parts.append(f"{name} turned on; {cap} set to {val}.")
-        else:
-            parts.append(f"{name} {cap} set to {val}.")
-    return " ".join(parts)
-
-
-def _fmt_value(v: object) -> str:
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, (int, float)):
-        return str(v)
-    return clean_label(v, 24) or "?"
-
-
-def describe_reads(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
-    """Text for a pure-read turn (read_sensor / get_state), built by the agent from the verified results, the same
-    reasoning as `describe_outcomes` extended to reads: the model has no text channel to report a reading with
-    (S8i), so this is the only place a `read_sensor`/`get_state` value ever reaches the user. Values come straight
-    from the hub's own result fields, never a model draft, and are re-sanitised (`clean_label`) like every other
-    device-derived string."""
-    reads = [o for o in outs if o.ok and o.tool in ("read_sensor", "get_state")]
-    if not reads:
-        return ""
-    parts: list[str] = []
-    for o in reads:
-        if o.tool == "read_sensor":
-            name = _name(reg, o.args.get("endpoint_id"))
-            cap = clean_label(o.result.get("capability"), 24)
-            unit = clean_label(o.result.get("unit"), 8)
-            stale = " (last known)" if o.result.get("stale") else ""
-            parts.append(f"{name} {cap}: {_fmt_value(o.result.get('value'))}{unit}{stale}.")
-        else:
-            for s in o.result.get("states") or []:
-                if not isinstance(s, dict):
-                    continue
-                name = _name(reg, s.get("endpoint_id"))
-                if not s.get("online"):
-                    parts.append(f"{name}: offline.")
-                    continue
-                vs = ", ".join(f"{clean_label(k, 24)}={_fmt_value(v)}" for k, v in sorted((s.get("values") or {}).items()))
-                parts.append(f"{name}: {vs}." if vs else f"{name}: no data.")
-    return " ".join(parts)
-
-
 class ChatService:
     def __init__(self, registry: DeviceRegistry, builder: PromptBuilder, planner: Planner, executor: Executor,
                  store: Store, metrics: Metrics, settle_wait_s: float = 150.0, max_queued_turns: int = 2,
@@ -232,6 +141,34 @@ class ChatService:
     def _vision_enabled(self) -> bool:
         """A node is enabled when the router is on and at least one vision/yolo backend is registered."""
         return bool(self.sched and self.sched.cfg.router and self.sched.router.avail.backends)
+
+    async def _ambient_empty_plan(self, ctx: ReqCtx, text: str, reg: DeviceRegistry, outs: list[CallOutcome],
+                                  trace: TurnTrace | None) -> str | None:
+        """(S8j) The scheduler's own ambient fast path (sched/scheduler.py `_ambient`) normally handles an ambient
+        complaint before the LLM ever runs; this is the backstop for when it is disabled or did not match (e.g. an
+        earlier read this turn took a different fallthrough): a model that gave up and returned an empty plan for
+        "it's dark/bright/..." is answered with the ambient rule -- act when exactly one device can answer and has
+        the needed capability, ask when more than one could -- never the generic "I couldn't work out" text. None
+        when the text names no ambient complaint at all, so the caller falls back to its own default text."""
+        sig = ambient_request_signal(text, reg)
+        if sig is None:
+            return None
+        domain, direction = sig
+        devs = ambient_domain_devices(reg, domain)
+        if not devs:
+            return None
+        if len(devs) > 1:
+            self.metrics.ambient_clarifications += 1
+            return ambient_clarifying_text(domain, reg)
+        call = ambient_default_call(domain, direction, devs[0])
+        if call is None:
+            return None
+        new = await self.executor.run_calls(ctx, [call])
+        outs += new
+        if trace is not None:
+            trace.note_calls([call])
+            trace.note_executed(new)
+        return " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or None
 
     async def on_user_message(self, event: Event) -> None:
         ctx: ReqCtx = event.data["ctx"]
@@ -343,10 +280,26 @@ class ChatService:
                     self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained), plan.raw)
                 if not plan.calls:
                     # the model has no text channel (S8i): either this is "I'm done" after a read earlier this turn
-                    # (narrate it) or there was never anything to act on at all (the safe, device-naming fallback).
-                    say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
+                    # (narrate it), an ambient complaint the model gave up on (act/ask on it directly rather than
+                    # the generic fallback, S8j), or there was never anything to act on at all (device-naming fallback).
+                    ambient_acted = await self._ambient_empty_plan(ctx, text, reg, outs, trace)
+                    if ambient_acted is not None:
+                        say = ambient_acted
+                    else:
+                        say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
                     break
                 plan.calls = repair_plan_calls(plan.calls, text, reg)
+                if is_question_intent(text):
+                    # Bug (S8j): a question/status request must never cause a write, whatever the model proposed.
+                    plan.calls, stripped = strip_writes_for_question(plan.calls)
+                    if stripped:
+                        self.metrics.writes_stripped_for_question += len(stripped)
+                        if trace is not None:
+                            trace.note_stripped_writes(stripped)
+                        log.warning("stripped %d write call(s) from a question turn", len(stripped))
+                    if not plan.calls:
+                        say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
+                        break
                 sig = ambient_request_signal(text, reg)
                 if sig is not None:
                     domain, expected = sig
