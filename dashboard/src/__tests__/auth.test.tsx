@@ -63,7 +63,7 @@ describe("auth", () => {
     );
     session.set({ access_token: "old", refresh_token: "r", role: "admin" });
     render(<App />);
-    expect(await screen.findByText("No devices visible to you.")).toBeInTheDocument();
+    expect(await screen.findByText("No devices yet. Add one in Admin.")).toBeInTheDocument();
     expect(calls).toBe(2);
   });
 });

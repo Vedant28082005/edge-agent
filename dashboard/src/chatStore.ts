@@ -5,8 +5,8 @@ import { session } from "./api/client";
 
 export type Tool = { call_id: string; tool: string; args: unknown; result?: unknown; ok?: boolean };
 export type Msg =
-  | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string; final: boolean; route?: string; latency_ms?: number; status?: string; tools: Tool[]; error?: string };
+  | { kind: "user"; text: string; ts?: number }
+  | { kind: "assistant"; text: string; final: boolean; route?: string; latency_ms?: number; status?: string; tools: Tool[]; error?: string; stopped?: boolean; ts?: number };
 
 const STORAGE_KEY = "edge.chat";
 const SECRET_KEYS = new Set(["access_token", "refresh_token", "confirmation_token"]);

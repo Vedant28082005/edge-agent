@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, session } from "../api/client";
 import type { ConfirmationRequired } from "../api/events";
 import type { Capability, Endpoint, SetResult } from "../api/types";
@@ -6,6 +6,11 @@ import { explain } from "../errors";
 import { settleKey, useLive, type Settle } from "../live";
 
 type Value = boolean | number | string;
+
+const CAP_NAMES: Record<string, string> = { power: "Power", brightness: "Brightness", speed: "Fan speed", position: "Position", target: "Target temperature", mode: "Mode", temperature: "Temperature", humidity: "Humidity", lock: "Lock", color_temp: "Colour temperature" };
+export const capLabel = (id: string) => CAP_NAMES[id] ?? (id.charAt(0).toUpperCase() + id.slice(1).replace(/_/g, " "));
+const TYPE_ICON: Record<string, string> = { light: "💡", fan: "🌀", outlet: "🔌", cover: "▤", thermostat: "🌡", sensor: "◉", lock: "🔒" };
+const TOGGLE_DEBOUNCE_MS = 250;
 
 const PHASE_LABEL = { accepted: "accepted", settling: "settling", settled: "settled", settle_timeout: "settle timeout" } as const;
 
@@ -47,19 +52,21 @@ function useCapabilityAction(ep: Endpoint, cap: Capability) {
   const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const send = async (value: Value, token?: string) => {
+  const send = async (value: Value, token?: string): Promise<boolean> => {
     setErr(null);
     setBusy(true);
     try {
       const r = await api<SetResult>("POST", `/devices/${ep.endpoint_id}/set`, { capability: cap.id, value, ...(token ? { confirmation_token: token } : {}) });
-      if (!r.ok) { setErr(explain(r.error ?? "failed")); return; }
+      if (!r.ok) { setErr(explain(r.error ?? "failed")); return false; }
       noteSettle(ep.endpoint_id, cap.id, "accepted");
       if (r.status === "moving") noteSettle(ep.endpoint_id, cap.id, "settling", cap.settle_s);
+      return true;
     } catch (e) {
       const code = (e as { code?: string }).code;
       const body = (e as { body?: Partial<ConfirmationRequired> }).body;
       if (code === "confirmation_required" && body?.summary && body.action) setPending({ value, summary: body.summary, action: body.action });
       else setErr(explain(e));
+      return false;
     } finally { setBusy(false); }
   };
 
@@ -96,10 +103,35 @@ function CapControl({ ep, cap, hubDown }: { ep: Endpoint; cap: Capability; hubDo
   const { send, confirmDirect, cancelPending, pending, busy, err } = useCapabilityAction(ep, cap);
   const cur = ep.state?.[cap.id];
   const [draft, setDraft] = useState<number | null>(null);
+  const [want, setWant] = useState<boolean | null>(null); // switch value being sent (shown until the server state arrives)
+  const [done, setDone] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const doneTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const guest = session.role === "guest";
   // When the hub itself is unreachable, every device is treated as offline with its last known state.
   const offline = !ep.online || !ep.enabled || hubDown;
   const disabled = offline || busy;
+  const label = capLabel(cap.id);
+
+  useEffect(() => () => { clearTimeout(timer.current); clearTimeout(doneTimer.current); }, []);
+  // The server state arrived: drop the pending values.
+  useEffect(() => { setDraft(null); setWant(null); }, [cur]);
+
+  // A failed send reverts the pending value (rule 8); a successful one flashes "Done" briefly.
+  const commit = async (value: Value) => {
+    setDone(false);
+    const ok = await send(value);
+    if (!ok) { setDraft(null); setWant(null); return; }
+    setDone(true);
+    clearTimeout(doneTimer.current);
+    doneTimer.current = setTimeout(() => setDone(false), 1800);
+  };
+  // Rapid toggles collapse into one command carrying the last value.
+  const toggle = (v: boolean) => {
+    setWant(v);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => { void commit(v); }, TOGGLE_DEBOUNCE_MS);
+  };
 
   const unit = cap.unit ? ` ${cap.unit}` : "";
   let control: React.ReactNode;
@@ -109,38 +141,47 @@ function CapControl({ ep, cap, hubDown }: { ep: Endpoint; cap: Capability; hubDo
   } else if (cap.kind === "sensor") {
     control = <span className="readout">{cur == null ? "—" : `${String(cur)}${unit}`}</span>;
   } else if (cap.type === "bool") {
+    const on = want ?? cur === true;
     control = (
       <label className="switch">
-        <input type="checkbox" role="switch" aria-label={cap.id} checked={cur === true} disabled={disabled} tabIndex={offline ? -1 : undefined} onChange={(e) => send(e.target.checked)} />
-        <span className="switch-label">{cur === true ? "on" : "off"}</span>
+        <input type="checkbox" role="switch" aria-label={label} checked={on} disabled={offline} tabIndex={offline ? -1 : undefined} onChange={(e) => toggle(e.target.checked)} />
+        <span className="switch-label">{on ? "On" : "Off"}</span>
       </label>
     );
   } else if (cap.type === "enum") {
     control = (
-      <select aria-label={cap.id} value={typeof cur === "string" ? cur : ""} disabled={disabled} tabIndex={offline ? -1 : undefined} onChange={(e) => send(e.target.value)}>
+      <select aria-label={label} value={typeof cur === "string" ? cur : ""} disabled={disabled} tabIndex={offline ? -1 : undefined} onChange={(e) => void commit(e.target.value)}>
         {typeof cur !== "string" && <option value="" disabled>—</option>}
         {(cap.values ?? []).map((v) => <option key={v} value={v}>{v}</option>)}
       </select>
     );
   } else if (cap.min != null && cap.max != null) {
     const shown = draft ?? (typeof cur === "number" ? cur : cap.min);
+    // The command goes out on release (pointer up / key up), never on every drag tick.
+    const release = () => { if (draft !== null && draft !== cur) void commit(draft); };
     control = (
       <span className="slider">
-        <input type="range" aria-label={cap.id} min={cap.min} max={cap.max} step={cap.type === "int" ? 1 : "any"} value={shown} disabled={disabled} tabIndex={offline ? -1 : undefined}
-          onChange={(e) => setDraft(Number(e.target.value))}
-          onPointerUp={() => draft !== null && send(draft)} onKeyUp={() => draft !== null && send(draft)} />
-        <output>{shown}{unit}</output>
+        <input type="range" aria-label={label} min={cap.min} max={cap.max} step={cap.type === "int" ? 1 : "any"} value={shown} disabled={disabled} tabIndex={offline ? -1 : undefined}
+          onChange={(e) => setDraft(Number(e.target.value))} onPointerUp={release} onKeyUp={release} />
+        <output aria-label={`${label} value`}>{shown}{unit}</output>
       </span>
     );
   } else {
-    control = <input type="number" aria-label={cap.id} defaultValue={typeof cur === "number" ? cur : undefined} disabled={disabled} tabIndex={offline ? -1 : undefined}
-      onKeyDown={(e) => { if (e.key === "Enter") void send(Number((e.target as HTMLInputElement).value)); }} />;
+    control = <input type="number" aria-label={label} defaultValue={typeof cur === "number" ? cur : undefined} disabled={disabled} tabIndex={offline ? -1 : undefined}
+      onKeyDown={(e) => { if (e.key === "Enter") void commit(Number((e.target as HTMLInputElement).value)); }} />;
   }
 
+  const sending = busy || want !== null || (draft !== null && draft !== cur);
+  const failed = !guest && !!err;
   return (
     <div className="cap">
-      <span className="cap-name">{cap.id}</span>
+      <span className="cap-name">{label}</span>
       {control}
+      {!guest && !offline && (
+        <span className={`cap-state ${failed ? "failed" : sending ? "sending" : done ? "done" : ""}`} aria-live="polite">
+          {failed ? "Failed" : sending ? "Sending…" : done ? "Done" : ""}
+        </span>
+      )}
       <SettleTrail s={settle[settleKey(ep.endpoint_id, cap.id)]} />
       {!guest && pending !== null && <ConfirmInline pending={pending} busy={busy} onConfirm={confirmDirect} onCancel={cancelPending} />}
       {!guest && err && <span className="err" role="alert">{err}</span>}
@@ -159,7 +200,7 @@ export function EndpointCard({ ep, hubDown = false }: { ep: Endpoint; hubDown?: 
         {!ep.enabled && <span className="badge off">disabled</span>}
         {guest && <span className="badge view-only">View only</span>}
       </header>
-      <div className="muted small">{ep.type}{ep.tags?.length ? ` · ${ep.tags.join(", ")}` : ""}</div>
+      <div className="muted small"><span className="type-badge"><span aria-hidden="true">{TYPE_ICON[ep.type] ?? "•"}</span> {ep.type}</span>{ep.tags?.length ? ` · ${ep.tags.join(", ")}` : ""}</div>
       {ep.capabilities.map((c) => <CapControl key={c.id} ep={ep} cap={c} hubDown={hubDown} />)}
     </article>
   );
@@ -235,6 +276,14 @@ function ReadingsStrip({ eps }: { eps: Endpoint[] }) {
   );
 }
 
+// "2 on · 1 off" over devices that report a power state; otherwise a plain device count.
+function roomSummary(eps: Endpoint[]): string {
+  const powered = eps.filter((e) => typeof e.state?.power === "boolean");
+  if (!powered.length) return `${eps.length} ${eps.length === 1 ? "device" : "devices"}`;
+  const on = powered.filter((e) => e.state?.power === true).length;
+  return `${on} on · ${powered.length - on} off`;
+}
+
 export function Devices() {
   const { endpoints, loadError, ws } = useLive();
   const rooms = useMemo(() => {
@@ -253,8 +302,16 @@ export function Devices() {
     <section>
       <h2>Devices <span className={`ws ws-${ws}`} aria-label={`live connection ${ws}`}>{ws === "open" ? "live" : ws}</span></h2>
       {loadError && <p className="err" role="alert">{loadError}</p>}
-      {endpoints === null && !loadError && <p className="muted">Loading…</p>}
-      {endpoints?.length === 0 && <p className="muted">No devices visible to you.</p>}
+      {endpoints === null && !loadError && (
+        <div className="grid" aria-busy="true" aria-label="Loading devices">
+          {[0, 1, 2].map((i) => <div key={i} className="card skeleton" aria-hidden="true"><span className="sk sk-title" /><span className="sk sk-line" /><span className="sk sk-line" /></div>)}
+        </div>
+      )}
+      {endpoints?.length === 0 && (
+        <div className="empty">
+          <p>{session.role === "guest" ? "No devices visible to you." : "No devices yet. Add one in Admin."}</p>
+        </div>
+      )}
       {hubDown && (
         <div className={`banner ${ws === "closed" ? "warn" : "info"}`} role="status">
           {ws === "closed" ? "Hub unreachable. Showing the last known state for every device." : "Reconnecting to the hub. Showing the last known state for every device."}
@@ -262,7 +319,7 @@ export function Devices() {
       )}
       {rooms.length > 0 && (
         <div className="devices-layout">
-          <nav className="room-tabs" aria-label="Rooms">
+          <nav className="room-tabs segmented" aria-label="Rooms">
             {rooms.map((r) => (
               <button key={r} aria-pressed={r === activeRoom} onClick={() => setRoom(r)}>{r}</button>
             ))}
@@ -283,8 +340,8 @@ export function Devices() {
               <h3>Around the house</h3>
               {others.map((r) => (
                 <button key={r} type="button" className="rail-room" onClick={() => setRoom(r)}>
-                  <span>{r}</span>
-                  <span className="muted small">{(endpoints ?? []).filter((e) => e.room === r).length} devices</span>
+                  <span className="room-label">{r}</span>
+                  <span className="muted small">{roomSummary((endpoints ?? []).filter((e) => e.room === r))}</span>
                 </button>
               ))}
             </aside>
