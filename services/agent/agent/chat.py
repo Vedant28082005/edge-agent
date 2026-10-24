@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 
+from .aliases import AliasMap
 from .devices import DeviceRegistry
 from .events import Event
 from .executor import READ_TOOLS, CallOutcome, Executor, Metrics
@@ -29,12 +29,6 @@ log = logging.getLogger("agent.chat")
 DEFAULT_IMAGE_QUESTION = "What do you see?"      # image-only turn, no text: a general describe-the-scene question
 KEEPALIVE_S = 8.0      # (S8g) well under any sane SSE/proxy idle timeout, for a 15-65s [est/measured] LLM turn
 
-# S8e: a text-only reply to an imperative request ("turn on the fan") must not claim an action that never ran.
-_IMPERATIVE_RE = re.compile(r"\b(turn|switch|set|dim|lock|unlock|run|open|close|start|stop)\b", re.IGNORECASE)
-_CLAIMS_ACTION_RE = re.compile(
-    r"^(turning|switching|setting|dimming|locking|unlocking|running|opening|closing|starting|stopping|done)\b",
-    re.IGNORECASE)
-NO_ACTION_TEXT = "I didn't make that change — could you say it again?"
 NO_PLAN_TEXT = "I couldn't work out what to do."
 
 
@@ -57,13 +51,6 @@ def ambient_clarifying_text(domain: str, reg: DeviceRegistry) -> str:
     shown = ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
     return f"Which one do you mean — {shown}?"
 
-
-def _is_imperative(text: str) -> bool:
-    return bool(_IMPERATIVE_RE.search(text))
-
-
-def _claims_action(say: str) -> bool:
-    return bool(_CLAIMS_ACTION_RE.match(say.strip()))
 
 ERROR_TEXT = {
     "unknown_endpoint": "that device doesn't exist", "unknown_capability": "that device can't do that",
@@ -96,8 +83,9 @@ def outcome_of(outs: list) -> str:
 
 
 def compose_final(say: str, outs: list[CallOutcome], reg: DeviceRegistry) -> str:
-    """The model's `say` is drafted before the actions run, so it is only used as-is when everything went fine.
-    Otherwise the text is built from the outcomes (never claims success for something that failed)."""
+    """`say` is always agent-composed by now (`describe_outcomes` / `describe_reads` / `no_plan_text`: the model has
+    no text channel at all, S8i), so it is only used as-is when everything went fine; otherwise the text is built
+    from the outcomes (never claims success for something that failed)."""
     acts = [o for o in outs if not o.is_read or not o.ok]
     bad = [o for o in acts if not o.ok]
     parts: list[str] = []
@@ -165,6 +153,44 @@ def describe_outcomes(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
             parts.append(f"{name} turned on; {cap} set to {val}.")
         else:
             parts.append(f"{name} {cap} set to {val}.")
+    return " ".join(parts)
+
+
+def _fmt_value(v: object) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    return clean_label(v, 24) or "?"
+
+
+def describe_reads(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
+    """Text for a pure-read turn (read_sensor / get_state), built by the agent from the verified results, the same
+    reasoning as `describe_outcomes` extended to reads: the model has no text channel to report a reading with
+    (S8i), so this is the only place a `read_sensor`/`get_state` value ever reaches the user. Values come straight
+    from the hub's own result fields, never a model draft, and are re-sanitised (`clean_label`) like every other
+    device-derived string."""
+    reads = [o for o in outs if o.ok and o.tool in ("read_sensor", "get_state")]
+    if not reads:
+        return ""
+    parts: list[str] = []
+    for o in reads:
+        if o.tool == "read_sensor":
+            name = _name(reg, o.args.get("endpoint_id"))
+            cap = clean_label(o.result.get("capability"), 24)
+            unit = clean_label(o.result.get("unit"), 8)
+            stale = " (last known)" if o.result.get("stale") else ""
+            parts.append(f"{name} {cap}: {_fmt_value(o.result.get('value'))}{unit}{stale}.")
+        else:
+            for s in o.result.get("states") or []:
+                if not isinstance(s, dict):
+                    continue
+                name = _name(reg, s.get("endpoint_id"))
+                if not s.get("online"):
+                    parts.append(f"{name}: offline.")
+                    continue
+                vs = ", ".join(f"{clean_label(k, 24)}={_fmt_value(v)}" for k, v in sorted((s.get("values") or {}).items()))
+                parts.append(f"{name}: {vs}." if vs else f"{name}: no data.")
     return " ".join(parts)
 
 
@@ -273,11 +299,11 @@ class ChatService:
             else:
                 history, summary = self.store.recent(user, sess, 4, guest), self.store.summary(user, sess, guest)
             memories = [m["text"] for m in self.store.list_memories(user, guest)[:5]]
+            aliases = self.sched.aliases(ctx.scope) if self.sched else AliasMap()
             await ctx.emit("status", {"text": "working on it"})   # immediately: no blank bubble while the LLM runs
             extra_tail: list[dict] = []
             tool_results = ""
             say = ""
-            retried_claim = False
             retried_validation = False
             retried_polarity = False
             while True:
@@ -315,17 +341,10 @@ class ChatService:
                     trace.add_stage("llm_ms", (time.monotonic() - llm_t0) * 1000)
                 if self.sched and trace is not None:
                     self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained), plan.raw)
-                say = plan.say
                 if not plan.calls:
-                    if _is_imperative(text) and _claims_action(say):
-                        if not retried_claim:
-                            retried_claim = True
-                            continue
-                        self.metrics.claims_without_calls += 1
-                        log.warning("planner claimed an action (%r) for an imperative request with no tool call", say)
-                        say = NO_ACTION_TEXT
-                    elif not say.strip():
-                        say = no_plan_text(reg)
+                    # the model has no text channel (S8i): either this is "I'm done" after a read earlier this turn
+                    # (narrate it) or there was never anything to act on at all (the safe, device-naming fallback).
+                    say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
                     break
                 plan.calls = repair_plan_calls(plan.calls, text, reg)
                 sig = ambient_request_signal(text, reg)
@@ -338,7 +357,7 @@ class ChatService:
                             # one candidate device but the plan moved the wrong way: give the model one retry
                             # with the contradiction stated before falling back to a clarifying question.
                             retried_polarity = True
-                            extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
+                            extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases)}]
                             tool_results = ("Contradiction: this plan moves the opposite way from what the user's "
                                             "wording asked for. Reconsider the direction, or ask instead.")
                             continue
@@ -361,17 +380,17 @@ class ChatService:
                     # give the model one retry with the reason before falling back, instead of reporting a failure
                     # for a mistake the model can usually fix itself on the next round.
                     retried_validation = True
-                    extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
+                    extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases)}]
                     tool_results = "\n".join(f"{o.tool} rejected: {o.note or 'invalid'}" for o in rejected)
                     continue
                 reads = [o for o in new if o.tool in READ_TOOLS and o.ok]
                 if not reads:
-                    # a pure action turn: the confirmation is built from the verified results, not drafted by the
-                    # model (S8f) - this also covers a turn that ran a tool but produced no usable text (S8e/S8f).
-                    say = describe_outcomes(outs, reg) or say
+                    # a pure action turn (or an action after an earlier read this same turn): the confirmation is
+                    # built from the verified results, never the model's (it has none to draft, S8i).
+                    say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or say
                     break
-                extra_tail = [{"role": "assistant", "content": plan.as_assistant_json()}]
-                tool_results = "\n".join(render_result(o.tool, o.args, o.result, reg) for o in new if o.ok)
+                extra_tail = [{"role": "assistant", "content": plan.as_assistant_json(aliases)}]
+                tool_results = "\n".join(render_result(o.tool, o.args, o.result, reg, aliases) for o in new if o.ok)
             final = compose_final(say, outs, reg)
         if ctx.images and route not in ("vlm", "yolo"):        # those routes already answered using the image
             final += " (I can't analyse images yet.)"

@@ -17,7 +17,7 @@ from .events import (HUB_NODE_STATUS, HUB_REGISTRY_CHANGED, HUB_SETTLE_TIMEOUT, 
                      Event, EventBus, RulesEngine)
 from .executor import Executor, Metrics
 from .hub_client import HubEventStream, McpClient
-from .llm import Llm
+from .llm import Llm, LlmError
 from .evring import EventRing, RingNotifier
 from .notify import Notifier
 from .planner import Planner
@@ -114,8 +114,23 @@ class Agent:
         self.llm.prefix_cache = self.sched_cfg.prefix_cache
 
     def _on_registry_changed(self) -> None:
-        self.builder.rebuild_prefix()
+        if self.builder.rebuild_prefix() and self.cfg.warm_prefix:
+            self._spawn(self._warm_prefix())      # (S8i) new prefix bytes: warm slot 0's KV cache before the first real turn
         self.plan_schema()
+
+    async def _warm_prefix(self) -> None:
+        """One throwaway request on `id_slot` 0 -- the only slot the LLM client ever uses -- with the CURRENT prefix
+        bytes and a one-word user turn, so llama-server's prefix (KV) cache for it is populated by the time a real
+        user message arrives, instead of paying that cost on the first real turn. Fire-and-forget: a slow or
+        unreachable llama-server must never delay startup or a registry reload, and losing the race with a real
+        turn (same id_slot) is harmless -- cache_prompt just makes that turn the one that populates the cache."""
+        try:
+            await self.llm.complete([{"role": "system", "content": self.builder.prefix},
+                                     {"role": "user", "content": "User: hello"}], None)
+        except LlmError:
+            log.warning("prefix warmup request failed (llama-server unavailable?)")
+        except Exception:
+            log.exception("prefix warmup failed")
 
     # ------------------------------------------------------------------------------------------ lifecycle
     async def start(self) -> None:

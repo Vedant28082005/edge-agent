@@ -18,6 +18,7 @@ import json
 from collections import OrderedDict
 from typing import Any, Protocol
 
+from ..aliases import AliasMap, build_aliases
 from ..devices import DeviceRegistry
 from ..schema import SCENE_RE, build_plan_schema
 from ..util import jcs
@@ -87,6 +88,8 @@ class _Compiler:
         if "anyOf" in sch:
             return self.add("alt", " | ".join(self.value(s, hint) for s in sch["anyOf"]))
         t = sch.get("type")
+        if t == "null":
+            return '"null"'
         if t == "boolean":
             return '("true" | "false")'
         if t == "integer":
@@ -114,7 +117,11 @@ class _Compiler:
         return self.add("str", '"\\"" ([^"\\\\\\x00-\\x1f] | "\\\\" ["\\\\/bfnrt])' + "{0,%d}" % n + ' "\\""')
 
     def _array(self, sch: dict, hint: str) -> str:
-        item = self.value(sch["items"], hint + "i")
+        items = sch["items"]
+        if isinstance(items, list):          # fixed-arity tuple (S8i call tuples): one rule per position, no optionals
+            parts = [self.value(s, f"{hint}{i}") for i, s in enumerate(items)]
+            return self.add("tup", '"[" ws ' + ' "," ws '.join(parts) + ' ws "]"')
+        item = self.value(items, hint + "i")
         mx = int(sch.get("maxItems", 4))
         if mx < 1 or mx > 16:
             raise GbnfError("array bounds unsupported")
@@ -167,11 +174,13 @@ def schema_to_gbnf(schema: dict) -> str:
 
 # --------------------------------------------------------------------------------------------- cache
 class ConstraintSchema(dict):
-    """The plan schema (a plain dict to every consumer: json, jsonschema, the mock LLM) that also carries its GBNF form and
-    the registry key it was built for."""
+    """The plan schema (a plain dict to every consumer: json, jsonschema, the mock LLM) that also carries its GBNF form,
+    the registry key it was built for, and the alias map (S8i) that decodes the compact wire format back to endpoint
+    ids -- built together so planner decode and grammar encode always agree."""
     key: str = ""
     gbnf: str = ""
     hub_version: int = -1
+    aliases: AliasMap = AliasMap()
 
 
 class ConstraintCache:
@@ -193,8 +202,9 @@ class ConstraintCache:
             cur.hub_version = reg.version
             self._by_scope.move_to_end(scope_key)
             return cur
-        sch = ConstraintSchema(build_plan_schema(reg, scene_names))
-        sch.key, sch.hub_version = key, reg.version
+        aliases = build_aliases(reg)
+        sch = ConstraintSchema(build_plan_schema(reg, aliases, scene_names))
+        sch.key, sch.hub_version, sch.aliases = key, reg.version, aliases
         sch.gbnf = schema_to_gbnf(sch)
         self._by_scope[scope_key] = sch
         self._by_scope.move_to_end(scope_key)

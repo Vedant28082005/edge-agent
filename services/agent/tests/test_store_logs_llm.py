@@ -4,6 +4,7 @@ import sqlite3
 
 import httpx
 
+from agent.aliases import AliasMap
 from agent.llm import LlmBusy, LlmClient
 from agent.planner import parse_plan
 from agent.store import Store
@@ -112,7 +113,7 @@ async def test_llama_request_shape_and_constrained_switch():
 
     def handler(req: httpx.Request):
         seen.append(json.loads(req.content))
-        return httpx.Response(200, json={"choices": [{"message": {"content": "{\"calls\":[],\"say\":\"hi\"}"}, "finish_reason": "stop"}],
+        return httpx.Response(200, json={"choices": [{"message": {"content": "[]"}, "finish_reason": "stop"}],
                                          "timings": {"prompt_n": 10, "cache_n": 8, "prompt_ms": 5.0}})
 
     c = LlmClient("http://llama", constrained=True, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -120,7 +121,7 @@ async def test_llama_request_shape_and_constrained_switch():
     r = await c.complete([{"role": "user", "content": "x"}], schema)
     assert seen[0]["temperature"] == 0 and seen[0]["cache_prompt"] is True and seen[0]["id_slot"] == 0
     assert seen[0]["response_format"]["json_schema"]["schema"] == schema and seen[0]["response_format"]["type"] == "json_schema"
-    assert r.timings["cache_n"] == 8 and parse_plan(r.content).say == "hi"
+    assert r.timings["cache_n"] == 8 and parse_plan(r.content, AliasMap()).calls == []
     c.constrained = False
     await c.complete([{"role": "user", "content": "x"}], schema)
     assert "response_format" not in seen[1] and seen[1]["cache_prompt"] is True
@@ -149,13 +150,14 @@ async def test_llm_single_slot_queue_limit():
 
 
 def test_parse_plan_tolerates_noise_and_limits():
-    p = parse_plan('Sure! {"calls":[{"tool":"get_state","args":{"room":"Bedroom"}}],"say":"ok"} trailing')
+    aliases = AliasMap()
+    p = parse_plan('Sure! [["gr","Bedroom"]] trailing', aliases)
     assert p.parsed_ok and p.calls[0]["tool"] == "get_state"
-    assert not parse_plan("just words").parsed_ok and parse_plan("just words").say == "just words"
-    big = {"calls": [{"tool": "get_state", "args": {}}] * 9, "say": "x" * 999}
-    q = parse_plan(json.dumps(big))
-    assert len(q.calls) == 4 and len(q.say) <= 240
-    assert parse_plan('{"calls":"nope","say":3}').calls == []
+    assert not parse_plan("just words", aliases).parsed_ok
+    big = [["gr", "Bedroom"]] * 9
+    q = parse_plan(json.dumps(big), aliases)
+    assert len(q.calls) == 4
+    assert parse_plan('{"calls":"nope"}', aliases).calls == []
 
 
 # ------------------------------------------------------------------------------------------------ hashing / labels

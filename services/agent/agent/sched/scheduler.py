@@ -67,6 +67,11 @@ class Scheduler:
         rooms and scenes. Keyed on the hub's `registry_version` (content hash when the hub sent none)."""
         return self.constraints.get(self.views.get(scope).registry, None, "" if not scope.restricted else scope.key)
 
+    def aliases(self, scope: Scope = UNRESTRICTED):
+        """(S8i) The same scope's alias map, from the same cache entry as `schema` -- so the planner's decode and the
+        prompt's device list always agree on what e.g. "e3" means."""
+        return self.schema(scope).aliases
+
     def new_trace(self, ctx: ReqCtx) -> TurnTrace:
         return TurnTrace(ctx.req_id, flags=self.cfg.flags())
 

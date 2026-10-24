@@ -1,82 +1,100 @@
 """Constrained decoding: a JSON schema generated from the LIVE registry, plus the executor's own validator.
 
 Approach (documented in README): llama.cpp's `response_format: {type: json_schema}` turns the schema into a GBNF grammar
-that is enforced token by token. We constrain the planner's whole reply (`{"calls": [...], "say": "..."}`) rather than
-using llama.cpp's native `tools` mode: native tool calls depend on the chat template and on lazily triggered grammars,
-which cannot guarantee an enum of endpoint ids. With this schema a non-existent endpoint, a capability the endpoint does
-not have, or an out-of-range value cannot be produced. The executor re-validates every call anyway
-(`validate_call`), so unconstrained mode (the S10 ablation) is safe too: invalid calls are rejected, and counted.
+that is enforced token by token. We constrain the planner's whole reply rather than using llama.cpp's native `tools`
+mode: native tool calls depend on the chat template and on lazily triggered grammars, which cannot guarantee an enum of
+endpoint ids. With this schema a non-existent endpoint, a capability the endpoint does not have, or an out-of-range
+value cannot be produced. The executor re-validates every call anyway (`validate_call`), so unconstrained mode (the S10
+ablation) is safe too: invalid calls are rejected, and counted.
 
-Size: set_state variants are grouped by (capability, value-schema), each with an enum of the endpoints that have that
-capability, so the grammar grows with the number of distinct capability shapes, not with the number of devices."""
+Wire format (S8i, compact): the reply is a bare JSON array of up to `MAX_CALLS` short tuples, `[code, ...]`, never an
+object and never free text (`TOOL_CODES`/`CODE_TOOLS`; no "say" -- the agent composes all reply text from verified
+results, see `chat.compose_final` / `chat.describe_outcomes` / `chat.no_plan_text`). Each tuple names its endpoint by a
+short per-turn alias (`aliases.AliasMap`, e.g. "e3"), never the full `endpoint_id`: fewer tokens to generate, and fewer
+to re-evaluate on a retry round. `planner.parse_plan` maps tuples back to the internal `{"tool", "args"}` call shape
+(decode) and the executor's validation covers the aliasing mistake a model could still make (the mapped-back args are
+checked exactly as before). `$schema` pins draft-07 so a tuple's `items` list is validated positionally everywhere
+(jsonschema `validate()` is draft-sniffing and newer drafts moved tuple validation to `prefixItems`).
+
+Size: set_state variants are grouped by (capability, value-schema), each with an enum of the aliases that have it, so
+the grammar grows with the number of distinct capability shapes, not with the number of devices."""
 from __future__ import annotations
 
 import json
 import re
 from typing import Any
 
+from .aliases import AliasMap
 from .devices import ENDPOINT_TYPES, DeviceRegistry
 from .hub_client import TOOLS
 
 MAX_CALLS = 4
-SAY_MAX = 240
 FORBIDDEN_ARG_KEYS = ("confirmation_token", "user_id", "call_id", "_meta", "token")
 SCENE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.'&-]{0,47}$")
 BRIGHTNESS_FLOOR = 10
 _LEVEL_NAMED_RE = re.compile(r"\d|\bzero\b|\bpercent\b|%", re.IGNORECASE)
 
+DRAFT7 = "http://json-schema.org/draft-07/schema#"
+# tool name -> wire code. get_state has two tuple shapes (by endpoint / by room), told apart by a distinct code so
+# each is an unambiguous, fixed-arity variant (no optional tuple positions to encode).
+TOOL_CODES = {"set_state": "s", "read_sensor": "r", "get_state_ep": "g", "get_state_room": "gr",
+              "list_devices": "l", "run_scene": "n"}
+CODE_TOOLS = {v: k for k, v in TOOL_CODES.items()}
 
-def _call(tool: str, args: dict, required: list[str]) -> dict:
-    return {"type": "object", "additionalProperties": False, "required": ["tool", "args"],
-            "properties": {"tool": {"const": tool},
-                           "args": {"type": "object", "additionalProperties": False, "required": required,
-                                    "properties": args}}}
+
+def _tuple(code: str, *items: dict) -> dict:
+    n = len(items) + 1
+    return {"type": "array", "minItems": n, "maxItems": n, "additionalItems": False,
+            "items": [{"const": code}, *items]}
 
 
-def build_plan_schema(reg: DeviceRegistry, scene_names: tuple[str, ...] | None = None) -> dict:
+def _nullable(sch: dict) -> dict:
+    return {"anyOf": [sch, {"type": "null"}]}
+
+
+def build_plan_schema(reg: DeviceRegistry, aliases: AliasMap, scene_names: tuple[str, ...] | None = None) -> dict:
     variants: list[dict] = []
-    # set_state: one variant per (capability, value schema), enum of endpoints having it
+    # set_state: one variant per (capability, value schema), enum of the aliases having it
     groups: dict[tuple[str, str], tuple[dict, list[str]]] = {}
     for d, c in sorted(reg.actuators(), key=lambda t: (t[0].endpoint_id, t[1].id)):
         vs = c.value_schema()
         if vs is None:
             continue
         key = (c.id, json.dumps(vs, sort_keys=True))
-        groups.setdefault(key, (vs, []))[1].append(d.endpoint_id)
-    for (cap, _), (vs, eps) in sorted(groups.items()):
-        variants.append(_call("set_state", {"endpoint_id": {"enum": eps}, "capability": {"const": cap}, "value": vs},
-                              ["endpoint_id", "capability", "value"]))
+        groups.setdefault(key, (vs, []))[1].append(aliases.alias(d.endpoint_id))
+    for (cap, _), (vs, als) in sorted(groups.items()):
+        variants.append(_tuple(TOOL_CODES["set_state"], {"enum": sorted(als)}, {"const": cap}, vs))
     # read_sensor
     sgroups: dict[str, list[str]] = {}
     for d, c in sorted(reg.sensors(), key=lambda t: (t[0].endpoint_id, t[1].id)):
-        sgroups.setdefault(c.id, []).append(d.endpoint_id)
-    for cap, eps in sorted(sgroups.items()):
-        variants.append(_call("read_sensor", {"endpoint_id": {"enum": eps}, "capability": {"const": cap}},
-                              ["endpoint_id", "capability"]))
+        sgroups.setdefault(c.id, []).append(aliases.alias(d.endpoint_id))
+    for cap, als in sorted(sgroups.items()):
+        variants.append(_tuple(TOOL_CODES["read_sensor"], {"enum": sorted(als)}, {"const": cap}))
     # get_state / list_devices
     if reg.devices:
-        variants.append(_call("get_state", {"endpoint_id": {"enum": sorted(reg.devices)}}, ["endpoint_id"]))
-        variants.append(_call("get_state", {"room": {"enum": reg.rooms()}}, ["room"]))
-        lprops: dict[str, Any] = {"room": {"enum": reg.rooms()},
-                                  "type": {"enum": sorted({d.type for d in reg.devices.values()})}}
-        variants.append(_call("list_devices", lprops, []))
+        all_aliases = sorted(aliases.alias(ep) for ep in reg.devices)
+        variants.append(_tuple(TOOL_CODES["get_state_ep"], {"enum": all_aliases}))
+        variants.append(_tuple(TOOL_CODES["get_state_room"], {"enum": reg.rooms()}))
+        types = sorted({d.type for d in reg.devices.values()})
+        variants.append(_tuple(TOOL_CODES["list_devices"], _nullable({"enum": reg.rooms()}),
+                               _nullable({"enum": types})))
     if scene_names is None:
         scene_names = reg.scene_names()              # from list_devices.scenes (already scoped for a scoped view)
     scene = {"enum": list(scene_names)} if scene_names else {"type": "string", "pattern": SCENE_RE.pattern, "maxLength": 48}
-    variants.append(_call("run_scene", {"scene": scene}, ["scene"]))
-    calls: dict = {"type": "array", "maxItems": MAX_CALLS, "items": {"anyOf": variants}}
-    return {"type": "object", "additionalProperties": False, "required": ["calls", "say"],
-            "properties": {"calls": calls, "say": {"type": "string", "maxLength": SAY_MAX}}}
+    variants.append(_tuple(TOOL_CODES["run_scene"], scene))
+    return {"$schema": DRAFT7, "type": "array", "maxItems": MAX_CALLS, "items": {"anyOf": variants}}
 
 
-def schema_endpoint_ids(schema: dict) -> set[str]:
-    """Every endpoint id the schema can express (used by tests and the ablation counters)."""
+def schema_endpoint_ids(schema: dict, aliases: AliasMap) -> set[str]:
+    """Every endpoint id the schema can express (used by tests and the ablation counters): every alias enum value,
+    mapped back through `aliases`."""
     out: set[str] = set()
 
     def walk(n: Any) -> None:
         if isinstance(n, dict):
-            if "endpoint_id" in n and isinstance(n["endpoint_id"], dict):
-                out.update(n["endpoint_id"].get("enum", []))
+            for v in n.get("enum", []) if isinstance(n.get("enum"), list) else ():
+                if isinstance(v, str) and v in aliases.to_ep:
+                    out.add(aliases.to_ep[v])
             for v in n.values():
                 walk(v)
         elif isinstance(n, list):

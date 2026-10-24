@@ -1,35 +1,40 @@
-"""Planner: one LLM round -> a Plan (a list of proposed tool calls + a one-sentence `say`). It never executes anything;
-the executor validates and runs the calls. The reply is parsed leniently (unconstrained mode may wrap or truncate JSON)
-but only `{"tool": str, "args": dict}` items survive, at most MAX_CALLS."""
+"""Planner: one LLM round -> a Plan (a list of proposed tool calls). It never executes anything; the executor
+validates and runs the calls. The agent composes all reply text itself from verified results (`chat.compose_final` /
+`describe_outcomes` / `no_plan_text`) -- the model has no text channel at all (S8i).
+
+Wire format (S8i, compact): the reply is a bare JSON array of up to `MAX_CALLS` tuples, `[code, ...]` (`schema.TOOL_CODES`),
+naming endpoints by a short per-turn alias instead of a full `endpoint_id` (`aliases.AliasMap`). Parsing is still lenient
+(unconstrained mode may wrap or truncate the JSON) but only well-shaped, known-code tuples survive decoding back to the
+internal `{"tool": str, "args": dict}` call shape every other module already works with; the executor's own validation
+is the real backstop against a bad alias or a malformed tuple reaching hardware."""
 from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass, field
 
+from .aliases import AliasMap
 from .executor import Metrics
 from .llm import Llm, LlmResult
-from .schema import MAX_CALLS, SAY_MAX
+from .schema import MAX_CALLS
 from .scope import UNRESTRICTED, Scope
-from .util import clean_user_text
 
 log = logging.getLogger("agent.planner")
 
+# (code, arity incl. the code itself, tool, arg names in tuple order after the code)
+_SHAPES: dict[str, tuple[int, str, tuple[str, ...]]] = {
+    "s": (4, "set_state", ("endpoint_id", "capability", "value")),
+    "r": (3, "read_sensor", ("endpoint_id", "capability")),
+    "g": (2, "get_state", ("endpoint_id",)),
+    "gr": (2, "get_state", ("room",)),
+    "l": (3, "list_devices", ("room", "type")),
+    "n": (2, "run_scene", ("scene",)),
+}
+_ALIASED_ARG = {"endpoint_id"}       # which arg position(s) carry an alias rather than a literal value
 
-@dataclass
-class Plan:
-    calls: list[dict]
-    say: str
-    parsed_ok: bool
-    timings: dict = field(default_factory=dict)
-    raw: str = ""                   # the model's unparsed reply (S8f: logged, truncated, in turn_traces)
 
-    def as_assistant_json(self) -> str:
-        return json.dumps({"calls": self.calls, "say": self.say}, separators=(",", ":"), ensure_ascii=False)
-
-
-def _first_object(text: str) -> object | None:
-    start = text.find("{")
+def _first_array(text: str) -> object | None:
+    start = text.find("[")
     while start != -1:
         depth, in_str, esc = 0, False, False
         for i in range(start, len(text)):
@@ -41,32 +46,86 @@ def _first_object(text: str) -> object | None:
                 continue
             if ch == '"':
                 in_str = True
-            elif ch == "{":
+            elif ch == "[":
                 depth += 1
-            elif ch == "}":
+            elif ch == "]":
                 depth -= 1
                 if depth == 0:
                     try:
                         return json.loads(text[start:i + 1])
                     except json.JSONDecodeError:
                         break
-        start = text.find("{", start + 1)
+        start = text.find("[", start + 1)
     return None
 
 
-def parse_plan(text: str) -> Plan:
+def _decode(tup: object, aliases: AliasMap) -> dict | None:
+    if not isinstance(tup, list) or not tup or not isinstance(tup[0], str):
+        return None
+    shape = _SHAPES.get(tup[0])
+    if shape is None:
+        return None
+    arity, tool, arg_names = shape
+    if len(tup) != arity:
+        return None
+    args: dict = {}
+    for name, v in zip(arg_names, tup[1:]):
+        if name in _ALIASED_ARG:
+            if not isinstance(v, str):
+                return None
+            # An alias outside this scope's map is forwarded as a literal, unresolved endpoint_id rather than
+            # dropped: constrained decoding can never produce one (the enum only names known aliases), and under
+            # the unconstrained ablation the executor's own validation (unknown_endpoint / out_of_scope) is still
+            # the backstop -- same guarantee as before aliasing, just one token shorter on the wire.
+            v = aliases.to_ep.get(v, v)
+        if v is not None:                 # list_devices' room/type positions: null means "omitted"
+            args[name] = v
+    return {"tool": tool, "args": args}
+
+
+def encode_call(call: dict, aliases: AliasMap) -> list | None:
+    """The inverse of `_decode`, used only to re-show the planner's own previous turn back to it (a retry's `extra_tail`),
+    so that context also stays in the compact wire format it was decoded from."""
+    tool, args = call.get("tool"), call.get("args")
+    if not isinstance(args, dict):
+        return None
+    for code, (_, t, arg_names) in _SHAPES.items():
+        if t != tool:
+            continue
+        if tool == "list_devices":
+            if not set(args) <= set(arg_names):
+                continue
+            vals = [args.get(n) for n in arg_names]
+        else:
+            if set(args) != set(arg_names):
+                continue
+            vals = [aliases.to_alias.get(args[n], args[n]) if n in _ALIASED_ARG else args[n] for n in arg_names]
+        return [code, *vals]
+    return None
+
+
+@dataclass
+class Plan:
+    calls: list[dict]
+    parsed_ok: bool
+    timings: dict = field(default_factory=dict)
+    raw: str = ""                   # the model's unparsed reply (S8f: logged, truncated, in turn_traces)
+
+    def as_assistant_json(self, aliases: AliasMap) -> str:
+        tuples = [t for t in (encode_call(c, aliases) for c in self.calls) if t is not None]
+        return json.dumps(tuples, separators=(",", ":"), ensure_ascii=False)
+
+
+def parse_plan(text: str, aliases: AliasMap) -> Plan:
     obj: object | None
     try:
         obj = json.loads(text)
     except (json.JSONDecodeError, TypeError):
-        obj = _first_object(text or "")
-    if not isinstance(obj, dict):
-        return Plan([], clean_user_text(text or "", SAY_MAX), False)
-    calls_raw = obj.get("calls") if isinstance(obj.get("calls"), list) else []
-    calls = [{"tool": c.get("tool"), "args": c.get("args")} for c in calls_raw[:MAX_CALLS]
-             if isinstance(c, dict) and isinstance(c.get("tool"), str)]
-    say = obj.get("say") if isinstance(obj.get("say"), str) else ""
-    return Plan(calls, clean_user_text(say, SAY_MAX), True)
+        obj = _first_array(text or "")
+    if not isinstance(obj, list):
+        return Plan([], False)
+    calls = [c for c in (_decode(t, aliases) for t in obj[:MAX_CALLS]) if c is not None]
+    return Plan(calls, True)
 
 
 class Planner:
@@ -74,9 +133,9 @@ class Planner:
         self.llm, self._schema, self.metrics = llm, schema_provider, metrics
 
     async def plan(self, messages: list[dict], scope: Scope = UNRESTRICTED) -> Plan:
-        schema = self._schema(scope) if self.llm.constrained else None
-        res: LlmResult = await self.llm.complete(messages, schema)
-        plan = parse_plan(res.content)
+        sch = self._schema(scope)                     # also carries the alias map: needed to decode even when unconstrained
+        res: LlmResult = await self.llm.complete(messages, sch if self.llm.constrained else None)
+        plan = parse_plan(res.content, sch.aliases)
         plan.timings = res.timings
         plan.raw = res.content or ""
         self.metrics.plans += 1

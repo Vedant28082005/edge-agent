@@ -72,37 +72,18 @@ async def test_bare_positive_brightness_implies_power_on_llm_path(env):
     assert final["text"] == "Ceiling light turned on at 40%."   # agent-composed, not the model's drafted say
 
 
-async def test_text_only_claim_on_an_imperative_request_is_retried_then_flagged(env):
+async def test_no_calls_on_an_imperative_request_gets_the_safe_fallback(env):
+    """(S8i) The model has no text channel at all, so it cannot claim an action it never ran -- that whole class of
+    bug (S8e) is now prevented by construction, not detected after the fact. An empty plan always gets the same
+    safe, device-naming fallback, imperative wording or not."""
     env.llm.script.append((r"turn on the mystery lamp", {"calls": [], "say": "Turning it on."}))
     ctx, ev = await env.chat("turn on the mystery lamp")
     final = one(ev, "final")
-    assert final["text"] == "I didn't make that change — could you say it again?"
+    assert final["text"].startswith("I couldn't work out what to do.")
     assert not [c for c in env.fake.calls if c["tool"] == "set_state"]
-    # it was given a second chance before being flagged
-    assert sum(1 for m in env.llm.requests if "mystery lamp" in m[-1]["content"]) == 2
-    assert env.agent.metrics.claims_without_calls == 1
 
 
-async def test_text_only_claim_that_fixes_itself_on_retry_is_not_flagged(env):
-    calls = {"n": 0}
-
-    def reply(_messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"calls": [], "say": "Turning it on."}
-        return {"calls": [{"tool": "set_state", "args": {"endpoint_id": "ep_a1000002", "capability": "power", "value": True}}],
-                "say": "Turning on the fan."}
-
-    env.llm.script.append((r"flaky fan", reply))
-    ctx, ev = await env.chat("turn on the flaky fan")
-    final = one(ev, "final")
-    assert "I didn't make that change" not in final["text"]
-    assert env.agent.metrics.claims_without_calls == 0
-    assert calls["n"] == 2
-
-
-async def test_clarifying_question_without_calls_is_left_alone(env):
+async def test_clarifying_question_without_calls_gets_the_safe_fallback(env):
     ctx, ev = await env.chat("do the thing")
     final = one(ev, "final")
-    assert final["text"] == "I'm not sure which device you mean."
-    assert env.agent.metrics.claims_without_calls == 0
+    assert final["text"].startswith("I couldn't work out what to do.")

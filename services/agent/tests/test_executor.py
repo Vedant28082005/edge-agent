@@ -48,15 +48,18 @@ async def test_runtime_switch_changes_the_request_to_llama(env):
     assert seen == [True, False, True]
 
 
-async def test_model_supplied_token_and_user_id_are_stripped(env):
-    env.agent.llm.constrained = False          # in constrained mode the grammar would not even allow these keys
-    script(env, [setstate("ep_a1000002", "power", True, confirmation_token="STOLEN", user_id="admin", call_id="x", _meta={"a": 1})])
-    ctx, ev = await env.chat("hello")
+async def test_extra_args_on_a_call_are_stripped_before_the_hub(env):
+    """(S8i) The compact wire tuple has no room for extra fields at all -- a model literally cannot put a
+    confirmation_token/user_id/call_id in its own call anymore -- but `run_calls` still strips them from ANY call
+    that reaches it (defence in depth for callers other than the LLM planner: fast path, rules, retries)."""
+    ctx = env.agent.new_request("alice", "s", "x", "member")
+    outs = await env.agent.executor.run_calls(ctx, [setstate("ep_a1000002", "power", True, confirmation_token="STOLEN",
+                                                              user_id="admin", call_id="x", _meta={"a": 1})])
     sent = [c for c in env.fake.calls if c["tool"] == "set_state"][0]
     assert set(sent["args"]) == {"endpoint_id", "capability", "value"}
     assert sent["meta"].get("user_id") == "alice" and "confirmation_token" not in sent["meta"]
     assert sent["meta"]["call_id"] != "x"
-    assert "STOLEN" not in json.dumps(ev) and env.agent.metrics.stripped_fields == 4
+    assert outs[0].ok and env.agent.metrics.stripped_fields == 4
 
 
 async def test_budget_max_calls(tmp_path):

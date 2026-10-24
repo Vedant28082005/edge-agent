@@ -4,9 +4,13 @@ import json
 import jsonschema
 import pytest
 
+from agent.aliases import AliasMap, build_aliases
 from agent.devices import DeviceRegistry
 from agent.mock import demo_devices
 from agent.schema import BRIGHTNESS_FLOOR, build_plan_schema, repair_plan_calls, schema_endpoint_ids, strip_forbidden, validate_call
+
+# demo_devices() ids sort to e1..e6 in the same order: Ceiling light, Fan, Temp sensor, Front door, Blinds, Lamp.
+E1, E2, E3, E4, E5, E6 = "e1", "e2", "e3", "e4", "e5", "e6"
 
 
 def reg_of(devs=None):
@@ -15,8 +19,10 @@ def reg_of(devs=None):
     return r
 
 
-def plan(*calls, say="ok"):
-    return {"calls": [{"tool": t, "args": a} for t, a in calls], "say": say}
+def schema_of(devs=None, scene_names=None):
+    r = reg_of(devs)
+    a = build_aliases(r)
+    return r, a, build_plan_schema(r, a, scene_names)
 
 
 def valid(schema, doc):
@@ -28,62 +34,59 @@ def valid(schema, doc):
 
 
 def test_valid_plans_pass():
-    s = build_plan_schema(reg_of())
-    assert valid(s, plan(("set_state", {"endpoint_id": "ep_a1000002", "capability": "power", "value": True})))
-    assert valid(s, plan(("set_state", {"endpoint_id": "ep_a1000002", "capability": "speed", "value": 5})))
-    assert valid(s, plan(("set_state", {"endpoint_id": "ep_a1000004", "capability": "lock", "value": "unlocked"})))
-    assert valid(s, plan(("read_sensor", {"endpoint_id": "ep_a1000003", "capability": "temperature"})))
-    assert valid(s, plan(("get_state", {"room": "Bedroom"})))
-    assert valid(s, plan(("list_devices", {})))
-    assert valid(s, plan(("run_scene", {"scene": "Good night"})))
-    assert valid(s, plan())
+    r, a, s = schema_of()
+    assert valid(s, [["s", E2, "power", True]])
+    assert valid(s, [["s", E2, "speed", 5]])
+    assert valid(s, [["s", E4, "lock", "unlocked"]])
+    assert valid(s, [["r", E3, "temperature"]])
+    assert valid(s, [["gr", "Bedroom"]])
+    assert valid(s, [["l", None, None]])
+    assert valid(s, [["n", "Good night"]])
+    assert valid(s, [])
 
 
 @pytest.mark.parametrize("call", [
-    ("set_state", {"endpoint_id": "ep_dead0000", "capability": "power", "value": True}),       # no such endpoint
-    ("set_state", {"endpoint_id": "ep_a1000002", "capability": "lock", "value": "locked"}),    # capability the fan lacks
-    ("set_state", {"endpoint_id": "ep_a1000002", "capability": "speed", "value": 9}),          # out of range
-    ("set_state", {"endpoint_id": "ep_a1000002", "capability": "speed", "value": 0}),
-    ("set_state", {"endpoint_id": "ep_a1000002", "capability": "power", "value": "yes"}),      # wrong type
-    ("set_state", {"endpoint_id": "ep_a1000004", "capability": "lock", "value": "open"}),      # bad enum
-    ("set_state", {"endpoint_id": "ep_a1000003", "capability": "temperature", "value": 20}),   # sensor is not an actuator
-    ("set_state", {"endpoint_id": "ep_a1000001", "capability": "brightness", "value": 101}),
-    ("read_sensor", {"endpoint_id": "ep_a1000002", "capability": "temperature"}),              # fan has no sensor
-    ("get_state", {"endpoint_id": "ep_00000000"}),
-    ("get_state", {"room": "Moon base"}),
-    ("set_state", {"endpoint_id": "ep_a1000002", "capability": "power", "value": True, "confirmation_token": "x"}),
-    ("delete_device", {"endpoint_id": "ep_a1000002"}),                                          # no sixth tool
-    ("set_state", {"endpoint_id": "ep_a1000002", "capability": "power"}),                       # missing value
+    ["s", "e99", "power", True],               # no such alias
+    ["s", E2, "lock", "locked"],                # capability the fan lacks
+    ["s", E2, "speed", 9],                      # out of range
+    ["s", E2, "speed", 0],
+    ["s", E2, "power", "yes"],                  # wrong type
+    ["s", E4, "lock", "open"],                  # bad enum
+    ["s", E3, "temperature", 20],                # sensor is not an actuator
+    ["s", E1, "brightness", 101],
+    ["r", E2, "temperature"],                    # fan has no sensor
+    ["g", "e99"],                                # no such alias
+    ["gr", "Moon base"],
+    ["s", E2, "power", True, "x"],              # extra tuple item
+    ["z", E2],                                   # no sixth tool / unknown code
+    ["s", E2, "power"],                          # missing value
 ])
 def test_invalid_calls_cannot_be_expressed(call):
-    s = build_plan_schema(reg_of())
-    assert not valid(s, plan(call))
+    _, _, s = schema_of()
+    assert not valid(s, [call])
 
 
-def test_at_most_four_calls_and_say_length():
-    s = build_plan_schema(reg_of())
-    c = ("get_state", {"room": "Bedroom"})
-    assert valid(s, plan(c, c, c, c)) and not valid(s, plan(c, c, c, c, c))
-    assert not valid(s, plan(say="x" * 500))
+def test_at_most_four_calls():
+    _, _, s = schema_of()
+    c = ["gr", "Bedroom"]
+    assert valid(s, [c, c, c, c]) and not valid(s, [c, c, c, c, c])
 
 
 def test_every_endpoint_in_schema_is_in_the_registry_and_follows_it():
-    r = reg_of()
-    s = build_plan_schema(r)
-    assert schema_endpoint_ids(s) == set(r.devices)
-    r2 = reg_of(demo_devices()[:2])                          # devices removed -> impossible to name them
-    s2 = build_plan_schema(r2)
-    assert schema_endpoint_ids(s2) == {"ep_a1000001", "ep_a1000002"}
-    assert not valid(s2, plan(("set_state", {"endpoint_id": "ep_a1000004", "capability": "lock", "value": "locked"})))
+    r, a, s = schema_of()
+    assert schema_endpoint_ids(s, a) == set(r.devices)
+    r2, a2, s2 = schema_of(demo_devices()[:2])               # devices removed -> impossible to name them
+    assert schema_endpoint_ids(s2, a2) == {"ep_a1000001", "ep_a1000002"}
+    assert not valid(s2, [["s", a2.alias("ep_a1000004"), "lock", "locked"]])
 
 
 def test_ranges_follow_the_announce():
     devs = demo_devices()
     devs[1]["capabilities"][1] = {"id": "speed", "kind": "actuator", "type": "int", "min": 1, "max": 3}
-    s = build_plan_schema(reg_of(devs))
+    _, _, s = schema_of(devs)
 
     def ok(v):
-        return valid(s, plan(("set_state", {"endpoint_id": "ep_a1000002", "capability": "speed", "value": v})))
+        return valid(s, [["s", E2, "speed", v]])
 
     assert ok(3) and not ok(4)
 
@@ -91,35 +94,33 @@ def test_ranges_follow_the_announce():
 def test_capability_without_known_range_is_not_offered():
     devs = demo_devices()
     devs[1]["capabilities"] = [{"id": "speed", "kind": "actuator", "type": "int"}]      # speed needs min/max
-    r = reg_of(devs)
-    s = build_plan_schema(r)
-    assert not valid(s, plan(("set_state", {"endpoint_id": "ep_a1000002", "capability": "speed", "value": 2})))
+    r, _, s = schema_of(devs)
+    assert not valid(s, [["s", E2, "speed", 2]])
     assert validate_call(r, "set_state", {"endpoint_id": "ep_a1000002", "capability": "speed", "value": 2})[0] == "out_of_range"
 
 
 def test_empty_registry_allows_no_device_calls():
-    s = build_plan_schema(DeviceRegistry())
-    assert valid(s, plan())
-    assert not valid(s, plan(("get_state", {"room": "Bedroom"})))
-    assert not valid(s, plan(("set_state", {"endpoint_id": "ep_a1000002", "capability": "power", "value": True})))
+    s = build_plan_schema(DeviceRegistry(), AliasMap())
+    assert valid(s, [])
+    assert not valid(s, [["gr", "Bedroom"]])
+    assert not valid(s, [["s", "e1", "power", True]])
 
 
 def test_scene_names_enum_when_configured():
-    s = build_plan_schema(reg_of(), ("Good night", "Movie"))
-    assert valid(s, plan(("run_scene", {"scene": "Movie"}))) and not valid(s, plan(("run_scene", {"scene": "Nope"})))
+    _, _, s = schema_of(scene_names=("Good night", "Movie"))
+    assert valid(s, [["n", "Movie"]]) and not valid(s, [["n", "Nope"]])
 
 
 def test_schema_and_validator_agree_on_a_grid():
-    r = reg_of()
-    s = build_plan_schema(r)
+    r, a, s = schema_of()
     eps = list(r.devices) + ["ep_dead0000"]
     caps = ["power", "speed", "lock", "brightness", "position", "temperature"]
     vals = [True, False, 0, 1, 5, 50, 100, 101, "locked", "unlocked", "x"]
     for ep, cap, v in itertools.product(eps, caps, vals):
-        a = {"endpoint_id": ep, "capability": cap, "value": v}
-        in_schema = valid(s, plan(("set_state", a)))
-        err, _ = validate_call(r, "set_state", a)
-        assert in_schema == (err is None), (a, err)
+        call = {"endpoint_id": ep, "capability": cap, "value": v}
+        in_schema = valid(s, [["s", a.alias(ep), cap, v]])
+        err, _ = validate_call(r, "set_state", call)
+        assert in_schema == (err is None), (call, err)
 
 
 def test_validate_call_rejections_and_strip():
@@ -135,7 +136,7 @@ def test_validate_call_rejections_and_strip():
     assert err is None and set(a) == {"endpoint_id", "capability", "value"}
     clean, removed = strip_forbidden({"a": 1, "confirmation_token": "T", "_meta": {}})
     assert clean == {"a": 1} and sorted(removed) == ["_meta", "confirmation_token"]
-    json.dumps(build_plan_schema(r))                                 # serialisable for llama-server
+    json.dumps(build_plan_schema(r, build_aliases(r)))               # serialisable for llama-server
 
 
 # ------------------------------------------------------------------------------------------------ S8e brightness guard

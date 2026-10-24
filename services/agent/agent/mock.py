@@ -16,7 +16,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
+from .aliases import AliasMap
 from .llm import LlmResult
+from .planner import encode_call
 from .schema import validate_call
 from .util import action_hash, est_tokens
 
@@ -289,7 +291,7 @@ class FakeHub:
 
 
 # ======================================================================================================== scripted LLM
-_DEV = re.compile(r"^(ep_[0-9a-f]{8})\|([^|]*)\|([^|]*)\|([^|]*)\|(.*)$")
+_DEV = re.compile(r"^(e[0-9]+)\|(ep_[0-9a-f]{8})\|([^|]*)\|([^|]*)\|([^|]*)\|(.*)$")
 _STOP = {"the", "a", "an", "in", "of", "please", "to", "my"}
 
 
@@ -301,7 +303,12 @@ class ScriptedLLM:
     """Deterministic stand-in for llama-server. Reads the device list out of the prompt (the same lines the real model
     sees) and answers a few phrasings; `[hallucinate]` in the text makes it name a device that does not exist, so the
     constrained/unconstrained difference is testable. In constrained mode it simulates the grammar: a reply that does
-    not satisfy the schema is replaced by an empty plan (a real grammar makes such a reply impossible)."""
+    not satisfy the schema is replaced by an empty plan (a real grammar makes such a reply impossible).
+
+    `respond()` builds its answer as the old, readable `{"tool", "args"}` call shape (endpoint ids spelled out, no
+    object wrapper needed) for scripts to stay easy to write; `complete()` then encodes it to the real (S8i) wire
+    format -- a bare JSON array of alias tuples, aliased from the SAME device-list lines the prompt shows this
+    turn -- exactly like a real model would have to."""
 
     def __init__(self, constrained: bool = True) -> None:
         self.constrained = constrained
@@ -316,17 +323,21 @@ class ScriptedLLM:
         if self.delay:
             await asyncio.sleep(self.delay)
         reply = self.respond(messages)
+        aliases = self._aliases(messages)
+        tuples = [t for t in (encode_call(c, aliases) for c in reply.get("calls", [])) if t is not None]
         if self.constrained and schema is not None:
             import jsonschema
             try:
-                jsonschema.validate(reply, schema)
+                jsonschema.validate(tuples, schema)
             except jsonschema.ValidationError:
-                reply = {"calls": [], "say": "I can't do that."}
+                tuples = []
+        content = json.dumps(tuples, separators=(",", ":"))
         cur = "".join(f"<{m['role']}>{m['content']}\n" for m in messages)
         common = os.path.commonprefix([self._prev, cur]) if self._prev else ""
         pn, cn = est_tokens(cur), est_tokens(common)
         self._prev = cur
-        return LlmResult(json.dumps(reply), {"prompt_n": pn, "cache_n": cn, "prompt_ms": (pn - cn) * 10.0, "predicted_n": 30})
+        return LlmResult(content, {"prompt_n": pn, "cache_n": cn, "prompt_ms": (pn - cn) * 10.0,
+                                   "predicted_n": est_tokens(content)})
 
     # ------------------------------------------------------------------------------------------ the script
     def respond(self, messages: list[dict]) -> dict:
@@ -390,8 +401,21 @@ class ScriptedLLM:
             for ln in m["content"].splitlines():
                 mm = _DEV.match(ln)
                 if mm:
-                    out[mm.group(1)] = mm.groups()
+                    out[mm.group(2)] = mm.groups()[1:]      # (ep, name, room, type, tags): the alias column is dropped
         return list(out.values())
+
+    @staticmethod
+    def _aliases(messages: list[dict]) -> AliasMap:
+        """Read back the SAME alias|id lines the real model would see this turn, so the mock encodes calls to the
+        compact wire format exactly as a real model constrained to its own prompt would have to."""
+        to_alias, to_ep = {}, {}
+        for m in messages:
+            for ln in m["content"].splitlines():
+                mm = _DEV.match(ln)
+                if mm:
+                    to_alias[mm.group(2)] = mm.group(1)
+                    to_ep[mm.group(1)] = mm.group(2)
+        return AliasMap(to_alias, to_ep)
 
     @staticmethod
     def _find(devs, low: str, typ: str | None = None):
