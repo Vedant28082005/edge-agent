@@ -35,7 +35,7 @@ _OFF_VERBS = {"stop", "disable", "deactivate", "kill"}
 _SET_VERBS = {"set", "change", "make", "dim", "adjust", "put", "turn", "brighten"}
 _TIME_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:min|mins|minutes?|hours?|hrs?|seconds?|secs?|am|pm)\b|\bevery\s+\w+|\bo clock\b")
 _VALUE_RES = (re.compile(r"\b(?:to|at)\s+(\d+(?:\.\d+)?)\s*(%|percent)?"),   # "by N" is relative (_relative_cmd), not absolute
-              re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(%|percent)"),
+              re.compile(r"(?<![\w.])(?<!\bby )(\d+(?:\.\d+)?)\s*(%|percent)"),
               re.compile(r"\b(?:speed|brightness|position|level|setting)\s+(\d+(?:\.\d+)?)\s*(%|percent)?\s*$"))
 _CAP_WORDS = {"brightness": "brightness", "bright": "brightness", "dim": "brightness", "speed": "speed",
               "position": "position", "temperature": "target_temp", "temp": "target_temp", "setpoint": "target_temp",
@@ -45,7 +45,8 @@ _DEFAULT_CAP = {"light": "brightness", "fan": "speed", "cover": "position"}
 # "little", "slightly") are magnitude hints only and never decide the sign on their own.
 _RELATIVE_DIR = {"brighter": 1, "dimmer": -1, "higher": 1, "lower": -1, "more": 1, "less": -1, "increase": 1,
                  "decrease": -1, "raise": 1, "warmer": 1, "cooler": -1, "faster": 1, "slower": -1, "louder": 1,
-                 "quieter": -1, "up": 1, "down": -1}
+                 "quieter": -1, "up": 1, "down": -1, "reduce": -1, "lessen": -1, "drop": -1, "boost": 1, "brighten": 1,
+                 "dim": -1}
 _BY_AMOUNT_RE = re.compile(r"\bby\s+(\d+(?:\.\d+)?)\s*(%|percent)?")
 _PRONOUN = {"it", "them", "this", "that"}
 _SCENE_WORDS = {"scene", "mode", "routine", "preset"}
@@ -74,6 +75,7 @@ class Resolution:
     relative: tuple | None = None                # (endpoint_id, capability, direction, amount|None, pct) for RELATIVE:
                                                   # the current value is unknown here (no live state, no I/O in the
                                                   # resolver), so the scheduler fetches it and computes the target
+    unknown: str = ""                            # sanitised name the user gave for a device that is not in the registry
     question: tuple | None = None                # (mode, capability, expect) for `resolve_question`: how the
                                                   # scheduler should compose the answer from the get_state result(s)
                                                   # it still has to fetch (no live state here either)
@@ -269,7 +271,8 @@ class FastPathResolver:
             return _Cmd("value", value=value, cap=cap, conf=1.0, rest=self._clean(rest), on_verb="on" in tset)
         if "half" in tset or tset & {"full", "max", "maximum", "min", "minimum", "lowest", "highest"}:
             return "symbolic_value"                                       # needs the device's range: leave to the LLM
-        if tset & RELATIVE:
+        # "dim" alone is also an ambient word ("too dim in here"), so it is a relative verb only with an amount
+        if tset & RELATIVE or ("dim" in tset and _BY_AMOUNT_RE.search(s)):
             rel_cmd = self._relative_cmd(s, toks, tset)
             if rel_cmd is not None:
                 return rel_cmd
@@ -401,10 +404,10 @@ class FastPathResolver:
         scored.sort(key=lambda t: (-t[0], t[1].endpoint_id))
         cands = [(d.endpoint_id, round(sc, 3)) for sc, d in scored[:5]]
         if not scored:
-            return _fall("no_match", "relative", cands)
+            return self._unknown_fall("no_match", "relative", xs, cands)
         top = scored[0][0]
         if top < self.cfg.fast_threshold:
-            return _fall("low_confidence", "relative", cands, top)
+            return self._unknown_fall("low_confidence", "relative", xs, cands, top)
         winners = [d for sc, d in scored if sc >= top - 1e-9]
         runner = max((sc for sc, d in scored if sc < top - 1e-9), default=0.0)
         if len(winners) > 1 or top - runner < self.cfg.fast_margin:
@@ -419,6 +422,17 @@ class FastPathResolver:
         direction, amount, pct = cmd.value
         return Resolution(RELATIVE_PENDING, confidence=top, reason="relative_match", intent="relative", candidates=cands,
                           relative=(d.endpoint_id, cap_id, direction, amount, pct))
+
+    @staticmethod
+    def _unknown_fall(reason: str, intent: str, xs: list[str], cands: list, conf: float = 0.0) -> Resolution:
+        """A fallthrough for a target that no device explains. When the user used a recognised device word ("fan",
+        "light") the target is named back (`unknown`) so the scheduler can say what it does not see instead of
+        guessing; the name is the user's own text, reduced to a few short alphanumeric tokens (never trusted)."""
+        res = _fall(reason, intent, cands, conf)
+        toks = [t for t in xs if re.fullmatch(r"[a-z0-9]{1,20}", t)]
+        if toks and len(toks) == len(xs) and len(toks) <= 4 and any(is_type_word(t) for t in toks):
+            res.unknown = " ".join(toks)
+        return res
 
     # ------------------------------------------------------------------------------------------ devices
     def _device_plan(self, cmd: _Cmd, reg: DeviceRegistry, role: str, raw_text: str) -> Resolution:
@@ -436,7 +450,7 @@ class FastPathResolver:
         scored.sort(key=lambda t: (-t[0], t[1].endpoint_id))
         cands = [(d.endpoint_id, round(sc, 3)) for sc, d in scored[:5]]
         if not scored:
-            return _fall("no_match", intent, cands)
+            return self._unknown_fall("no_match", intent, xs, cands)
         top = scored[0][0]
 
         def capable(d: Device) -> tuple[str, object] | None:
@@ -446,7 +460,7 @@ class FastPathResolver:
         runner = max((sc for sc, d in scored if sc < top - 1e-9), default=0.0)
         conf = top * cmd.conf
         if conf < self.cfg.fast_threshold:
-            return _fall("low_confidence", intent, cands, conf)
+            return self._unknown_fall("low_confidence", intent, xs, cands, conf)
         if group:
             members = [d for d in winners if capable(d)]
             # winners that cannot do it (a sensor named like the lights) are skipped silently in a group

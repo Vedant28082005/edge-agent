@@ -182,7 +182,7 @@ async def test_guest_gets_a_denial_and_nothing_runs_or_prompts(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------------- fall-through
-@pytest.mark.parametrize("text", ["turn on the garage light", "what is the airspeed of a swallow", "make it brighter"])
+@pytest.mark.parametrize("text", ["turn on the garage lamp and fan", "what is the airspeed of a swallow", "make it brighter"])
 async def test_unresolved_input_goes_to_the_llm(tmp_path, text):
     e = await fast_env(tmp_path)
     try:
