@@ -277,3 +277,52 @@ def test_main_mock_check_runs_end_to_end(capsys):
 def test_main_rejects_missing_credentials(tmp_path, capsys):
     rc = sim_node.main(["--profile", "fan", "--node-id", "sim-fan-01", "--sim-dir", str(tmp_path)])
     assert rc == 2 and "CA file not found" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ announce as published on the wire
+REQUIRED_EP = {"local_id", "type", "capabilities"}
+REQUIRED_CAP = {"id", "kind", "type"}
+
+
+def _wire_announce(validator, profile, alias="sim-x-01"):
+    """The retained announce bytes exactly as they reach the broker (not the in-memory config)."""
+    r = Rig(validator, profile)
+    raws = r.bus.raw("announce")
+    assert len(raws) == 1
+    return json.loads(raws[0]), r.bus.retained[f"home/v1/nodes/{NID}/announce"]
+
+
+@pytest.mark.parametrize("profile", sorted(PROFILES))
+def test_published_announce_has_endpoints_and_validates(validator, profile):
+    ann, _ = _wire_announce(validator, profile)
+    validator.validate("announce", ann)                   # the contract schema, on the published payload
+    assert isinstance(ann["endpoints"], list) and ann["endpoints"], "announce must carry a non-empty endpoints list"
+    assert ann["node_id"] == NID and ann["schema"] == 2
+    assert ann["hw"].startswith("sim-") and ann["fw"].startswith("sim-")
+    want = [e["local_id"] for e in PROFILES[profile]["endpoints"]]
+    assert [e["local_id"] for e in ann["endpoints"]] == want
+    for ep in ann["endpoints"]:
+        assert REQUIRED_EP <= set(ep) and ep["capabilities"]
+        for cap in ep["capabilities"]:
+            assert REQUIRED_CAP <= set(cap)
+            if cap["kind"] == "actuator":
+                assert "boot_value" in cap
+            else:
+                assert "interval_s" in cap
+
+
+def test_fan_announce_matches_firmware_example(validator):
+    ann, _ = _wire_announce(validator, "fan")
+    [ep] = ann["endpoints"]
+    assert ep["local_id"] == "ch1" and ep["type"] == "fan"
+    caps = {c["id"]: c for c in ep["capabilities"]}
+    assert caps["power"] == {"id": "power", "kind": "actuator", "type": "bool", "boot_value": False,
+                             "failsafe_value": False, "max_on_s": 8 * 3600}
+    assert (caps["speed"]["min"], caps["speed"]["max"], caps["speed"]["boot_value"]) == (1, 5, 1)
+
+
+def test_main_check_announce_has_endpoints_for_every_profile(capsys):
+    for profile in sorted(PROFILES):
+        assert sim_node.main(["--profile", profile, "--node-id", "sim-chk-01", "--check"]) == 0
+        out = capsys.readouterr().out
+        assert json.loads(out[out.index("{"):])["endpoints"], profile
