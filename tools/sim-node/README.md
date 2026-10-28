@@ -50,8 +50,7 @@ The announce has no name field (names/rooms are admin labels, and the schema for
 .\stop-room.ps1
 ```
 
-`-Count` nodes cycle through `-Profiles` and are labelled `sim-<profile>-NN` (`sim-light-01`, `sim-fan-01`, ...). The admin password is asked once at a hidden prompt and kept in memory only. Each sim runs as a hidden background process; PIDs are in `.sim
-oom.pids.json`, logs in `.sim\<node_id>\sim.log`. The script prints the node ids; approve each in the dashboard. `stop-room.ps1` stops only the recorded PIDs (after checking each is still that sim); the broker then fires the LWT and the nodes show offline.
+`-Count` nodes cycle through `-Profiles` and are labelled `sim-<profile>-NN` (`sim-light-01`, `sim-fan-01`, ...). The admin password is asked once at a hidden prompt and kept in memory only. Each sim runs as a hidden background process; PIDs are in `.simoom.pids.json`, logs in `.sim\<node_id>\sim.log`. The script prints the node ids; approve each in the dashboard. `stop-room.ps1` stops only the recorded PIDs (after checking each is still that sim); the broker then fires the LWT and the nodes show offline.
 
 ## Approve in the dashboard
 
