@@ -29,3 +29,6 @@ deploy/mosquitto/passwd
 *.csr
 *.srl
 deploy/e2e-work/
+
+# simulated node credentials (tools/sim-node/provision-sim.ps1)
+.sim/
