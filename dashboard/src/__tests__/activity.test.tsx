@@ -8,7 +8,7 @@ describe("activity feed", () => {
     server.use(...baseRoutes());
     const { user, ws } = await openApp();
     push(ws, { type: "notification", level: "action_blocked", text: "Rule wanted to unlock the front door" });
-    await user.click(screen.getByRole("button", { name: "activity" }));
+    await user.click(screen.getByRole("button", { name: "Activity" }));
     expect(await screen.findByText(/action_blocked: Rule wanted to unlock the front door/)).toBeInTheDocument();
   });
 });

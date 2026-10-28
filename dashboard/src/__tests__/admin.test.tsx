@@ -24,7 +24,7 @@ describe("admin", () => {
     let adminCalls = 0;
     server.use(route("get", "/admin/nodes", () => { adminCalls++; return { status: 403, json: { error: "forbidden" } }; }), ...baseRoutes("guest"));
     await openApp("guest");
-    expect(screen.queryByRole("button", { name: "admin" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Admin" })).not.toBeInTheDocument();
     expect(adminCalls).toBe(0);
   });
 
@@ -35,7 +35,7 @@ describe("admin", () => {
       ...baseRoutes("admin"),
     );
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "admin" }));
+    await user.click(screen.getByRole("button", { name: "Admin" }));
     expect((await screen.findAllByRole("alert"))[0]).toHaveTextContent("not allowed");
     expect(screen.queryByText("alice")).not.toBeInTheDocument();
   });
@@ -49,7 +49,7 @@ describe("admin", () => {
       ...baseRoutes("admin"),
     );
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "admin" }));
+    await user.click(screen.getByRole("button", { name: "Admin" }));
     await user.click(await screen.findByRole("button", { name: "Approve…" }));
     expect(screen.getByLabelText("Name")).toHaveValue("Fan"); // pre-filled from the announced endpoint type
     expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled(); // room still empty
@@ -70,7 +70,7 @@ describe("admin", () => {
       ...baseRoutes("admin"),
     );
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "admin" }));
+    await user.click(screen.getByRole("button", { name: "Admin" }));
     await user.click(await screen.findByRole("button", { name: "Approve…" }));
     await user.clear(screen.getByLabelText("Name"));
     expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
@@ -94,9 +94,12 @@ describe("admin", () => {
       ...baseRoutes("admin"),
     );
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "admin" }));
+    await user.click(screen.getByRole("button", { name: "Admin" }));
     await user.click(await screen.findByRole("button", { name: "Forget" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Yes, forget" }));
+    await waitFor(() => expect(urls).toEqual([""]));
     const dlg = await screen.findByRole("alertdialog");
+    await waitFor(() => expect(dlg).toHaveTextContent("Used by 2 scenes"));
     expect(dlg).toHaveTextContent("Used by 2 scenes, 1 automation");
     expect(urls).toEqual([""]);
     await user.click(within(dlg).getByRole("button", { name: "Forget anyway" }));
@@ -112,8 +115,8 @@ describe("admin", () => {
       ...baseRoutes("admin"),
     );
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "admin" }));
-    expect(await screen.findByText("alice")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Admin" }));
+    expect(await screen.findByRole("cell", { name: "alice" })).toBeInTheDocument();
     // Rooms are a checklist (role segmented + room checklist), populated from rooms currently in use.
     const guestRooms = screen.getByRole("group", { name: "rooms of guest1" });
     expect(within(guestRooms).getByRole("checkbox", { name: "hall" })).toBeChecked();
@@ -137,7 +140,7 @@ describe("admin", () => {
       route("get", "/admin/action-log", ({ request }) => {
         const u = new URL(request.url);
         urls.push(u);
-        if (u.searchParams.get("user_id") === "bad") return { status: 400, json: { error: "bad_request" } };
+        if (u.searchParams.get("user_id") === "u1") return { status: 400, json: { error: "bad_request" } };
         if (u.searchParams.get("cursor") === "c1") return { json: { items: [entry(1, { status: "settled" })], next_cursor: null } };
         if (u.searchParams.get("status") === "denied") return { json: { items: [entry(9, { status: "denied", error: "forbidden" })], next_cursor: null } };
         return { json: { items: [entry(3), entry(2, { source: "agent", kind: "run_scene", scene_id: "movie", endpoint_id: null, capability: null, value: null, status: "blocked", error: "confirmation_required" })], next_cursor: "c1" } };
@@ -145,7 +148,7 @@ describe("admin", () => {
       ...baseRoutes("admin"),
     );
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "admin" }));
+    await user.click(screen.getByRole("button", { name: "Admin" }));
     const table = await screen.findByRole("table", { name: "Action log" });
     await waitFor(() => expect(within(table).getAllByRole("row")).toHaveLength(3)); // header + 2
     const sceneRow = within(table).getAllByRole("row")[2]; // plain name, not the raw `kind` enum
@@ -160,7 +163,7 @@ describe("admin", () => {
     expect(screen.getByText("Showing 3 (all matching)")).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText("Filter status"), "denied");
-    await user.type(screen.getByLabelText("Filter endpoint"), "ep_00000003");
+    await user.selectOptions(screen.getByLabelText("Filter device"), "Front door (hall)");
     await user.click(screen.getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(within(table).getAllByRole("row")).toHaveLength(2)); // replaced, not appended
     const last = urls[urls.length - 1];
@@ -168,7 +171,7 @@ describe("admin", () => {
     expect(last.searchParams.get("endpoint_id")).toBe("ep_00000003");
     expect(last.searchParams.has("cursor")).toBe(false);
 
-    await user.type(screen.getByLabelText("Filter user"), "bad");
+    await user.selectOptions(screen.getByLabelText("Filter user"), "alice");
     await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(await screen.findByText("The request was not valid.")).toBeInTheDocument();
   });
@@ -181,7 +184,7 @@ describe("admin", () => {
       ...baseRoutes("admin"),
     );
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "admin" }));
+    await user.click(screen.getByRole("button", { name: "Admin" }));
     expect((await screen.findAllByRole("alert")).some((a) => a.textContent === "You are not allowed to do that.")).toBe(true);
   });
 });

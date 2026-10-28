@@ -4,6 +4,7 @@ import type { ConfirmationRequired } from "../api/events";
 import type { Capability, Endpoint, SetResult } from "../api/types";
 import { explain } from "../errors";
 import { settleKey, useLive, type Settle } from "../live";
+import { useToast } from "../toast";
 
 type Value = boolean | number | string;
 
@@ -286,6 +287,8 @@ function roomSummary(eps: Endpoint[]): string {
 
 export function Devices() {
   const { endpoints, loadError, ws } = useLive();
+  const toast = useToast();
+  useEffect(() => { if (loadError) toast(loadError); }, [loadError, toast]);
   const rooms = useMemo(() => {
     const set = new Set<string>();
     for (const e of endpoints ?? []) set.add(e.room);
