@@ -13,7 +13,9 @@ OPEN = {"login", "refresh"}                 # no auth at all
 ALLOWED = {
     "listDevices": ALL, "setDeviceState": NO_GUEST, "listScenes": ALL, "createScene": NO_GUEST, "updateScene": NO_GUEST,
     "deleteScene": NO_GUEST, "runScene": ALL, "mintConfirmation": NO_GUEST, "declineConfirmation": ALL,
-    "retryConfirmation": NO_GUEST, "createWsTicket": ALL, "chat": ALL, "uploadVoice": ALL, "uploadImage": ALL, "listMyMemories": ALL,
+    "retryConfirmation": NO_GUEST,
+    **{k: NO_GUEST for k in ("listAutomations", "createAutomation", "getAutomation", "updateAutomation", "deleteAutomation",
+                              "approveAutomation", "disableAutomation", "listAutomationRuns", "listNotifications", "markNotificationsRead")}, "createWsTicket": ALL, "chat": ALL, "uploadVoice": ALL, "uploadImage": ALL, "listMyMemories": ALL,
     "updateMyMemory": NO_GUEST, "deleteMyMemory": NO_GUEST, "systemHealth": ALL,
     **{op["operationId"]: ADMIN for _, _, op in PUBLIC if op.get("x-required-role") == "admin"},
 }

@@ -35,6 +35,20 @@ CREATE TABLE IF NOT EXISTS action_log(
   call_id TEXT, elapsed_ms INTEGER);
 CREATE INDEX IF NOT EXISTS action_log_ts ON action_log(ts);
 CREATE INDEX IF NOT EXISTS action_log_ep ON action_log(endpoint_id, capability, status);
+CREATE TABLE IF NOT EXISTS automation_rules(
+  rule_id TEXT PRIMARY KEY, name TEXT NOT NULL, owner TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('proposed','approved','disabled')), created_by TEXT NOT NULL CHECK(created_by IN ('user','llm')),
+  body TEXT NOT NULL, cooldown_s INTEGER NOT NULL, max_runs_per_day INTEGER NOT NULL, approved_by TEXT, approved_at INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, broken INTEGER NOT NULL DEFAULT 0, rooms TEXT NOT NULL DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS automation_runs(
+  run_id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id TEXT NOT NULL, ts INTEGER NOT NULL, outcome TEXT NOT NULL, action_status TEXT,
+  action_log_id INTEGER, call_id TEXT, error TEXT, rule_deleted INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS automation_runs_rule ON automation_runs(rule_id, run_id);
+CREATE TABLE IF NOT EXISTS automation_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS notifications(
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, notification_id TEXT NOT NULL UNIQUE, ts INTEGER NOT NULL, level TEXT NOT NULL,
+  source TEXT NOT NULL, rule_id TEXT, endpoint_id TEXT, text TEXT NOT NULL, owner TEXT, rooms TEXT NOT NULL DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS notification_reads(user_id TEXT NOT NULL, notification_id TEXT NOT NULL, PRIMARY KEY(user_id, notification_id));
 """
 
 

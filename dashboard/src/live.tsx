@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
-import { api } from "./api/client";
+import { api, session } from "./api/client";
 import type { EventAction, WsMessage } from "./api/events";
-import type { Endpoint } from "./api/types";
+import type { Endpoint, Notification, NotificationPage } from "./api/types";
 import { connectWs, type WsStatus } from "./api/ws";
 
 export type SettlePhase = "accepted" | "settling" | "settled" | "settle_timeout";
@@ -22,6 +22,9 @@ type S = {
   settle: Record<string, Settle>;
   confs: Record<string, Conf>;
   feed: FeedItem[];
+  notifs: Notification[]; // newest first; fed by GET /notifications and live `automation_notification`
+  autoRev: number; // bumped on every `automations_changed`: the Automations view refetches
+  autoEnabled: boolean | null; // kill switch state once known (admins read it; others learn it from `automations_changed`)
 };
 
 type A =
@@ -31,7 +34,17 @@ type A =
   | { t: "msg"; m: WsMessage }
   | { t: "settle"; key: string; phase: SettlePhase; settle_s?: number; now: number }
   | { t: "conf"; id: string; patch: Partial<Conf> }
-  | { t: "confAdd"; req: ConfReq };
+  | { t: "confAdd"; req: ConfReq }
+  | { t: "notifs"; v: Notification[] }
+  | { t: "notifsRead"; ids: string[] }
+  | { t: "autoEnabled"; v: boolean };
+
+const MAX_NOTIFS = 100;
+function mergeNotifs(cur: Notification[], incoming: Notification[]): Notification[] {
+  const byId = new Map(cur.map((n) => [n.notification_id, n]));
+  for (const n of incoming) byId.set(n.notification_id, { ...byId.get(n.notification_id), ...n });
+  return [...byId.values()].sort((a, b) => b.ts - a.ts).slice(0, MAX_NOTIFS);
+}
 
 export const settleKey = (ep: string, cap: string) => `${ep}:${cap}`;
 let feedSeq = 0;
@@ -53,9 +66,19 @@ function reduce(s: S, a: A): S {
       const c = s.confs[a.id];
       return c ? { ...s, confs: { ...s.confs, [a.id]: { ...c, ...a.patch } } } : s;
     }
+    case "notifs": return { ...s, notifs: mergeNotifs(s.notifs, a.v) };
+    case "notifsRead": return { ...s, notifs: s.notifs.map((n) => (a.ids.includes(n.notification_id) ? { ...n, read: true } : n)) };
+    case "autoEnabled": return { ...s, autoEnabled: a.v };
     case "msg": {
       const m = a.m;
       let next: S = { ...s, feed: [{ id: ++feedSeq, at: Date.now(), msg: m }, ...s.feed].slice(0, 200) };
+      if (m.type === "automation_notification") {
+        // Only the notification fields are kept; live ones are unread until the user marks them.
+        const { notification_id, ts, level, source, rule_id, endpoint_id, text } = m;
+        next = { ...next, notifs: mergeNotifs(next.notifs, [{ notification_id, ts, level, source, rule_id, endpoint_id, text, read: false }]) };
+      } else if (m.type === "automations_changed") {
+        next = { ...next, autoRev: next.autoRev + 1, autoEnabled: m.change === "kill_switch" && m.automations_enabled !== undefined ? m.automations_enabled : next.autoEnabled };
+      }
       if (m.type === "state" && next.endpoints) {
         next = {
           ...next,
@@ -94,6 +117,9 @@ function reduce(s: S, a: A): S {
 type Ctx = S & {
   dispatch: (m: WsMessage) => void;
   reload: () => Promise<void>;
+  loadNotifs: () => Promise<void>;
+  markRead: (ids: string[]) => Promise<void>;
+  setAutoEnabled: (v: boolean) => void;
   noteSettle: (ep: string, cap: string, phase: SettlePhase, settle_s?: number) => void;
   patchConf: (id: string, patch: Partial<Conf>) => void;
   addConf: (req: ConfReq) => void;
@@ -107,7 +133,7 @@ export const useLive = () => {
 };
 
 export function LiveProvider({ children, onClosed }: { children: ReactNode; onClosed?: () => void }) {
-  const [s, d] = useReducer(reduce, { endpoints: null, loadError: null, ws: "connecting", settle: {}, confs: {}, feed: [] });
+  const [s, d] = useReducer(reduce, { endpoints: null, loadError: null, ws: "connecting", settle: {}, confs: {}, feed: [], notifs: [], autoRev: 0, autoEnabled: null });
   const onClosedRef = useRef(onClosed);
   onClosedRef.current = onClosed;
 
@@ -116,13 +142,28 @@ export function LiveProvider({ children, onClosed }: { children: ReactNode; onCl
     catch (e) { d({ t: "loadError", v: (e as Error).message }); }
   }, []);
 
+  // Guests have no automation routes (403) and never receive these messages, so they do not ask.
+  const loadNotifs = useCallback(async () => {
+    if (session.role === "guest") return;
+    try { d({ t: "notifs", v: (await api<NotificationPage>("GET", "/notifications?limit=50")).items.map((n) => ({ ...n, read: n.read ?? false })) }); }
+    catch { /* the bell just stays empty; live messages still arrive */ }
+  }, []);
+  const markRead = useCallback(async (ids: string[]) => {
+    if (ids.length === 0) return;
+    try { await api("POST", "/notifications/read", { notification_ids: ids.slice(0, 200) }); d({ t: "notifsRead", ids }); }
+    catch { /* stays unread; the user can try again */ }
+  }, []);
+
+  const setAutoEnabled = useCallback((v: boolean) => d({ t: "autoEnabled", v }), []); // stable: views use it as an effect dependency
+
   useEffect(() => {
     void reload();
+    void loadNotifs();
     let wasOpen = false;
     const stop = connectWs({
       onStatus: (v) => {
         d({ t: "ws", v });
-        if (v === "open") { if (wasOpen) void reload(); wasOpen = true; } // resync after a reconnect: state may have changed meanwhile
+        if (v === "open") { if (wasOpen) { void reload(); void loadNotifs(); } wasOpen = true; } // resync after a reconnect: state may have changed meanwhile
         if (v === "closed") onClosedRef.current?.();
       },
       onMessage: (m) => {
@@ -131,16 +172,17 @@ export function LiveProvider({ children, onClosed }: { children: ReactNode; onCl
       },
     });
     return stop;
-  }, [reload]);
+  }, [reload, loadNotifs]);
 
   const value = useMemo<Ctx>(() => ({
     ...s,
     dispatch: (m) => d({ t: "msg", m }),
-    reload,
+    reload, loadNotifs, markRead,
+    setAutoEnabled,
     noteSettle: (ep, cap, phase, settle_s) => d({ t: "settle", key: settleKey(ep, cap), phase, settle_s, now: Date.now() }),
     patchConf: (id, patch) => d({ t: "conf", id, patch }),
     addConf: (req) => d({ t: "confAdd", req }),
-  }), [s, reload]);
+  }), [s, reload, loadNotifs, markRead, setAutoEnabled]);
 
   return <LiveCtx.Provider value={value}>{children}</LiveCtx.Provider>;
 }

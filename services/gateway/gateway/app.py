@@ -15,7 +15,7 @@ from typing import Annotated, Literal, Union
 
 import anyio
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, Depends, FastAPI, File, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,7 @@ from . import policy
 from .actionlog import STATUSES as ACTION_STATUSES
 from .actionlog import ActionLog
 from .auth import AuthError, User
+from .automations import AutoError, RULE_RE
 from .confirmations import ConfirmError
 from .context import Ctx
 from .media import AUDIO_TYPES, sniff_audio, sniff_image
@@ -198,6 +199,16 @@ class EndpointPatch(BaseModel):
     enabled: bool | None = None
 
 
+class NotifReadIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    notification_ids: list[Annotated[str, Field(pattern=r"^nt_[0-9a-f]{12}$")]] = Field(min_length=1, max_length=200)
+
+
+class KillSwitchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    automations_enabled: StrictBool
+
+
 class RebindIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     node_id: str = Field(pattern=NODE_RE.pattern)
@@ -270,6 +281,10 @@ def create_public_app(ctx: Ctx) -> FastAPI:
     async def _conf_err(_: Request, e: ConfirmError):
         return jerr(e.status, e.code, e.message)
 
+    @app.exception_handler(AutoError)
+    async def _auto_err(_: Request, e: AutoError):
+        return jerr(e.status, e.code, e.message)
+
     @app.exception_handler(UpstreamError)
     async def _up_err(_: Request, e: UpstreamError):
         code = "vision_unavailable" if e.service == "vision-node" and e.status != 504 else             ("upstream_timeout" if e.status == 504 else "upstream_error")
@@ -325,6 +340,11 @@ def create_public_app(ctx: Ctx) -> FastAPI:
             raise ApiError(504 if status == 504 else 502, "upstream_timeout" if status == 504 else "upstream_error",
                            "device-hub error")
         return status, body
+
+    def nonguest(u: User = Depends(authed)) -> User:
+        if u.role == "guest":
+            raise ApiError(403, "forbidden", "guests have no access to automations")
+        return u
 
     def limit(name: str, u: User) -> None:
         ra = ctx.limiter.hit(name, u.user_id)
@@ -770,6 +790,62 @@ def create_public_app(ctx: Ctx) -> FastAPI:
         status, res = await agent_json("DELETE", f"/v1/memory/{memory_id}", params={"user_id": u.user_id})
         return Response(status_code=status) if status == 204 else fwd(status, res)
 
+    # ================================================================== automations (contracts/automations.md)
+    auto = ctx.auto
+
+    @r.get("/automations")
+    async def list_automations(status: Literal["proposed", "approved", "disabled"] | None = None,
+                               created_by: Literal["user", "llm"] | None = None, u: User = Depends(nonguest)):
+        return auto.list_rules(u, status, created_by)
+
+    @r.post("/automations", status_code=201)
+    async def create_automation(body: dict = Body(...), u: User = Depends(nonguest)):
+        return JSONResponse(await auto.create(u, body), status_code=201)
+
+    def rule_path(rule_id: str) -> str:
+        if not RULE_RE.match(rule_id):
+            raise ApiError(404, "not_found")
+        return rule_id
+
+    @r.get("/automations/{rule_id}")
+    async def get_automation(rule_id: str, u: User = Depends(nonguest)):
+        return auto.get(u, rule_path(rule_id))
+
+    @r.put("/automations/{rule_id}")
+    async def update_automation(rule_id: str, body: dict = Body(...), u: User = Depends(nonguest)):
+        return await auto.update(u, rule_path(rule_id), body)
+
+    @r.delete("/automations/{rule_id}")
+    async def delete_automation(rule_id: str, u: User = Depends(nonguest)):
+        auto.delete(u, rule_path(rule_id))
+        return Response(status_code=204)
+
+    @r.post("/automations/{rule_id}/approve")
+    async def approve_automation(rule_id: str, u: User = Depends(nonguest)):
+        return await auto.approve(u, rule_path(rule_id))
+
+    @r.post("/automations/{rule_id}/disable")
+    async def disable_automation(rule_id: str, u: User = Depends(nonguest)):
+        return auto.disable(u, rule_path(rule_id))
+
+    @r.get("/automations/{rule_id}/runs")
+    async def automation_runs(rule_id: str, limit_: int = Query(default=50, alias="limit", ge=1, le=200),
+                              cursor: str | None = Query(default=None, max_length=256), u: User = Depends(nonguest)):
+        return auto.runs(u, rule_path(rule_id), limit_, cursor)
+
+    @r.get("/notifications")
+    async def list_notifications(unread: bool = False, rule_id: str | None = Query(default=None, pattern=RULE_RE.pattern),
+                                 limit_: int = Query(default=50, alias="limit", ge=1, le=200),
+                                 cursor: str | None = Query(default=None, max_length=256), u: User = Depends(nonguest)):
+        return auto.notifications(u, unread, rule_id, limit_, cursor)
+
+    @r.post("/notifications/read", status_code=204)
+    async def read_notifications(body: NotifReadIn, u: User = Depends(nonguest)):
+        if len(set(body.notification_ids)) != len(body.notification_ids):
+            raise ApiError(400, "bad_request", "duplicate ids")
+        auto.mark_read(u, body.notification_ids)
+        return Response(status_code=204)
+
     # ================================================================== system
     @r.get("/system/health")
     async def health(u: User = Depends(authed)):
@@ -924,7 +1000,17 @@ def create_public_app(ctx: Ctx) -> FastAPI:
     async def forget(node_id: str, confirm: bool = False, u: User = Depends(admin)):
         status, res = await hub("DELETE", node_path(node_id), u, params={"confirm": "true" if confirm else "false"})
         log_admin(u, "forget_node", node_id, {"status": status, "confirm": confirm})
+        if status == 409 and isinstance(res, dict):             # ForgetUsage: also count the automations that use this node
+            res = {**res, "automations": auto.usage_for_node(node_id)}
         return fwd(status, res)
+
+    @r.get("/admin/automations/kill-switch")
+    async def get_kill_switch(u: User = Depends(admin)):
+        return auto.kill_switch()
+
+    @r.put("/admin/automations/kill-switch")
+    async def put_kill_switch(body: KillSwitchIn, u: User = Depends(admin)):
+        return auto.set_kill_switch(u, body.automations_enabled)
 
     def ep_path(endpoint_id: str) -> str:
         if not EP_RE.match(endpoint_id):

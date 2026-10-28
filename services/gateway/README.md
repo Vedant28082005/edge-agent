@@ -64,3 +64,15 @@ The integration uses the hub's in-memory broker and scripted fake nodes (its `--
 
 * `gateway.yaml` has `PUT /memory/{memory_id}` but `agent-internal.yaml` has no matching agent route (only GET and DELETE). The gateway forwards `PUT /v1/memory/{id}`; that call is not covered by the contract.
 * vision-node `/transcribe`'s multipart field name (`audio`) is assumed.
+
+## Automations (contracts/automations.md v1, gateway.yaml 2.12.0)
+
+`gateway/automations.py` holds the rule store (SQLite: `automation_rules`, `automation_runs`, `notifications`, `notification_reads`,
+`automation_state`), validation against the live registry, the `/automations*`, `/notifications*` and `/admin/automations/kill-switch`
+routes' logic, and the engine. The engine runs **in the gateway** (as the contract says), fed by the hub `/events` stream the gateway
+already consumes (`state`, `node_status`, `registry_changed`) plus a 1 s timer (`automation_tick_s`) for `time_of_day`, `schedule`,
+`duration_in_state` and `device_offline`. It never uses an LLM and never sends a `confirmation_token`: a `risk: confirm` target is
+`blocked_confirm` (notify only). Every `set_state` is an action-log row `automation:<rule_id>` / user `household`.
+Config: `household_tz` (IANA zone, default `UTC`; install `tzdata` on Windows for non-UTC), `automation_tick_s`.
+Tests: `tests/test_automations.py` (mock hub, fake clock). Needs the real Pi: real hub SSE timing/reconnects, `tzdata` zone
+handling, settle events for `moving` actions (`position`), real node offline/online `node_status`, 24 h soak.
