@@ -25,7 +25,7 @@ describe("auth", () => {
     await until(() => FakeWebSocket.instances.length > 0);
     expect(await screen.findByRole("heading", { name: /Devices/ })).toBeInTheDocument();
     expect(body).toEqual({ username: "vedant", password: "pw-for-test" });
-    expect(screen.queryByRole("button", { name: "admin" })).not.toBeInTheDocument(); // member sees no Admin tab
+    expect(screen.queryByRole("button", { name: "Admin" })).not.toBeInTheDocument(); // member sees no Admin tab
   });
 
   it("shows an error for bad credentials and stays signed out", async () => {

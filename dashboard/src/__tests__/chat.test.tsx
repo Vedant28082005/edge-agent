@@ -40,14 +40,15 @@ describe("chat", () => {
       ...baseRoutes(),
     );
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     await user.type(screen.getByLabelText("Message"), "light on");
     await user.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByText("Turned it on.")).toBeInTheDocument();
     expect(screen.getByText("light on")).toBeInTheDocument();
-    expect(screen.getByText("set_state")).toBeInTheDocument();
-    expect(screen.getByText(/✓/)).toBeInTheDocument();
-    expect(screen.getByText(/fast · 12 ms/)).toBeInTheDocument();
+    expect(screen.getByText("Used 1 tool")).toBeInTheDocument();
+    expect(screen.getByText("Turned on Ceiling light")).toBeInTheDocument();
+    expect(screen.queryByText(/ep_00000001|set_state/)).not.toBeInTheDocument(); // no ids or raw tool names
+    expect(screen.getByText("Quick action · <1 s")).toBeInTheDocument();
     expect(body).toMatchObject({ text: "light on" });
     expect((body as { session_id: string }).session_id).toBeTruthy();
   });
@@ -65,10 +66,10 @@ describe("chat", () => {
       ...baseRoutes(),
     );
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     await user.type(screen.getByLabelText("Message"), "light on");
     await user.click(screen.getByRole("button", { name: "Send" }));
-    expect(await screen.findByText("set_state")).toBeInTheDocument();
+    expect(await screen.findByText("Used 1 tool")).toBeInTheDocument();
     expect(screen.queryByText("No reply")).not.toBeInTheDocument();
   });
 
@@ -78,7 +79,7 @@ describe("chat", () => {
       ...baseRoutes(),
     );
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     await user.type(screen.getByLabelText("Message"), "hi");
     await user.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByText("No reply")).toBeInTheDocument();
@@ -87,11 +88,11 @@ describe("chat", () => {
   it("shows a stream error event with a clear message", async () => {
     server.use(route("post", "/chat", () => ({ headers: { "Content-Type": "text/event-stream" }, body: sse([["error", { code: "llm_busy", message: "m" }]]) })), ...baseRoutes());
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     await user.type(screen.getByLabelText("Message"), "hi");
     await user.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("busy");
-    expect(document.querySelector(".bubble.is-error")).toBeTruthy();
+    expect(document.querySelector(".msg.is-error")).toBeTruthy();
   });
 
   it("keeps chat history across navigation and a reload, but clears it on log out", async () => {
@@ -100,14 +101,14 @@ describe("chat", () => {
       ...baseRoutes(),
     );
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     await user.type(screen.getByLabelText("Message"), "light on");
     await user.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByText("Turned it on.")).toBeInTheDocument();
 
     // navigating to another tab and back keeps it (module-level store)
-    await user.click(screen.getByRole("button", { name: "devices" }));
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Devices" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     expect(screen.getByText("Turned it on.")).toBeInTheDocument();
     expect(screen.getByText("light on")).toBeInTheDocument();
 
@@ -136,7 +137,7 @@ describe("chat", () => {
   it("Send becomes Stop while streaming; Stop aborts, marks the turn and re-enables input", async () => {
     server.use(hanging([["status", { text: "working" }]]), ...baseRoutes());
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     await user.type(screen.getByLabelText("Message"), "slow thing");
     await user.click(screen.getByRole("button", { name: "Send" }));
     const stop = await screen.findByRole("button", { name: "Stop" });
@@ -152,7 +153,7 @@ describe("chat", () => {
   it("shows a typing indicator with elapsed seconds that keepalive status events update", async () => {
     server.use(hanging([["status", { text: "still checking" }]]), ...baseRoutes());
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     await user.type(screen.getByLabelText("Message"), "hi");
     await user.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByText("still checking")).toBeInTheDocument();
@@ -164,16 +165,17 @@ describe("chat", () => {
   it("Enter sends, Shift+Enter inserts a newline, and Clear chat empties the log", async () => {
     server.use(route("post", "/chat", () => ({ headers: { "Content-Type": "text/event-stream" }, body: sse([["final", { text: "Done.", route: "llm", latency_ms: 3 }]]) })), ...baseRoutes());
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     const box = screen.getByLabelText("Message") as HTMLTextAreaElement;
     await user.type(box, "line1{Shift>}{Enter}{/Shift}line2");
     expect(box.value).toBe("line1\nline2");
     await user.type(box, "{Enter}");
     expect(await screen.findByText("Done.")).toBeInTheDocument();
-    expect(screen.getByText(/llm · 3 ms/)).toBeInTheDocument();
+    expect(screen.getByText("Thought for <1 s")).toBeInTheDocument();
     expect(box.value).toBe("");
     expect(box).toHaveFocus();
-    await user.click(screen.getByRole("button", { name: "Clear chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat options" }));
+    await user.click(screen.getByRole("menuitem", { name: "Clear chat" }));
     expect(screen.queryByText("Done.")).not.toBeInTheDocument();
     expect(chatStore.getMsgs()).toEqual([]);
   });
@@ -181,8 +183,8 @@ describe("chat", () => {
   it("stops auto-scrolling when the user scrolls up and offers Jump to latest", async () => {
     server.use(route("post", "/chat", () => ({ headers: { "Content-Type": "text/event-stream" }, body: sse([["final", { text: "ok", route: "fast", latency_ms: 1 }]]) })), ...baseRoutes());
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
-    const log = document.querySelector(".chat .log") as HTMLElement;
+    await user.click(screen.getByRole("button", { name: "Chat" }));
+    const log = document.querySelector(".chat-scroll") as HTMLElement;
     let top = 0;
     Object.defineProperty(log, "scrollHeight", { configurable: true, value: 1000 });
     Object.defineProperty(log, "clientHeight", { configurable: true, value: 300 });
@@ -203,10 +205,47 @@ describe("chat", () => {
   it("styles error and clarifying replies distinctly and shows route and time subtly", async () => {
     server.use(route("post", "/chat", () => ({ headers: { "Content-Type": "text/event-stream" }, body: sse([["final", { text: "Which light?", route: "llm", latency_ms: 9 }]]) })), ...baseRoutes());
     const { user } = await openApp();
-    await user.click(screen.getByRole("button", { name: "chat" }));
+    await user.click(screen.getByRole("button", { name: "Chat" }));
     await user.type(screen.getByLabelText("Message"), "turn on{Enter}");
     await screen.findByText("Which light?");
-    expect(document.querySelector(".bubble.is-clarify")).toBeTruthy();
-    expect(document.querySelector(".bubble .meta time")).toBeTruthy();
+    expect(document.querySelector(".msg.is-clarify")).toBeTruthy();
+    expect(document.querySelector(".meta time")).toBeTruthy();
+  });
+
+  it("renders streamed tokens as they arrive with a caret, never as HTML, then swaps in the final text", async () => {
+    server.use(hanging([["token", { text: "Hello <b>there</b>" }], ["token", { text: "\nsecond line" }]]), ...baseRoutes());
+    const { user } = await openApp();
+    await user.click(screen.getByRole("button", { name: "Chat" }));
+    await user.type(screen.getByLabelText("Message"), "hi{Enter}");
+    const reply = await screen.findByText(/second line/);
+    expect(reply.textContent).toBe("Hello <b>there</b>\nsecond line"); // literal text, line break kept
+    expect(reply.querySelector("b")).toBeNull();
+    expect(reply.querySelector(".caret")).toBeTruthy();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument(); // typing indicator only before the first token
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+  });
+
+  it("composer: Send is disabled when empty, Enter does not send an empty box, and Stop replaces Send while running", async () => {
+    server.use(hanging([["status", { text: "working" }]]), ...baseRoutes());
+    const { user } = await openApp();
+    await user.click(screen.getByRole("button", { name: "Chat" }));
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    await user.type(screen.getByLabelText("Message"), "{Enter}");
+    expect(chatStore.getMsgs()).toEqual([]);
+    await user.type(screen.getByLabelText("Message"), "go{Enter}");
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+  });
+
+  it("empty state offers suggestions built from the user's real devices; clicking one sends it", async () => {
+    let body: unknown;
+    server.use(route("post", "/chat", async ({ request }) => { body = await request.json(); return { headers: { "Content-Type": "text/event-stream" }, body: sse([["final", { text: "Done.", route: "fast", latency_ms: 1 }]]) }; }), ...baseRoutes());
+    const { user } = await openApp();
+    await user.click(screen.getByRole("button", { name: "Chat" }));
+    const chip = await screen.findByRole("button", { name: "Turn on Ceiling light" });
+    expect(screen.getByRole("button", { name: "Is Front door locked?" })).toBeInTheDocument();
+    await user.click(chip);
+    expect(await screen.findByText("Done.")).toBeInTheDocument();
+    expect(body).toMatchObject({ text: "Turn on Ceiling light" });
   });
 });

@@ -33,7 +33,7 @@ describe("automations", () => {
       ...baseRoutes("guest"),
     );
     await openApp("guest");
-    expect(screen.queryByRole("button", { name: "automations" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Automations" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Notifications/ })).not.toBeInTheDocument();
     expect(calls).toBe(0);
   });
@@ -41,7 +41,7 @@ describe("automations", () => {
   it("lists rules in plain words, never showing ids, owners or tokens", async () => {
     server.use(...rulesRoutes([running, proposed]), ...baseRoutes("admin"));
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     expect(await screen.findByText("Lamp on at dusk")).toBeInTheDocument();
     expect(screen.getByText(/Set Ceiling light power to on/)).toBeInTheDocument();
     const text = document.body.textContent ?? "";
@@ -61,7 +61,7 @@ describe("automations", () => {
       ...baseRoutes("admin"),
     );
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     const section = await screen.findByRole("region", { name: "Proposed rules" });
     expect(within(section).getByText("Suggested by the assistant")).toBeInTheDocument();
     expect(within(section).getByText(/Close blind when hot/)).toBeInTheDocument();
@@ -77,7 +77,7 @@ describe("automations", () => {
       ...baseRoutes("member"),
     );
     const { user } = await openApp("member");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     await user.click(await screen.findByRole("button", { name: "Disable" }));
     expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
   });
@@ -89,7 +89,7 @@ describe("automations", () => {
       ...baseRoutes("member"),
     );
     const { user } = await openApp("member");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     await user.click(await screen.findByRole("button", { name: "Approve" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("need your confirmation");
   });
@@ -102,7 +102,7 @@ describe("automations", () => {
       ...baseRoutes("member"),
     );
     const { user } = await openApp("member");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     await user.click(await screen.findByRole("button", { name: "New rule" }));
     await user.type(screen.getByLabelText("Name"), "Hall warm");
     await user.selectOptions(screen.getByLabelText("Trigger device"), "Hall sensor (hall)");
@@ -120,7 +120,7 @@ describe("automations", () => {
   it("never offers a risk:confirm device (a lock) as an action target", async () => {
     server.use(route("get", "/automations", () => ({ json: [] })), ...baseRoutes("admin"));
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     await user.click(await screen.findByRole("button", { name: "New rule" }));
     await user.selectOptions(screen.getByLabelText("Action type"), "set_state");
     const target = screen.getByLabelText("Action device");
@@ -145,7 +145,7 @@ describe("automations", () => {
       ...baseRoutes("admin"),
     );
     const { user } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     await user.click(await screen.findByRole("button", { name: "History" }));
     const list = await screen.findByRole("list", { name: "Run history" });
     expect(within(list).getByText("Blocked: needs your confirmation")).toBeInTheDocument();
@@ -161,7 +161,7 @@ describe("automations", () => {
       ...baseRoutes("admin"),
     );
     const { user, ws } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     await screen.findByText("Lamp on at dusk");
     list = [running, proposed];
     push(ws, { type: "automations_changed", rule_id: "ru_00000002", change: "created" });
@@ -176,7 +176,7 @@ describe("automations", () => {
       ...baseRoutes("member"),
     );
     const { user } = await openApp("member");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     await screen.findByText("Lamp on at dusk");
     expect(screen.queryByRole("region", { name: "Automation kill switch" })).not.toBeInTheDocument();
     expect(calls).toBe(0);
@@ -190,7 +190,7 @@ describe("automations", () => {
       ...baseRoutes("admin"),
     );
     const { user, ws } = await openApp("admin");
-    await user.click(screen.getByRole("button", { name: "automations" }));
+    await user.click(screen.getByRole("button", { name: "Automations" }));
     await user.click(await screen.findByRole("button", { name: "Pause all…" }));
     expect(put).toBeUndefined(); // nothing is sent until confirmed
     await user.click(within(screen.getByRole("group", { name: "Confirm pause" })).getByRole("button", { name: "Pause all" }));

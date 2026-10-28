@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { NotificationLevel } from "./api/types";
+import { IconBell } from "./icons";
 import { useLive } from "./live";
 
 // Closed vocabulary from the contract; an unknown level displays as info. Every level has a word, so colour is never the only signal.
@@ -17,10 +18,18 @@ export function NotificationBell() {
   const { notifs, markRead } = useLive();
   const [open, setOpen] = useState(false);
   const unread = notifs.filter((n) => !n.read);
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: Event) => { if (!root.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", away); document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("pointerdown", away); document.removeEventListener("keydown", esc); };
+  }, [open]);
   return (
-    <div className="bell">
-      <button className="ghost sm" aria-label={`Notifications, ${unread.length} unread`} aria-expanded={open} aria-controls="bell-panel" onClick={() => setOpen((o) => !o)}>
-        <span aria-hidden="true">🔔</span>
+    <div className="bell" ref={root}>
+      <button className="ghost icon-btn" title="Notifications" aria-label={`Notifications, ${unread.length} unread`} aria-expanded={open} aria-controls="bell-panel" onClick={() => setOpen((o) => !o)}>
+        <IconBell />
         {unread.length > 0 && <span className="bell-count" aria-hidden="true">{unread.length > 9 ? "9+" : unread.length}</span>}
       </button>
       {open && (
