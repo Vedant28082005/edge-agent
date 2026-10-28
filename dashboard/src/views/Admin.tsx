@@ -63,7 +63,8 @@ function useLoad<T>(path: string) {
 }
 
 function ApproveForm({ node, rooms, onDone }: { node: Node; rooms: string[]; onDone: () => void }) {
-  const eps = node.endpoints ?? [];
+  // A pending node has no approved endpoints yet: what it announced is in pending_endpoints.
+  const eps = node.pending_endpoints ?? [];
   const [rows, setRows] = useState(() => eps.map((e) => ({ local_id: e.local_id ?? "", name: e.type ? capitalize(e.type) : "", room: "" })));
   const [err, setErr] = useState<string | null>(null);
   const set = (i: number, k: "name" | "room", v: string) => setRows((r) => r.map((x, j) => (j === i ? { ...x, [k]: v } : x)));

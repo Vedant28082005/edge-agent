@@ -34,7 +34,7 @@ def effective_security(op: dict) -> list:
 
 
 def test_spec_version_known():
-    assert SPEC["info"]["version"] == "2.12.0", "gateway.yaml changed: re-check the implementation, then update this pin"
+    assert SPEC["info"]["version"] == "2.13.0", "gateway.yaml changed: re-check the implementation, then update this pin"
 
 
 def test_every_public_route_exists_and_no_extra(gw):
