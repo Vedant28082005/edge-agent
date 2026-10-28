@@ -73,6 +73,7 @@ class Agent:
         schema_provider = self.hb_table if cfg.llm_format == "homebench" else self.plan_schema
         self.planner = Planner(llm, schema_provider, self.metrics, format=cfg.llm_format)
         self.sched = Scheduler(self.sched_cfg, self.registry, self.executor, self.store, self.bus, self.views)
+        self.sched.model_name = self._model_name
         hb_table_provider = self.hb_table if cfg.llm_format == "homebench" else None
         self.chat = ChatService(self.registry, self.builder, self.planner, self.executor, self.store, self.metrics,
                                 cfg.settle_wait_s, cfg.max_queued_turns, self.sched, self.views,
@@ -102,6 +103,13 @@ class Agent:
         self.bus.subscribe(HUB_NODE_STATUS, self._h_node_status, "node_status")
         self.bus.subscribe(HUB_SETTLED, self._h_settle, "settle")
         self.bus.subscribe(HUB_SETTLE_TIMEOUT, self._h_settle, "settle")
+
+    async def _model_name(self) -> str:
+        """The LLM's name for "what model are you": `llm_model` from config when set to something real, else llama-server's /props."""
+        if self.cfg.llm_model and self.cfg.llm_model != "local":
+            return self.cfg.llm_model
+        props = getattr(self.llm, "props_model", None)
+        return await props() if props else ""
 
     # ------------------------------------------------------------------------------------------ schema / prefix
     def plan_schema(self, scope: Scope = UNRESTRICTED) -> dict:
