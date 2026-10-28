@@ -12,8 +12,10 @@ One simulated ESP32 per process, for the Pi stack on a Windows PC. It is a thin 
 ```powershell
 cd tools\sim-node
 .\run-tests.ps1                      # first run creates .venv
-.\provision-sim.ps1 -NodeId sim-fan-01 -GatewayUrl https://<gateway> -AdminUser admin
+.\provision-sim.ps1 -NodeId sim-fan-01 -Profile fan -GatewayUrl https://<gateway> -AdminUser admin
 ```
+
+`-Profile` records the node (label, profile, node id) in `.sim\nodes.json`, which `start-sims.bat` reads. The file holds no secrets.
 
 It prompts for the admin password (SecureString), calls `POST /admin/provision-sessions`, and writes `ca.pem` and `<node_id>.cred` to `.sim\<node_id>\` (git-ignored, owner-only). It prints the node id; **the session expires in about 10 minutes**, so start the sim right away. Use `-WifiProfile <name>` or `-WifiSsid <ssid>` (password prompted) if the gateway wants real Wi-Fi settings; otherwise a placeholder is sent.
 
@@ -52,6 +54,31 @@ The announce has no name field (names/rooms are admin labels, and the schema for
 
 `-Count` nodes cycle through `-Profiles` and are labelled `sim-<profile>-NN` (`sim-light-01`, `sim-fan-01`, ...). The admin password is asked once at a hidden prompt and kept in memory only. Each sim runs as a hidden background process; PIDs are in `.sim\room.pids.json`, logs in `.sim\<node_id>\sim.log`. The script prints the node ids; approve each in the dashboard. `stop-room.ps1` stops only the recorded PIDs (after checking each is still that sim); the broker then fires the LWT and the nodes show offline.
 
+## One-click start and stop (saved credentials, no password)
+
+Double-click `start-sims.bat` / `stop-sims.bat` (they work from any folder and wait for a key at the end). Or from a terminal:
+
+```powershell
+.\start-sims.bat          # stop running sims, start every node in .sim\nodes.json that has credentials, status after ~10 s
+.\stop-sims.bat
+python simctl.py list     # (use .\.venv\Scripts\python.exe) what is registered
+```
+
+- **Already provisioned nodes (one-time migration).** `start-sims.bat` registers saved nodes automatically when their folder name matches a label of the form `sim-<profile>-NN` (what `start-room.ps1` and the README examples create: `sim-fan-01`, `sim-light-01`, ...). Anything else is listed with the exact command to run, e.g.
+  `.\.venv\Scripts\python.exe simctl.py register --label my-lamp --profile light --node-id esp32-0123456789ab`
+  (`simctl.py migrate` runs just the automatic part.) For a node provisioned from now on, `-Profile` does it.
+- **No duplicates.** Starting first stops what is tracked in `.sim\pids` (and `.sim\room.pids.json` from `start-room.ps1`), plus any leftover `sim_node.py` of this folder. A PID is only stopped if it is still a `sim_node.py` of this tool with that node id; a reused PID is reported and left alone. Nothing is stopped by process name.
+- Each sim runs hidden; logs are in `.sim\logs\<node_id>.log`.
+- **Status table:** label, node id, `running` or `crashed`, last log line. If the broker keeps refusing a node's credentials (expired or removed), that sim exits (3 refusals in a row) and the table prints the node to re-provision, e.g. `.\provision-sim.ps1 -NodeId sim-fan-01 -GatewayUrl <gateway> -Profile fan`.
+- **Broker down or no network:** not an error. Connection attempts retry forever with 1..30 s backoff, and every reconnect re-announces and republishes state. The PC must be on the same LAN as the Pi (or reach `192.168.29.89:8883`); if the Pi's broker is not up yet, the sims connect as soon as it is.
+
+### Start at login (optional, no admin)
+
+```powershell
+.\install-autostart.ps1      # shortcut "Edge sim nodes" in your Startup folder -> start-sims.bat auto
+.\uninstall-autostart.ps1
+```
+
 ## Approve in the dashboard
 
 Admin > pending nodes: the sim appears once it announces. Select it, give each endpoint a name and room, approve. Then control it from the dashboard or chat.
@@ -59,7 +86,7 @@ Admin > pending nodes: the sim appears once it announces. Select it, give each e
 ## Tests
 
 ```powershell
-.\run-tests.ps1                      # 48 unit tests, in-memory broker, manual clock
+.\run-tests.ps1                      # 63 unit tests, in-memory broker, manual clock
 ```
 
 ## Cleanup

@@ -38,7 +38,7 @@ try {
         $prof = $Profiles[$i % $Profiles.Count]
         $seen[$prof] = 1 + [int]$seen[$prof]
         $label = 'sim-{0}-{1:d2}' -f $prof, $seen[$prof]
-        $pa = @{ NodeId = $label; GatewayUrl = $GatewayUrl; AdminUser = $AdminUser; AdminPassword = $secure; SimDir = $simDir; PassThru = $true }
+        $pa = @{ NodeId = $label; GatewayUrl = $GatewayUrl; AdminUser = $AdminUser; AdminPassword = $secure; SimDir = $simDir; PassThru = $true; Profile = $prof }
         if ($WifiProfile) { $pa.WifiProfile = $WifiProfile }
         $out = & (Join-Path $PSScriptRoot 'provision-sim.ps1') @pa
         $nid = @($out | Where-Object { $_ -is [string] -and $_ -match '^esp32-[0-9a-f]{12}$' })[-1]
