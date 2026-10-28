@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import re
 
-from .devices import DeviceRegistry
+from .devices import VOCAB, DeviceRegistry
 from .executor import CallOutcome
 from .render import fmt_value, name
+from .schema import CODE_TOOLS
 from .util import clean_label
+
+CAPABILITY_TEXT = ("I'm your smart-home assistant: I can switch devices on and off, adjust them, run scenes "
+                   "and tell you what state they are in.")
 
 NUM_RE = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
 _TOK_RE = re.compile(r"[a-z']+")
@@ -23,7 +27,7 @@ _POLAR = (({"on", "lit"}, {"off"}),
           ({"open", "opened", "opening"}, {"closed", "close", "closing", "shut"}))
 CLAIM_RE = re.compile(r"\b(turn(?:ed|ing)|switch(?:ed|ing)|lock(?:ed|ing)|unlock(?:ed|ing)|open(?:ed|ing)|clos(?:ed|ing)|"
                       r"dimm(?:ed|ing)|rais(?:ed|ing)|lower(?:ed|ing)|start(?:ed|ing)|stopp(?:ed|ing)|activat(?:ed|ing)|"
-                      r"setting|set to|done|all set)\b", re.I)
+                      r"setting|set to|done|all set|on it|will do|right away|working on)\b", re.I)
 STATE_CLAIM_RE = re.compile(r"\b(?:is|are|currently|now|still)\s+(?:on|off|locked|unlocked|open|closed|\d)", re.I)
 FAILURE_RE = re.compile(r"\b(couldn't|could not|can't|cannot|unable|failed|sorry|didn't|not able)\b", re.I)
 MAX_PHRASE_CHARS = 240
@@ -85,11 +89,61 @@ def polarity_conflict(text: str, facts: str) -> bool:
 
 
 # --------------------------------------------------------------------------------------------- the model's `say`
+# Model-independent shape check: whatever model wrote it, a `say` is shown only if it reads as a finished sentence.
+MIN_SAY_WORDS = 3
+_BAD_CHARS_RE = re.compile(r"[\[\]{}()<>\"“”‘’`\\|*_~^#�]|(?<![A-Za-z])'|'(?![A-Za-z])")
+_ALIAS_TOK_RE = re.compile(r"[a-z]{1,2}\d+")
+_CODES = set(CODE_TOOLS) | set(CODE_TOOLS.values()) | set(VOCAB)
+
+
+def malformed_say(say: str, reg: DeviceRegistry | None = None) -> str | None:
+    """A reason code when `say` is not a clean short sentence (junk tokens, a bare alias / tool code / device name, stray
+    brackets or quotes, cut off mid-sentence), else None."""
+    t = " ".join((say or "").split())
+    if not re.search(r"[A-Za-z]", t):
+        return "no_letters"
+    if _BAD_CHARS_RE.search(t):
+        return "bad_chars"
+    if not t[0].isalnum():
+        return "bad_start"
+    words = t.split()
+    low = t.lower().rstrip(".!?")
+    toks = [w.strip(".,:;!?-") for w in t.lower().split()]
+    named = {n for d in (reg.devices.values() if reg else ()) for n in (d.name.lower(), d.endpoint_id.lower())}
+    if low in _CODES or low in named or all(w in _CODES or _ALIAS_TOK_RE.fullmatch(w) for w in toks):
+        return "code_or_alias"
+    if len(words) < MIN_SAY_WORDS:
+        return "too_short"
+    if t[-1] not in ".!?":
+        return "cut_off"
+    return None
+
+
+def is_conversation_turn(user_text: str, reg: DeviceRegistry, calls: list[dict]) -> bool:
+    """A plan of only get_state/list_devices for a text with no state or device words (hello, thanks, who are you):
+    the read is the model's habit, not something the user asked for."""
+    if not calls or any(not isinstance(c, dict) or c.get("tool") not in ("get_state", "list_devices") for c in calls):
+        return False
+    words = set(_TOK_RE.findall((user_text or "").lower()))
+    topic = {"status", "state", "states", "on", "off", "locked", "unlocked", "open", "closed", "lit", "device", "devices",
+             "home", "house", "everything", "list", "show", "scene", "scenes", "room", "rooms", "online", "offline", "light",
+             "lights", "fan", "fans", "lock", "locks", "outlet", "outlets", "plug", "plugs", "sensor", "sensors"} | set(VOCAB)
+    for d in reg.devices.values():
+        for s in (d.name, d.room, d.type, *d.tags):
+            topic.update(_TOK_RE.findall(str(s).lower()))
+    for s in (*reg.rooms(), *reg.scene_names()):
+        topic.update(_TOK_RE.findall(str(s).lower()))
+    return not (words & topic)
+
+
 def say_verdict(say: str, outs: list[CallOutcome], reg: DeviceRegistry, agent_text: str, user_text: str,
                 stripped: bool = False) -> str | None:
     """None when the model's `say` may be shown for this turn, else a short reason code (kept for the trace/tests)."""
     if not say:
         return "empty"
+    bad = malformed_say(say, reg)
+    if bad:
+        return "malformed_" + bad
     if stripped:
         return "stripped_write"                    # a question turn: whatever the model said about its write is moot
     if any(not o.ok for o in outs):

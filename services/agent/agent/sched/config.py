@@ -81,6 +81,7 @@ class SchedConfig:
     route_mode: str = "hybrid"
     fast_intents: list = field(default_factory=lambda: list(HYBRID_FAST_INTENTS))
     natural_read_replies: bool = False      # second, short LLM call that phrases a read-only answer from the read results
+    say_in_plan: bool = False               # the plan array may carry a `say` string (per-model test; off = calls-only grammar)
     say_max_tokens: int = 25                # the model's optional `say` (grammar-bounded to ~4 chars per token)
     read_reply_max_tokens: int = 30
     # ablation switches
@@ -124,8 +125,9 @@ class SchedConfig:
         for k in ("say_max_tokens", "read_reply_max_tokens"):
             if isinstance(getattr(cfg, k), bool) or not isinstance(getattr(cfg, k), int) or not 1 <= getattr(cfg, k) <= 256:
                 raise ValueError(f"sched.{k} must be an integer 1..256")
-        if not isinstance(cfg.natural_read_replies, bool):
-            raise ValueError("sched.natural_read_replies must be a boolean")
+        for k in ("natural_read_replies", "say_in_plan"):
+            if not isinstance(getattr(cfg, k), bool):
+                raise ValueError(f"sched.{k} must be a boolean")
         if cfg.constraint_backend not in ("json_schema", "gbnf"):
             raise ValueError("sched.constraint_backend must be json_schema or gbnf")
         for k, v in cfg.costs.items():
@@ -144,8 +146,8 @@ class SchedConfig:
 
     @property
     def allow_say(self) -> bool:
-        """The model may add a short `say` (grammar + prompt) in every mode but rules_first, whose behaviour is unchanged."""
-        return self.route_mode != "rules_first"
+        """The model may add a short `say` (grammar + prompt) when `say_in_plan` is on, in every mode but rules_first."""
+        return self.say_in_plan and self.route_mode != "rules_first"
 
     ABLATION = ("fast_path", "router", "constrained_decoding", "prefix_cache")
 

@@ -17,7 +17,8 @@ from .llm import LlmBusy, LlmError
 from .planner import Plan, Planner
 from .prompt import PromptBudgetError, PromptBuilder, render_result
 from .render import ambient_clarifying_text, describe_outcomes, describe_reads
-from .reply import phrase_verdict, read_facts, read_messages, say_verdict
+from .reply import (CAPABILITY_TEXT, is_conversation_turn, malformed_say, phrase_verdict, read_facts, read_messages,
+                    say_verdict)
 from .render import name as _name
 from .reqctx import ReqCtx, TurnCancelled
 from .schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
@@ -212,12 +213,19 @@ class ChatService:
                       stripped: bool, trace: TurnTrace | None) -> tuple[str, str]:
         """(S14) (text, "model" | "agent"). The agent's verified text stands unless the model's `say` passes
         `reply.say_verdict`; the still-moving / unverified notes are always kept."""
-        if not model_say or self.sched is None or not self.sched.cfg.allow_say:
+        if not model_say:
             return agent_final, "agent"
-        verdict = say_verdict(model_say, outs, reg, describe_outcomes(outs, reg), user_text, stripped)
+        if self.sched is not None and self.sched.cfg.allow_say:
+            verdict = say_verdict(model_say, outs, reg, describe_outcomes(outs, reg), user_text, stripped)
+        else:                                  # say_in_plan off: the text is never shown, but junk still must not leak
+            m = malformed_say(model_say, reg)
+            verdict = ("malformed_" + m) if m else "disabled"
         if trace is not None:
             trace.say_verdict = verdict or "ok"
         if verdict is not None:
+            # a no-call turn whose say was refused gets the capability line, never the bare "couldn't work out" text
+            if not outs and verdict != "disabled" and agent_final.startswith(NO_PLAN_TEXT):
+                return CAPABILITY_TEXT, "agent"
             return agent_final, "agent"
         return model_say + self._tail(outs, reg), "model"
 
@@ -413,6 +421,12 @@ class ChatService:
                 model_say = plan.say
                 if plan.failures:        # homebench only: error_input / unparsed parts, reported alongside whatever ran
                     hb_failures.extend(plan.failures)
+                conversation = False
+                if plan.calls and not outs and is_conversation_turn(text, reg, plan.calls):
+                    plan.calls, conversation = [], True        # "hello" / "thanks": the model's habitual read is dropped
+                if conversation:
+                    say = CAPABILITY_TEXT
+                    break
                 if not plan.calls:
                     # the model has no text channel (S8i): either this is "I'm done" after a read earlier this turn
                     # (narrate it), an ambient complaint the model gave up on (act/ask on it directly rather than

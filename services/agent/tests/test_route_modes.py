@@ -14,7 +14,7 @@ from agent.sched.config import SchedConfig
 
 
 async def menv(tmp_path, mode, say=True, **sched):
-    e = await make_env(tmp_path, sched={"route_mode": mode, "router": False, **sched})
+    e = await make_env(tmp_path, sched={"route_mode": mode, "router": False, "say_in_plan": True, **sched})
     e.llm.emit_say = say
     return e
 
@@ -35,7 +35,9 @@ def tokens(ev):
 def test_defaults_and_validation():
     c = SchedConfig.from_dict({})
     assert c.route_mode == "hybrid" and c.fast_intents == ["command", "set_value", "compound"]
-    assert not c.natural_read_replies and c.allow_say
+    assert not c.natural_read_replies and not c.say_in_plan and not c.allow_say
+    assert SchedConfig.from_dict({"say_in_plan": True}).allow_say
+    assert not SchedConfig.from_dict({"say_in_plan": True, "route_mode": "rules_first"}).allow_say
     assert [c.allows_fast(i) for i in ("command", "set_value", "compound", "relative", "status", "list", "identity", "ambient")] == \
            [True, True, True, False, False, False, False, False]
     assert not SchedConfig.from_dict({"route_mode": "rules_first"}).allow_say
@@ -43,7 +45,7 @@ def test_defaults_and_validation():
     assert not any(SchedConfig.from_dict({"route_mode": "llm_first", "fast_intents": ["command"]}).allows_fast(i)
                    for i in ("command", "status"))
     for bad in ({"route_mode": "fast"}, {"fast_intents": ["command", "dance"]}, {"fast_intents": "command"},
-                {"natural_read_replies": "yes"}, {"say_max_tokens": 0}):
+                {"natural_read_replies": "yes"}, {"say_in_plan": 1}, {"say_max_tokens": 0}):
         with pytest.raises(ValueError):
             SchedConfig.from_dict(bad)
 
@@ -194,7 +196,7 @@ async def test_read_turn_ignores_the_model_text_and_reports_the_reading(tmp_path
     try:
         _, ev = await e.chat("what is the temp sensor temperature?")
         f = one(ev, "final")
-        assert "24.5" in f["text"] and f["text"] != "Checking."
+        assert "24.5" in f["text"] and f["text"] != "Checking that for you."
         assert last_trace(e)["say_verdict"] == "read_turn" and last_trace(e)["text_source"] == "agent"
     finally:
         await e.close()

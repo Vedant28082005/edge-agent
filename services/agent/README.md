@@ -164,6 +164,7 @@ path, `rules_first` = every fast intent (pre-S14 behaviour, no model `say`). Out
 short string (`say_max_tokens`, default 25) beside or instead of its calls, and a fact line (assistant name from `assistant_name`,
 model name from `llm_model` or `/props`, device types) lets it answer identity questions. The agent still composes the verified text from
 the tool results; the model's `say` replaces it only if `reply.say_verdict` finds no contradiction (no unrun action, no state claimed
+`sched.say_in_plan` (default `false`) lets the plan array carry a `say` string; per-model switch. Any `say` must also be a clean sentence (>=3 words, no brackets/quotes, no bare alias or tool code, terminal punctuation) or the agent text / capability line is used; a hello/thanks turn never runs a read.
 without a read, numbers and on/off/locked/open polarity match). `sched.natural_read_replies` adds a second short LLM call that phrases
 read-only answers from the read results and streams it as `token` events (checked by `reply.phrase_verdict`, else the agent text).
 Each trace records `route_mode`, `text_source` (`model`|`agent`) and `say_verdict`.

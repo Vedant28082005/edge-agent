@@ -418,7 +418,7 @@ class ScriptedLLM:
             d = self._find(devs, low, "sensor")
             if d and "temperature" in legend:
                 return {"calls": [{"tool": "read_sensor", "args": {"endpoint_id": d[0], "capability": "temperature"}}],
-                        "say": "Checking."}
+                        "say": "Checking that for you."}
         return {"calls": [], "say": "I'm not sure which device you mean."}
 
     @staticmethod
