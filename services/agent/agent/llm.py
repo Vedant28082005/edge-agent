@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -120,5 +121,42 @@ class LlmClient:
             ch = (j.get("choices") or [{}])[0]
             return LlmResult((ch.get("message") or {}).get("content") or "", j.get("timings") or {},
                              ch.get("finish_reason") or "")
+        finally:
+            self._slot.release()
+
+    async def stream_text(self, messages: list[dict], max_tokens: int):
+        """(S14) Free text, streamed: yields the content deltas of an unconstrained chat completion (the short natural
+        phrasing of a read answer). Same single slot and busy rule as `complete`; closing the generator (turn cancelled)
+        closes the HTTP stream, which stops generation."""
+        if self._slot.locked() and self._waiting >= self._max_queued:
+            raise LlmBusy("language model busy")
+        self._waiting += 1
+        try:
+            await self._slot.acquire()
+        finally:
+            self._waiting -= 1
+        try:
+            body = self.payload(messages, None, max_tokens)
+            body["stream"] = True
+            try:
+                async with self._http.stream("POST", self._base + "/v1/chat/completions", json=body) as r:
+                    if r.status_code == 503:
+                        raise LlmBusy("llama-server busy or loading")
+                    if r.status_code >= 400:
+                        raise LlmError(f"llama-server HTTP {r.status_code}")
+                    async for line in r.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            return
+                        try:
+                            delta = ((json.loads(data).get("choices") or [{}])[0].get("delta") or {}).get("content")
+                        except ValueError:
+                            continue
+                        if delta:
+                            yield delta
+            except httpx.HTTPError as e:
+                raise LlmError(f"llama-server unreachable: {type(e).__name__}") from None
         finally:
             self._slot.release()

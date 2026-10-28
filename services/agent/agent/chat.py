@@ -17,6 +17,7 @@ from .llm import LlmBusy, LlmError
 from .planner import Plan, Planner
 from .prompt import PromptBudgetError, PromptBuilder, render_result
 from .render import ambient_clarifying_text, describe_outcomes, describe_reads
+from .reply import phrase_verdict, read_facts, read_messages, say_verdict
 from .render import name as _name
 from .reqctx import ReqCtx, TurnCancelled
 from .schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
@@ -100,12 +101,19 @@ def compose_final(say: str, outs: list[CallOutcome], reg: DeviceRegistry) -> str
             parts.insert(0, "Some actions went through.")
     else:
         parts.append(say.strip() or ("Done." if any(o.tool in ("set_state", "run_scene") for o in outs) else "OK."))
+    parts.extend(tail_notes(outs, reg))
+    return " ".join(parts)
+
+
+def tail_notes(outs: list[CallOutcome], reg: DeviceRegistry) -> list[str]:
+    """What the user must hear whoever wrote the main sentence: a still-moving or unverified action."""
+    notes: list[str] = []
     for o in outs:
         if o.ok and o.state == "moving":
-            parts.append(f"{_name(reg, o.args.get('endpoint_id'))} is still moving; I'll tell you when it settles.")
+            notes.append(f"{_name(reg, o.args.get('endpoint_id'))} is still moving; I'll tell you when it settles.")
         elif o.ok and o.tool == "set_state" and o.verified is False:
-            parts.append(f"I couldn't confirm that {_name(reg, o.args.get('endpoint_id'))} changed.")
-    return " ".join(parts)
+            notes.append(f"I couldn't confirm that {_name(reg, o.args.get('endpoint_id'))} changed.")
+    return notes
 
 
 def apply_hb_failures(final: str, hb_failures: list[str], outs: list[CallOutcome], reg: DeviceRegistry) -> str:
@@ -195,6 +203,61 @@ class ChatService:
             trace.note_executed(new)
         return " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or None
 
+    @staticmethod
+    def _tail(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
+        notes = tail_notes(outs, reg)
+        return (" " + " ".join(notes)) if notes else ""
+
+    def _choose_reply(self, agent_final: str, model_say: str, outs: list[CallOutcome], reg: DeviceRegistry, user_text: str,
+                      stripped: bool, trace: TurnTrace | None) -> tuple[str, str]:
+        """(S14) (text, "model" | "agent"). The agent's verified text stands unless the model's `say` passes
+        `reply.say_verdict`; the still-moving / unverified notes are always kept."""
+        if not model_say or self.sched is None or not self.sched.cfg.allow_say:
+            return agent_final, "agent"
+        verdict = say_verdict(model_say, outs, reg, describe_outcomes(outs, reg), user_text, stripped)
+        if trace is not None:
+            trace.say_verdict = verdict or "ok"
+        if verdict is not None:
+            return agent_final, "agent"
+        return model_say + self._tail(outs, reg), "model"
+
+    async def _natural_read(self, ctx: ReqCtx, text: str, outs: list[CallOutcome], reg: DeviceRegistry,
+                            trace: TurnTrace | None, hb_failures: list[str]) -> str | None:
+        """(S14, flag natural_read_replies) A second, short LLM call that phrases a read-only answer from the read results,
+        streamed as `token` events. None (keep the agent's own text) when the flag is off, the turn did anything but
+        succeed at reads, the request budget is spent, the model is busy, or the phrasing contradicts the results."""
+        if (self.sched is None or not self.sched.cfg.natural_read_replies or hb_failures or not outs
+                or not all(o.ok and o.is_read for o in outs)):
+            return None
+        facts = read_facts(outs, reg)
+        if not facts or not ctx.budget.take_step():
+            return None
+        cfg = self.sched.cfg
+        llm, msgs, parts = self.planner.llm, read_messages(text, facts), []
+        t0 = time.monotonic()
+
+        async def run() -> None:
+            if hasattr(llm, "stream_text"):
+                async for chunk in llm.stream_text(msgs, cfg.read_reply_max_tokens):
+                    parts.append(chunk)
+                    await ctx.emit("token", {"text": chunk})
+            else:
+                parts.append((await llm.complete(msgs, None, max_tokens=cfg.read_reply_max_tokens)).content)
+
+        try:
+            await ctx.await_cancellable(run())
+        except (LlmBusy, LlmError) as e:
+            log.warning("natural read reply failed: %s", e)
+            return None
+        phrased = " ".join("".join(parts).split())
+        if trace is not None:
+            trace.llm_calls += 1
+            trace.add_stage("phrase_ms", (time.monotonic() - t0) * 1000)
+        verdict = phrase_verdict(phrased, facts)
+        if trace is not None:
+            trace.say_verdict = "phrase_" + (verdict or "ok")
+        return phrased if verdict is None else None
+
     async def _resolve_pending_confirmation(self, ctx: ReqCtx, text: str, reg: DeviceRegistry,
                                             trace: TurnTrace | None) -> "Routed | None":
         """A bare "yes"-shaped reply to the clarifying question this session was just asked (ambient domain +
@@ -283,6 +346,7 @@ class ChatService:
         outs: list[CallOutcome] = []
         route = "llm"
         final: str | None = None
+        text_source, streamed = "agent", False
         if routed is not None:
             outs, route = routed.outs, routed.sse_route
             if trace is not None:
@@ -303,6 +367,8 @@ class ChatService:
             say = ""
             retried_validation = False
             retried_polarity = False
+            model_say = ""                      # (S14) the model's optional text from its last round; see reply.say_verdict
+            stripped_any = False
             hb_table = self.hb_table_provider(ctx.scope) if (self.hb_table_provider
                                                              and view.builder.format == "homebench") else None
             # (homebench) the fine-tuned model was never trained on state questions -- those are answered by the
@@ -344,6 +410,7 @@ class ChatService:
                     trace.add_stage("llm_ms", (time.monotonic() - llm_t0) * 1000)
                 if self.sched and trace is not None:
                     self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained), plan.raw)
+                model_say = plan.say
                 if plan.failures:        # homebench only: error_input / unparsed parts, reported alongside whatever ran
                     hb_failures.extend(plan.failures)
                 if not plan.calls:
@@ -361,6 +428,7 @@ class ChatService:
                     # Bug (S8j): a question/status request must never cause a write, whatever the model proposed.
                     plan.calls, stripped = strip_writes_for_question(plan.calls)
                     if stripped:
+                        stripped_any = True
                         self.metrics.writes_stripped_for_question += len(stripped)
                         if trace is not None:
                             trace.note_stripped_writes(stripped)
@@ -444,11 +512,16 @@ class ChatService:
             if homebench_question:
                 say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
             final = apply_hb_failures(compose_final(say, outs, reg), hb_failures, outs, reg)
+            final, text_source = self._choose_reply(final, model_say, outs, reg, text, stripped_any, trace)
+            phrased = await self._natural_read(ctx, text, outs, reg, trace, hb_failures)
+            if phrased is not None:
+                final, text_source, streamed = phrased + self._tail(outs, reg), "model", True
         if ctx.images and route not in ("vlm", "yolo"):        # those routes already answered using the image
             final += " (I can't analyse images yet.)"
-        words = final.split(" ")
-        for i in range(0, len(words), 3):
-            await ctx.emit("token", {"text": " ".join(words[i:i + 3]) + (" " if i + 3 < len(words) else "")})
+        if not streamed:                       # a streamed phrasing already put its words on the wire
+            words = final.split(" ")
+            for i in range(0, len(words), 3):
+                await ctx.emit("token", {"text": " ".join(words[i:i + 3]) + (" " if i + 3 < len(words) else "")})
         self.store.add_message(user, sess, "user", text, guest)
         self.store.add_message(user, sess, "assistant", final, guest)
         if self.sched:
@@ -456,6 +529,7 @@ class ChatService:
         else:
             self.store.roll_summary(user, sess, guest=guest)
         if trace is not None:
+            trace.text_source = text_source
             if trace.outcome == "ok":
                 trace.outcome = outcome_of(outs)
             if routed is None:

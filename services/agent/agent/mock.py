@@ -317,6 +317,9 @@ class ScriptedLLM:
         self._prev = ""
         self.delay = 0.0
         self.script: list[tuple[str, Any]] = []         # optional overrides: (regex on user text, reply dict|callable)
+        self.emit_say = False                           # (S14) put the reply's "say" into the wire array next to the calls
+        self.phrase = None                              # (S14) optional callable(facts, question) -> str for stream_text
+        self.phrase_requests: list[list[dict]] = []
 
     async def complete(self, messages: list[dict], schema: dict | None, max_tokens: int | None = None,
                        repeat_penalty: float | None = None) -> LlmResult:
@@ -326,12 +329,19 @@ class ScriptedLLM:
         reply = self.respond(messages)
         aliases = self._aliases(messages)
         tuples = [t for t in (encode_call(c, aliases) for c in reply.get("calls", [])) if t is not None]
+        import jsonschema
         if self.constrained and schema is not None:
-            import jsonschema
             try:
                 jsonschema.validate(tuples, schema)
             except jsonschema.ValidationError:
                 tuples = []
+        if self.emit_say and reply.get("say"):
+            tuples = [*tuples, reply["say"]]
+            if self.constrained and schema is not None:
+                try:
+                    jsonschema.validate(tuples, schema)
+                except jsonschema.ValidationError:
+                    tuples = tuples[:-1]               # the grammar has no `say` string (route_mode rules_first)
         content = json.dumps(tuples, separators=(",", ":"))
         cur = "".join(f"<{m['role']}>{m['content']}\n" for m in messages)
         common = os.path.commonprefix([self._prev, cur]) if self._prev else ""
@@ -339,6 +349,18 @@ class ScriptedLLM:
         self._prev = cur
         return LlmResult(content, {"prompt_n": pn, "cache_n": cn, "prompt_ms": (pn - cn) * 10.0,
                                    "predicted_n": est_tokens(content)})
+
+    async def stream_text(self, messages: list[dict], max_tokens: int):
+        """(S14) Stand-in for LlmClient.stream_text: phrases the facts of a read-answer prompt, word by word."""
+        self.phrase_requests.append(messages)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        body = messages[-1]["content"]
+        facts = body.split("Facts:\n", 1)[-1].split("\n\nQuestion:", 1)[0]
+        question = body.rsplit("Question:", 1)[-1].strip()
+        text = self.phrase(facts, question) if self.phrase else "Right now: " + "; ".join(facts.splitlines()) + "."
+        for i, w in enumerate(text.split(" ")):
+            yield (" " if i else "") + w
 
     # ------------------------------------------------------------------------------------------ the script
     def respond(self, messages: list[dict]) -> dict:
@@ -348,6 +370,14 @@ class ScriptedLLM:
         for pat, rep in self.script:
             if re.search(pat, text, re.I):
                 return rep(messages) if callable(rep) else rep
+        if self.emit_say:
+            if re.search(r"^(hi|hello|hey)\b", text.strip(), re.I):
+                return {"calls": [], "say": "Hi! Tell me what to turn on or off."}
+            if re.search(r"who are you|your name|which model|what model", text, re.I):
+                fact = next((ln for m in messages for ln in m["content"].splitlines() if ln.startswith("Facts:")), "")
+                return {"calls": [], "say": fact.replace("Facts: you are", "I am").split(";")[0] + "."}
+            if re.search(r"how many devices", text, re.I):
+                return {"calls": [], "say": f"You have {len(self._devices(messages))} devices."}
         if last.startswith("Tool results:"):
             m = re.search(r"temperature=([\d.]+)", last)
             if m:

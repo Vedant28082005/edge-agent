@@ -16,6 +16,7 @@ class AgentConfig:
     llm_url: str = "http://127.0.0.1:8080"
     llm_model: str = "local"
     llm_max_tokens: int = 256
+    assistant_name: str = "Edge Home"         # (S14) the name the model may give when asked who it is (a short fact line in the prompt)
     llm_timeout_s: float = 600.0
     constrained: bool = True                  # runtime switch: constrained decoding on/off (S10 ablation)
     llm_format: str = "json"                  # "json" (default, unchanged) | "homebench" (agent/homebench.py)

@@ -25,6 +25,7 @@ async def custom_env(tmp_path, devices, **sched):
     fake = FakeHub(SECRET, devices=devices, settle_delay=0.05)
     server = LocalServer(fake.app())
     url = await server.start()
+    sched.setdefault("route_mode", "rules_first")       # pre-S14 behaviour unless a test picks a mode
     sched.setdefault("fast_path", False)
     sched.setdefault("router", False)
     cfg = AgentConfig(hub_url=url, hub_secret_file=str(secret_file), db_path=":memory:", confirmation_ttl_s=2.0,
