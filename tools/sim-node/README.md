@@ -36,8 +36,22 @@ Run several in separate terminals (each needs its own provisioning). Options: `-
 | `dht` | `t1`: `temperature`, `humidity` every 30 s, slow random walk |
 | `relay4` | `r1`..`r4`: `power` (r1 1 h limit, r3 boots on) |
 | `sensors` | `door` contact, `hall` motion, `lux` illuminance |
+| `room` | one node, 9 endpoints: `l1`,`l2` lights (`power`, `brightness`), `ch1` fan (`power`, `speed`), `c1` curtain (`position`), `t1` (`temperature`, `humidity`), `r1`..`r4` relays (`power`) |
+
+The announce limit is 16 endpoints per node and the contract has no per-type restriction, so `room` fits in a single node and a single approval.
 
 The announce has no name field (names/rooms are admin labels, and the schema forbids extra keys), so the sim is marked in `hw` (`sim-fan`, ...) and `fw` (`sim-0.1.0`).
+
+## A whole room at once
+
+```powershell
+.\start-room.ps1 -GatewayUrl https://<gateway> -AdminUser admin                      # 4 nodes: light, fan, curtain, dht
+.\start-room.ps1 -GatewayUrl https://<gateway> -Count 3 -Profiles room,relay4,sensors
+.\stop-room.ps1
+```
+
+`-Count` nodes cycle through `-Profiles` and are labelled `sim-<profile>-NN` (`sim-light-01`, `sim-fan-01`, ...). The admin password is asked once at a hidden prompt and kept in memory only. Each sim runs as a hidden background process; PIDs are in `.sim
+oom.pids.json`, logs in `.sim\<node_id>\sim.log`. The script prints the node ids; approve each in the dashboard. `stop-room.ps1` stops only the recorded PIDs (after checking each is still that sim); the broker then fires the LWT and the nodes show offline.
 
 ## Approve in the dashboard
 
@@ -46,7 +60,7 @@ Admin > pending nodes: the sim appears once it announces. Select it, give each e
 ## Tests
 
 ```powershell
-.\run-tests.ps1                      # 36 unit tests, in-memory broker, manual clock
+.\run-tests.ps1                      # 48 unit tests, in-memory broker, manual clock
 ```
 
 ## Cleanup

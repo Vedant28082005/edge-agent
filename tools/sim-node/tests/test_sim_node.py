@@ -326,3 +326,24 @@ def test_main_check_announce_has_endpoints_for_every_profile(capsys):
         assert sim_node.main(["--profile", profile, "--node-id", "sim-chk-01", "--check"]) == 0
         out = capsys.readouterr().out
         assert json.loads(out[out.index("{"):])["endpoints"], profile
+
+
+def test_room_profile_is_one_node_with_unique_endpoints_within_contract_limits(validator):
+    ann, _ = _wire_announce(validator, "room")
+    ids = [e["local_id"] for e in ann["endpoints"]]
+    assert ids == ["l1", "l2", "ch1", "c1", "t1", "r1", "r2", "r3", "r4"]
+    assert len(set(ids)) == len(ids) <= 16
+    types = {e["local_id"]: e["type"] for e in ann["endpoints"]}
+    assert types["l2"] == "light" and types["ch1"] == "fan" and types["c1"] == "cover" and types["t1"] == "sensor"
+
+
+def test_room_commands_reach_each_endpoint(validator):
+    r = Rig(validator, "room")
+    r.cmd("l2", {"brightness": 20})
+    r.cmd("r4", {"power": True})
+    r.cmd("ch1", {"speed": 4})
+    r.run(0.05)
+    assert all(a["ok"] for a in r.topics("ack"))
+    eps = r.topics("state")[-1]["endpoints"]
+    assert eps["l2"]["brightness"] == 20 and eps["l1"]["brightness"] == 50
+    assert eps["r4"]["power"] is True and eps["ch1"]["speed"] == 4

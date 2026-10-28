@@ -4,6 +4,8 @@ Each profile is the dict form that simesp32.config understands, so the hub-side 
 schema are checked at load time. Only `hw` differs from the firmware: it carries a `sim-` prefix, the one place the
 announce schema (additionalProperties: false) leaves room to mark a node as simulated."""
 
+import json
+
 PROFILES = {
     # firmware/examples/light: PwmChannel on GPIO25, endpoint l1 (LIGHT)
     "light": {
@@ -77,3 +79,18 @@ PROFILES = {
         ],
     },
 }
+
+
+def _room():
+    """One node, 9 endpoints (announce limit is 16): the example endpoints side by side. Endpoint ids are those of the
+    firmware examples, with the light split into l1/l2; they are unique within the node."""
+    P = PROFILES
+    l1 = P["light"]["endpoints"][0]
+    l2 = {**l1, "local_id": "l2"}
+    eps = [l1, l2, *P["fan"]["endpoints"], *P["curtain"]["endpoints"], *P["dht"]["endpoints"], *P["relay4"]["endpoints"]]
+    return {"hw": "sim-room", "endpoints": json.loads(json.dumps(eps))}
+
+
+
+
+PROFILES["room"] = _room()
