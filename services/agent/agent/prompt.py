@@ -42,6 +42,7 @@ class Budgets:
     recent: int = 400
     current: int = 100
     tool_results: int = 300
+    say: int = 220                  # (S14) the reply-text rules + the fact line, only when the model may `say`
     summary: int = 100              # carved out of `recent`
     per_message: int = 200          # one history message, carved out of `recent`
     max_history_msgs: int = 4       # 1-2 turns
@@ -60,6 +61,33 @@ SYSTEM_PROMPT = (
     "- Unclear, no match, or a vague complaint (dark/bright/hot/cold/stuffy, no device) needing >1 device or "
     "the wrong way (dark/cold/stuffy=more, bright/hot=less): reply []; the agent will ask, naming real devices."
 )
+
+_CALLS_ONLY_RULE = "- Reply with one JSON array of calls, nothing else: no object, no prose.\n"
+SYSTEM_PROMPT_SAY = SYSTEM_PROMPT.replace(
+    _CALLS_ONLY_RULE, "- Reply with one JSON array: call tuples and optionally one short text string; no object.\n")
+assert SYSTEM_PROMPT_SAY != SYSTEM_PROMPT
+
+# (S14) appended after the tools only when the model may add a `say`. The agent still writes the verified facts of any
+# action or read; the model's text is shown only when it agrees with the outcomes (chat.reply_policy).
+SAY_TEXT = (
+    "Reply text: one string, max 20 words, for chat, greetings, who you are, and answers from the facts or device "
+    "list below. Beside calls, a short natural confirmation. State only what the tools will do; never numbers you "
+    "have not read; state questions: call get_state/read_sensor (the agent reports the values). Unclear: ask one "
+    "short question as text.\n"
+    "U:hi->[\"Hi! Say what to turn on or off.\"]\n"
+    "U:turn on the lamp->[[\"s\",\"e1\",\"power\",true],\"On it.\"]"
+)
+
+
+def fact_line(assistant_name: str, model_name: str, reg: DeviceRegistry) -> str:
+    """A short, static-per-registry line the model may answer identity questions from. Only admin-set labels and the
+    configured/served model name (both cleaned), never device-supplied text."""
+    types = sorted({d.type for d in reg.devices.values()})
+    name = clean_label(assistant_name, 32) or "the home assistant"
+    model = clean_label(model_name, 48)
+    return (f"Facts: you are {name}, a smart-home assistant" + (f" running on the {model} language model" if model else "")
+            + "; you control " + (", ".join(types) if types else "no devices yet") + ", and scenes.")
+
 
 FEW_SHOT = (
     "Examples:\n"
@@ -151,18 +179,23 @@ class Prompt:
     def check(self) -> None:
         b = self.budgets
         for key, limit in (("system", b.system), ("tools", b.tools), ("devices", b.devices), ("memories", b.memories),
-                           ("recent", b.recent), ("current", b.current), ("tool_results", b.tool_results)):
+                           ("recent", b.recent), ("current", b.current), ("tool_results", b.tool_results), ("say", b.say)):
             if self.sizes.get(key, 0) > limit:
                 raise PromptBudgetError(f"section {key} is {self.sizes[key]} tokens, budget {limit}")
 
 
 class PromptBuilder:
     def __init__(self, registry: DeviceRegistry, budgets: Budgets | None = None, format: str = "json",
-                 states_provider: Callable[[], dict] | None = None) -> None:
+                 states_provider: Callable[[], dict] | None = None, say: bool = False, assistant_name: str = "",
+                 model_name: str = "") -> None:
         self.registry, self.budgets, self.format = registry, budgets or Budgets(), format
         self.states_provider = states_provider        # homebench only: () -> {endpoint_id: {capability: value}}
-        if est_tokens(SYSTEM_PROMPT) > self.budgets.system or est_tokens(TOOLS_TEXT) > self.budgets.tools:
+        self.say = say and format == "json"           # (S14) the model may add a short reply text
+        self.assistant_name, self.model_name = assistant_name, model_name
+        self.system_prompt = SYSTEM_PROMPT_SAY if self.say else SYSTEM_PROMPT
+        if est_tokens(self.system_prompt) > self.budgets.system or est_tokens(TOOLS_TEXT) > self.budgets.tools:
             raise PromptBudgetError("static system/tool text exceeds its budget")
+        self.say_text = ""
         self.prefix = ""
         self.prefix_hash = ""
         self.prefix_version = 0
@@ -184,7 +217,10 @@ class PromptBuilder:
             self.aliases = build_aliases(self.registry)  # (S8i) same map the decoding schema cache computes, kept in step
             dev_text, self.degraded = build_devices_section(self.registry, self.budgets.devices, self.aliases)
             self.devices_tokens = est_tokens(dev_text)
-            prefix = f"{SYSTEM_PROMPT}\n\n{TOOLS_TEXT}\n\n{dev_text}"
+            prefix = f"{self.system_prompt}\n\n{TOOLS_TEXT}\n\n{dev_text}"
+            if self.say:
+                self.say_text = f"{SAY_TEXT}\n{fact_line(self.assistant_name, self.model_name, self.registry)}"
+                prefix = f"{self.system_prompt}\n\n{TOOLS_TEXT}\n\n{self.say_text}\n\n{dev_text}"
         if prefix == self.prefix:
             return False
         self.prefix = prefix
@@ -259,9 +295,9 @@ class PromptBuilder:
             msgs.append(m)
         if tr:
             msgs.append({"role": "user", "content": "Tool results:\n" + tr})
-        sizes = {"system": est_tokens(SYSTEM_PROMPT), "tools": est_tokens(TOOLS_TEXT), "devices": self.devices_tokens,
+        sizes = {"system": est_tokens(self.system_prompt), "tools": est_tokens(TOOLS_TEXT), "devices": self.devices_tokens,
                  "memories": est_tokens(mem_text), "recent": recent_tokens, "current": est_tokens(cur),
-                 "tool_results": est_tokens(tr)}
+                 "tool_results": est_tokens(tr), "say": est_tokens(self.say_text)}
         p = Prompt(msgs, sizes, self.prefix_hash, b, self.degraded)
         p.check()
         return p

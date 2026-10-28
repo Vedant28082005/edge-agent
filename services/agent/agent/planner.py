@@ -19,6 +19,7 @@ from .executor import Metrics
 from .llm import Llm, LlmResult
 from .schema import MAX_CALLS
 from .scope import UNRESTRICTED, Scope
+from .util import clean_user_text
 
 log = logging.getLogger("agent.planner")
 
@@ -112,6 +113,7 @@ class Plan:
     timings: dict = field(default_factory=dict)
     raw: str = ""                   # the model's unparsed reply (S8f: logged, truncated, in turn_traces)
     failures: list[str] = field(default_factory=list)   # homebench only: "could not do this part" notes
+    say: str = ""                   # (S14) the model's optional short text (a bare string next to / instead of the calls)
 
     def as_assistant_json(self, aliases: AliasMap, hb_table: "homebench.HomebenchTable | None" = None) -> str:
         """The compact wire re-rendering of this plan, used only to show the planner its own previous turn in a
@@ -131,8 +133,11 @@ def parse_plan(text: str, aliases: AliasMap) -> Plan:
         obj = _first_array(text or "")
     if not isinstance(obj, list):
         return Plan([], False)
-    calls = [c for c in (_decode(t, aliases) for t in obj[:MAX_CALLS]) if c is not None]
-    return Plan(calls, True)
+    tuples = [t for t in obj if isinstance(t, list)]
+    says = [t for t in obj if isinstance(t, str)]
+    calls = [c for c in (_decode(t, aliases) for t in tuples[:MAX_CALLS]) if c is not None]
+    say = " ".join(clean_user_text(says[-1], 160).split()) if says else ""     # model text: a display string only, never an id
+    return Plan(calls, True, say=say)
 
 
 def parse_homebench_plan(text: str, table: homebench.HomebenchTable) -> Plan:

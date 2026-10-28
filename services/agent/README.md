@@ -155,3 +155,15 @@ secret from the hub secret (`agent.secret`); neither works on the other API.
 * **registry_version / scenes**: `list_devices` returns `registry_version` and a read-only `scenes` list; the grammar cache is keyed on the
   version (content hash when absent), scene names come from the list, the `scene_names` config key is retired (ignored if present).
 * **Routes**: SSE `final.route` is `fast|llm|sensor|yolo|vlm`; `vision` is legacy and never emitted. Traces carry the same values.
+
+## Route mode and reply policy (S14)
+
+`sched.route_mode` (default `hybrid`) decides who answers first: `hybrid` = the no-LLM fast path only for `sched.fast_intents`
+(default `command`, `set_value`, `compound`; others: `relative`, `status`, `list`, `identity`, `ambient`), `llm_first` = no fast
+path, `rules_first` = every fast intent (pre-S14 behaviour, no model `say`). Outside `rules_first` the model's JSON array may carry one
+short string (`say_max_tokens`, default 25) beside or instead of its calls, and a fact line (assistant name from `assistant_name`,
+model name from `llm_model` or `/props`, device types) lets it answer identity questions. The agent still composes the verified text from
+the tool results; the model's `say` replaces it only if `reply.say_verdict` finds no contradiction (no unrun action, no state claimed
+without a read, numbers and on/off/locked/open polarity match). `sched.natural_read_replies` adds a second short LLM call that phrases
+read-only answers from the read results and streams it as `token` events (checked by `reply.phrase_verdict`, else the agent text).
+Each trace records `route_mode`, `text_source` (`model`|`agent`) and `say_verdict`.

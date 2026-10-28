@@ -62,7 +62,8 @@ class Agent:
         self.llm.constraint = make_backend(self.sched_cfg.constraint_backend)
         self.llm.prefix_cache, self.llm.id_slot = self.sched_cfg.prefix_cache, self.sched_cfg.id_slot
         self.hub = hub
-        self.builder = PromptBuilder(self.registry, format=cfg.llm_format)
+        self.builder = PromptBuilder(self.registry, format=cfg.llm_format, say=self.sched_cfg.allow_say,
+                                     assistant_name=cfg.assistant_name)
         self.views = ScopedViews(self.registry, self.builder)
         self._last_scope: OrderedDict[str, tuple[str, Scope, float]] = OrderedDict()    # user -> (role, scope, monotonic ts)
         self.loader = RegistryLoader(hub, self.registry, self._on_registry_changed) if hub else None
@@ -150,6 +151,12 @@ class Agent:
 
     # ------------------------------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
+        if self.builder.say:                            # (S14) the model answers "which model are you" from a fact line
+            try:
+                self.builder.model_name = await self._model_name()
+                self.builder.rebuild_prefix()
+            except Exception:
+                log.warning("model name lookup failed; the fact line omits it", exc_info=True)
         if self.hub:
             await self.hub.verify_tools()
             await self.loader.reload()

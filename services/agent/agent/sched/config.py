@@ -69,8 +69,20 @@ def normalise_nodes(data: dict | None) -> dict:
     return out
 
 
+ROUTE_MODES = ("hybrid", "llm_first", "rules_first")
+FAST_INTENTS = ("command", "set_value", "compound", "relative", "status", "list", "identity", "ambient")
+HYBRID_FAST_INTENTS = ("command", "set_value", "compound")
+
+
 @dataclass
 class SchedConfig:
+    # who answers first (S14): hybrid = the fast path only for the `fast_intents`; llm_first = no fast path (the model
+    # decides everything); rules_first = every fast-path intent, as before S14
+    route_mode: str = "hybrid"
+    fast_intents: list = field(default_factory=lambda: list(HYBRID_FAST_INTENTS))
+    natural_read_replies: bool = False      # second, short LLM call that phrases a read-only answer from the read results
+    say_max_tokens: int = 25                # the model's optional `say` (grammar-bounded to ~4 chars per token)
+    read_reply_max_tokens: int = 30
     # ablation switches
     fast_path: bool = True
     router: bool = True
@@ -105,12 +117,35 @@ class SchedConfig:
                 raise ValueError(f"unknown sched config key: {k}")
             setattr(cfg, k, v)
         cfg.nodes = normalise_nodes(cfg.nodes)
+        if cfg.route_mode not in ROUTE_MODES:
+            raise ValueError(f"sched.route_mode must be one of {', '.join(ROUTE_MODES)}")
+        if not isinstance(cfg.fast_intents, list) or not set(cfg.fast_intents) <= set(FAST_INTENTS):
+            raise ValueError(f"sched.fast_intents must be a list drawn from {', '.join(FAST_INTENTS)}")
+        for k in ("say_max_tokens", "read_reply_max_tokens"):
+            if isinstance(getattr(cfg, k), bool) or not isinstance(getattr(cfg, k), int) or not 1 <= getattr(cfg, k) <= 256:
+                raise ValueError(f"sched.{k} must be an integer 1..256")
+        if not isinstance(cfg.natural_read_replies, bool):
+            raise ValueError("sched.natural_read_replies must be a boolean")
         if cfg.constraint_backend not in ("json_schema", "gbnf"):
             raise ValueError("sched.constraint_backend must be json_schema or gbnf")
         for k, v in cfg.costs.items():
             if k not in DEFAULT_COSTS or not (isinstance(v, (list, tuple)) and len(v) == 2 and v[1] in ("est", "measured")):
                 raise ValueError(f"bad sched cost entry: {k}")
         return cfg
+
+    def allows_fast(self, intent: str) -> bool:
+        """May the no-LLM fast path answer an utterance of this intent? rules_first: any; llm_first: none; hybrid: only
+        the configured `fast_intents`."""
+        if self.route_mode == "rules_first":
+            return True
+        if self.route_mode == "llm_first":
+            return False
+        return intent in self.fast_intents
+
+    @property
+    def allow_say(self) -> bool:
+        """The model may add a short `say` (grammar + prompt) in every mode but rules_first, whose behaviour is unchanged."""
+        return self.route_mode != "rules_first"
 
     ABLATION = ("fast_path", "router", "constrained_decoding", "prefix_cache")
 

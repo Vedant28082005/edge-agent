@@ -52,7 +52,14 @@ def _nullable(sch: dict) -> dict:
     return {"anyOf": [sch, {"type": "null"}]}
 
 
-def build_plan_schema(reg: DeviceRegistry, aliases: AliasMap, scene_names: tuple[str, ...] | None = None) -> dict:
+SAY_CHARS_PER_TOKEN = 4
+
+
+def build_plan_schema(reg: DeviceRegistry, aliases: AliasMap, scene_names: tuple[str, ...] | None = None,
+                      say_tokens: int = 0) -> dict:
+    """`say_tokens` > 0 (S14) additionally lets the array carry ONE short string next to (or instead of) the call tuples:
+    `[calls...]`, `["text"]` or `[calls..., "text"]`, the string capped at about that many tokens. 0 keeps the S8i
+    calls-only grammar byte for byte."""
     variants: list[dict] = []
     # set_state: one variant per (capability, value schema), enum of the aliases having it
     groups: dict[tuple[str, str], tuple[dict, list[str]]] = {}
@@ -82,6 +89,9 @@ def build_plan_schema(reg: DeviceRegistry, aliases: AliasMap, scene_names: tuple
         scene_names = reg.scene_names()              # from list_devices.scenes (already scoped for a scoped view)
     scene = {"enum": list(scene_names)} if scene_names else {"type": "string", "pattern": SCENE_RE.pattern, "maxLength": 48}
     variants.append(_tuple(TOOL_CODES["run_scene"], scene))
+    if say_tokens > 0:
+        variants.append({"type": "string", "maxLength": say_tokens * SAY_CHARS_PER_TOKEN})
+        return {"$schema": DRAFT7, "type": "array", "maxItems": MAX_CALLS + 1, "items": {"anyOf": variants}}
     return {"$schema": DRAFT7, "type": "array", "maxItems": MAX_CALLS, "items": {"anyOf": variants}}
 
 

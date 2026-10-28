@@ -37,6 +37,9 @@ class TurnTrace:
     executed: list = field(default_factory=list)        # (S8g) [{"tool","endpoint_id"?,"capability"?,"ok","state"}]
     stripped_writes: list = field(default_factory=list)  # (S8j) set_state/run_scene calls stripped from a question turn: shape only
     stage_ms: dict = field(default_factory=dict)        # (S8g) {"route_ms","llm_ms","exec_ms"}: time spent per stage
+    route_mode: str = ""                     # (S14) hybrid | llm_first | rules_first
+    text_source: str = ""                    # (S14) who wrote the final reply: "model" (its `say` / phrased read) | "agent"
+    say_verdict: str = ""                    # (S14) why the model's text was used or dropped: ok | <reply.say_verdict code> | phrase_*
     _t0: float = field(default_factory=time.monotonic, repr=False)
     _emitted: bool = field(default=False, repr=False)
 

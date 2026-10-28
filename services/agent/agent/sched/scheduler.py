@@ -72,7 +72,8 @@ class Scheduler:
     def schema(self, scope: Scope = UNRESTRICTED) -> ConstraintSchema:
         """Decoding schema for this scope: the full registry for an unrestricted caller, otherwise only its own endpoints,
         rooms and scenes. Keyed on the hub's `registry_version` (content hash when the hub sent none)."""
-        return self.constraints.get(self.views.get(scope).registry, None, "" if not scope.restricted else scope.key)
+        return self.constraints.get(self.views.get(scope).registry, None, "" if not scope.restricted else scope.key,
+                                    self.cfg.say_max_tokens if self.cfg.allow_say else 0)
 
     def aliases(self, scope: Scope = UNRESTRICTED):
         """(S8i) The same scope's alias map, from the same cache entry as `schema` -- so the planner's decode and the
@@ -80,16 +81,16 @@ class Scheduler:
         return self.schema(scope).aliases
 
     def new_trace(self, ctx: ReqCtx) -> TurnTrace:
-        return TurnTrace(ctx.req_id, flags=self.cfg.flags())
+        return TurnTrace(ctx.req_id, flags=self.cfg.flags(), route_mode=self.cfg.route_mode)
 
     # ------------------------------------------------------------------------------------------ routing
     async def route(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
         """A finished non-LLM answer, or None when the LLM must take the turn."""
-        if is_identity_intent(text):                       # a fixed capability line: never a device read, never the LLM
+        if is_identity_intent(text) and self.cfg.allows_fast("identity"):   # a fixed capability line: never a device read
             return await self._identity(trace)
         if self.executor is None:
             return None
-        if self.cfg.fast_path:
+        if self.cfg.fast_path and self.cfg.route_mode != "llm_first":
             r = await self._fast(ctx, text, trace)
             if r is not None:
                 return r
@@ -99,15 +100,19 @@ class Scheduler:
 
     async def _fast(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
         reg = self.views.get(ctx.scope).registry          # scoped: the resolver cannot even name an out-of-scope device or scene
+        allow = self.cfg.allows_fast                       # route_mode / fast_intents: an intent not allowed goes to the LLM
         if is_list_intent(text):
-            return await self._list(ctx, trace, reg)
+            return await self._list(ctx, trace, reg) if allow("list") else None
         status = self.resolver.resolve_status(text, reg)
         if status is not None:
-            return await self._status(ctx, status, trace, reg)
+            return await self._status(ctx, status, trace, reg) if allow("status") else None
         question = self.resolver.resolve_question(text, reg)
         if question is not None:
-            return await self._question(ctx, question, trace, reg)
+            return await self._question(ctx, question, trace, reg) if allow("status") else None
         res = self.resolver.resolve(text, reg, ctx.role, reg.scene_names())
+        if res.status in (PLAN, DENIED, RELATIVE_PENDING) and not allow(self._intent_of(res)):
+            trace.fast_reason = f"intent_{self._intent_of(res)}_to_llm"
+            return None
         trace.fast_reason, trace.confidence = res.reason, round(res.confidence, 3)
         trace.candidates = [list(c) for c in res.candidates]
         if res.status == DENIED:
@@ -123,18 +128,27 @@ class Scheduler:
             trace.fast_reason = "relative_state_unavailable"
             return None                                     # cannot compute a target safely: let the LLM take it
         if res.status != PLAN:
-            if res.unknown and ctx.role != "guest":
+            if res.unknown and ctx.role != "guest" and allow("command"):
                 trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
                 return Routed(text=self._unknown_text(res.unknown, reg))
             if res.reason == "relative":
                 return None      # an explicit relative command word (e.g. "brighter") overlapping an ambient word
                                  # ("too bright") is a real command the resolver already recognised, never a complaint
-            return await self._ambient(ctx, text, trace, reg)
+            return await self._ambient(ctx, text, trace, reg) if allow("ambient") else None
         ctx.reason = f"user request (fast path): {text[:80]}"
         trace.note_calls(res.calls)
         outs = await self.executor.run_calls(ctx, res.calls)
         trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
         return Routed(outs=outs, say=res.say)
+
+    @staticmethod
+    def _intent_of(res) -> str:
+        """The `fast_intents` name of a resolver result: compound | set_value | relative | command."""
+        if res.reason == "compound_power_value":
+            return "compound"
+        if res.status == RELATIVE_PENDING or res.intent == "relative":
+            return "relative"
+        return "set_value" if res.intent in ("value", "mode") else "command"
 
     @staticmethod
     def _unknown_text(name: str, reg: DeviceRegistry) -> str:
@@ -263,6 +277,8 @@ class Scheduler:
                 break
             t0 = time.monotonic()
             if src == "sensor":
+                if not self.cfg.allows_fast("status"):            # a sensor reading is a read-only question: the LLM's
+                    continue
                 ep, cap = dec.sensor
                 out = await self.executor.run_call(ctx, "read_sensor", {"endpoint_id": ep, "capability": cap})
                 ms = (time.monotonic() - t0) * 1000
