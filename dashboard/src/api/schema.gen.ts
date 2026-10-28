@@ -1459,6 +1459,13 @@ export interface components {
             /** @enum {string} */
             status: "pending" | "online" | "offline";
             endpoints?: components["schemas"]["Endpoint"][];
+            /** @description Endpoints the node announced that an admin has not approved yet (what the approve form lists). `endpoints` holds only approved ones, so it is empty for a pending node. */
+            pending_endpoints?: components["schemas"]["PendingEndpoint"][];
+        };
+        PendingEndpoint: {
+            local_id: string;
+            type: components["schemas"]["EndpointType"];
+            capabilities: components["schemas"]["Capability"][];
         };
         ProvisionSession: {
             session_id: string;

@@ -7,7 +7,9 @@ import { openApp } from "./helpers";
 
 const pending: Node = {
   node_id: "esp32-a1b2c3d4e5f6", hw: "esp32-devkit", fw: "0.1.0", status: "pending",
-  endpoints: [{ endpoint_id: "ep_ffffffff", local_id: "ch1", name: "", room: "", type: "fan", online: true, enabled: true, capabilities: [] }],
+  // What the hub really sends for a pending node: nothing approved yet, the announced endpoints under pending_endpoints.
+  endpoints: [],
+  pending_endpoints: [{ local_id: "ch1", type: "fan", capabilities: [] }],
 };
 const users: User[] = [
   { user_id: "u1", username: "alice", role: "member", rooms: ["bedroom"] },
@@ -60,6 +62,35 @@ describe("admin", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(body).toEqual({ endpoints: [{ local_id: "ch1", name: "Bedroom fan", room: "bedroom" }] }));
+  });
+
+  it("lists every announced endpoint of a pending node and approves them in one request", async () => {
+    let body: unknown;
+    const room: Node = { ...pending, pending_endpoints: [
+      { local_id: "l1", type: "light", capabilities: [] }, { local_id: "l2", type: "light", capabilities: [] },
+      { local_id: "ch1", type: "fan", capabilities: [] },
+    ] };
+    server.use(
+      route("get", "/admin/nodes", () => ({ json: [room] })),
+      route("get", "/admin/users", () => ({ json: users })),
+      route("post", "/admin/nodes/{node_id}/approve", async ({ request }) => { body = await request.json(); return { json: [] }; }),
+      ...baseRoutes("admin"),
+    );
+    const { user } = await openApp("admin");
+    await user.click(screen.getByRole("button", { name: "Admin" }));
+    await user.click(await screen.findByRole("button", { name: "Approve…" }));
+    const names = screen.getAllByLabelText("Name");
+    const rooms = screen.getAllByLabelText("Room");
+    expect(names).toHaveLength(3);
+    for (const r of rooms) await user.type(r, "bedroom");
+    await user.clear(names[1]);
+    await user.type(names[1], "Reading lamp");
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(body).toEqual({ endpoints: [
+      { local_id: "l1", name: "Light", room: "bedroom" },
+      { local_id: "l2", name: "Reading lamp", room: "bedroom" },
+      { local_id: "ch1", name: "Fan", room: "bedroom" },
+    ] }));
   });
 
   it("approve stays disabled until every name and room is filled, and shows the server's error", async () => {

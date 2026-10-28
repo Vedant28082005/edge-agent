@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Edge Agent Gateway API
-  version: 2.12.0
+  version: 2.13.0
   description: |
     User-facing API served by the gateway (pi-brain :8000, HTTPS via `tailscale serve`).
     Auth: JWT access + refresh. Roles: admin, member, guest.
@@ -1738,6 +1738,17 @@ components:
         fw: {type: string}
         status: {type: string, enum: [pending, online, offline]}
         endpoints: {type: array, items: {$ref: '#/components/schemas/Endpoint'}}
+        pending_endpoints:
+          type: array
+          description: Endpoints the node announced that an admin has not approved yet (what the approve form lists). `endpoints` holds only approved ones, so it is empty for a pending node.
+          items: {$ref: '#/components/schemas/PendingEndpoint'}
+    PendingEndpoint:
+      type: object
+      required: [local_id, type, capabilities]
+      properties:
+        local_id: {type: string}
+        type: {$ref: '#/components/schemas/EndpointType'}
+        capabilities: {type: array, items: {$ref: '#/components/schemas/Capability'}}
     ProvisionSession:
       type: object
       required: [session_id, bundle, expires_at]

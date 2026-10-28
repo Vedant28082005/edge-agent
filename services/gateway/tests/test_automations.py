@@ -549,7 +549,7 @@ def test_samples_validate_against_what_the_gateway_emits(gw):
                          ("automation-kill-switch", "AutomationKillSwitch")):
         for f in (CONTRACTS / "samples" / kind / "valid").glob("*.json"):
             validate({"$ref": f"#/components/schemas/{schema}"}, json.loads(f.read_text(encoding="utf-8")))
-    assert SPEC["info"]["version"] == "2.12.0"
+    assert SPEC["info"]["version"] == "2.13.0"
 
 
 def test_hub_event_stream_feeds_the_engine(gw):

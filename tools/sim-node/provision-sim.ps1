@@ -23,7 +23,9 @@ param(
     [string] $AdminUser = 'admin',
     [string] $WifiProfile = '',   # saved profile name (GET /admin/wifi-profiles)
     [string] $WifiSsid = '',      # alternative: inline Wi-Fi, password prompted. Neither: a placeholder the sim ignores
-    [string] $SimDir = ''
+    [string] $SimDir = '',
+    [switch] $PassThru,                     # emit the node id on the pipeline (for start-room.ps1)
+    [SecureString] $AdminPassword = $null   # for start-room.ps1, which asks once; never read from a file or the environment
 )
 $ErrorActionPreference = 'Stop'
 
@@ -47,7 +49,10 @@ $dir = Join-Path $SimDir $nid
 $base = $GatewayUrl.TrimEnd('/')
 
 # --- admin login
-$adminPass = Read-Secret "Admin password for '$AdminUser'"
+if ($AdminPassword) {
+    $b0 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdminPassword)
+    try { $adminPass = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b0) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b0) }
+} else { $adminPass = Read-Secret "Admin password for '$AdminUser'" }
 $wifiPass = $null
 if ($WifiSsid) { $wifiPass = Read-Secret 'Wi-Fi password (empty for an open network)' }
 try {
@@ -88,3 +93,4 @@ Write-Host "written to: $dir  (ca.pem, $nid.cred; git-ignored)"
 Write-Host "REMINDER  : the provisioning session expires in about 10 minutes (at $exp). Start the sim now:"
 Write-Host "            python sim_node.py --profile <profile> --node-id $NodeId"
 $b = $null; $sess = $null
+if ($PassThru) { $nid }

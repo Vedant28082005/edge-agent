@@ -7,6 +7,7 @@ export type Endpoint = S["Endpoint"];
 export type Capability = S["Capability"];
 export type SetResult = S["SetResult"];
 export type Node = S["Node"];
+export type PendingEndpoint = S["PendingEndpoint"];
 export type User = S["User"];
 export type Scene = S["Scene"];
 export type TokenPair = S["TokenPair"];
