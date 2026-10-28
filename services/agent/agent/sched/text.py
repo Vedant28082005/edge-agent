@@ -11,13 +11,14 @@ from difflib import SequenceMatcher
 from ..devices import Device
 
 # type -> words that name it. An exact type word explains a target token fully (1.0), a synonym 0.8, so "lamp" prefers a
-# device NAMED lamp over a ceiling light that is merely of type light.
+# device NAMED lamp over a ceiling light that is merely of type light. THE one place to add a synonym (S15 A1): words are
+# matched after `stem`, so list the singular only ("curtain" also covers "curtains").
 TYPE_SYN: dict[str, frozenset[str]] = {
     "light": frozenset({"light", "lamp", "bulb", "lighting"}),
     "fan": frozenset({"fan", "ventilator"}),
     "outlet": frozenset({"outlet", "plug", "socket"}),
     "lock": frozenset({"lock"}),
-    "cover": frozenset({"cover", "blind", "curtain", "shade", "shutter", "awning"}),
+    "cover": frozenset({"cover", "blind", "curtain", "drape", "shade", "shutter", "awning"}),
     "thermostat": frozenset({"thermostat", "heater"}),
     "sensor": frozenset({"sensor"}),
     "generic": frozenset(),

@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from ..devices import DeviceRegistry
 from ..events import Event, EventBus
 from ..executor import CallOutcome, Executor
-from ..render import LIST_MAX, ambient_clarifying_text, describe_outcomes, describe_question, describe_reads
+from ..devices import Device
+from ..render import (LIST_MAX, ambient_clarifying_text, describe_outcomes, describe_question, describe_reads, join_names,
+                      which_one_text)
+from ..reply import capability_text
 from ..util import clean_label
 from ..reqctx import ReqCtx
 from ..schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
@@ -31,6 +34,7 @@ from .grammar import ConstraintCache, ConstraintSchema, make_backend
 from .memory import MemoryWindow
 from .prefix import PrefixTracker
 from .resolver import DENIED, PLAN, RELATIVE_PENDING, FastPathResolver
+from .text import FILLER, PREP, normalise, score_device, stem, strip_polite
 from .router import CostRouter
 from .trace import RAW_TRUNC, TRACE_EVENT, TurnTrace
 
@@ -46,6 +50,7 @@ class Routed:
     outs: list = field(default_factory=list)
     say: str = ""
     text: str | None = None            # a complete answer (skips compose_final), e.g. a sensor reading or a denial
+    note: str = ""                     # appended to whatever the reply is (what a group action left out)
     sse_route: str = "fast"            # fast | sensor | yolo | vlm  (SSE `route` enum fast|llm|sensor|yolo|vlm; `vision` is legacy, never emitted)
 
 
@@ -65,7 +70,7 @@ class Scheduler:
     # ------------------------------------------------------------------------------------------ flags
     def set_flags(self, **flags: bool) -> None:
         for k, v in flags.items():
-            if k not in SchedConfig.ABLATION or not isinstance(v, bool):
+            if k not in SchedConfig.ABLATION + SchedConfig.S15_FLAGS or not isinstance(v, bool):
                 raise ValueError(f"not an ablation flag: {k}")
             setattr(self.cfg, k, v)
 
@@ -87,7 +92,11 @@ class Scheduler:
     async def route(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
         """A finished non-LLM answer, or None when the LLM must take the turn."""
         if is_identity_intent(text) and self.cfg.allows_fast("identity"):   # a fixed capability line: never a device read
-            return await self._identity(trace)
+            return await self._identity(trace, self.views.get(ctx.scope).registry)
+        if self.cfg.deterministic_fixes and ctx.role != "guest":
+            asked = self._ask_which(ctx, text, trace)
+            if asked is not None:
+                return asked
         if self.executor is None:
             return None
         if self.cfg.fast_path and self.cfg.route_mode != "llm_first":
@@ -139,7 +148,99 @@ class Scheduler:
         trace.note_calls(res.calls)
         outs = await self.executor.run_calls(ctx, res.calls)
         trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
-        return Routed(outs=outs, say=res.say)
+        return Routed(outs=outs, say=res.say, note=" ".join(res.skipped))
+
+    # ------------------------------------------------------------------------------------------ ambiguity (S15 A3)
+    def _ask_which(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:
+        """A singular reference ("the light") that matches more than one device in scope: ask which one, in every path
+        (this runs before the fast path AND before the LLM), and remember the question so the answer ("light2") is
+        resolved deterministically against exactly these candidates. "All the lights" never gets here (that is a group)."""
+        reg = self.views.get(ctx.scope).registry
+        if is_list_intent(text) or is_identity_intent(text) or not reg.devices:
+            return None
+        res = self.resolver.resolve(text, reg, ctx.role, reg.scene_names())
+        eps = [e for e in res.ambiguous if e in reg.devices]
+        if len(eps) < 2:
+            return None
+        devs = [reg.devices[e] for e in eps]
+        self.store.set_pending(ctx.user_id, ctx.session_id, {"kind": "disambig", "text": text, "eps": eps})
+        trace.fast_reason, trace.confidence = "ambiguous_ask", round(res.confidence, 3)
+        trace.candidates = [[e, 1.0] for e in eps[:5]]
+        trace.route, trace.sse_route, trace.source, trace.outcome = "fast", "fast", "fast_path", "clarify"
+        return Routed(text=which_one_text(devs))
+
+    _ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3}
+    _ALL_WORDS = frozenset({"both", "all", "every", "each", "everything", "either"})
+
+    def pick_candidates(self, text: str, devs: list[Device]) -> list[Device]:
+        """Which of the devices we just asked about the user's answer names: one (by exact name, name words, room, or
+        ordinal) or all of them ("both"). [] when the answer is not an answer to that question."""
+        toks = strip_polite(normalise(text)).split()
+        if not toks or len(toks) > 6:
+            return []
+        if toks[-1] in ("one", "ones"):
+            toks = toks[:-1]
+        if set(toks) & self._ALL_WORDS and len([t for t in toks if t not in FILLER | PREP | self._ALL_WORDS | {"of", "them"}]) == 0:
+            return list(devs)
+        ordinal = [self._ORDINALS[t] for t in toks if t in self._ORDINALS]
+        if len(ordinal) == 1 and ordinal[0] < len(devs) and len(toks) <= 3:
+            return [devs[ordinal[0]]]
+        words = [t for t in toks if t not in FILLER and t not in PREP]
+        if not words:
+            return []
+        exact = [d for d in devs if [stem(t) for t in normalise(d.name).split()] == [stem(t) for t in words]]
+        if len(exact) == 1:
+            return exact
+        xs = [stem(t) for t in words]
+        scored = sorted(((sc, d) for d in devs for sc, ident in (score_device(xs, d),) if sc > 0), key=lambda t: (-t[0], t[1].endpoint_id))
+        if not scored or scored[0][0] < self.cfg.fast_threshold:
+            return []
+        top = scored[0][0]
+        tied = [d for sc, d in scored if sc >= top - 1e-9]
+        runner = max((sc for sc, d in scored if sc < top - 1e-9), default=0.0)
+        return tied if len(tied) == 1 and top - runner >= 0.05 else []
+
+    async def answer_which(self, ctx: ReqCtx, text: str, pending: dict, trace: TurnTrace | None) -> Routed | None:
+        """The user's reply to `_ask_which`: re-run the ORIGINAL request against just the chosen device(s), through the same
+        resolver, validation and executor as any command. The reply is composed from what was really commanded. None when
+        the reply names none of the candidates (it is a new message; the caller carries on as usual)."""
+        reg = self.views.get(ctx.scope).registry
+        devs = [reg.devices[e] for e in pending.get("eps", []) if e in reg.devices]
+        chosen = self.pick_candidates(text, devs)
+        if not chosen or self.executor is None:
+            return None
+        calls: list[dict] = []
+        says: list[str] = []
+        for d in chosen:
+            sub = DeviceRegistry({d.endpoint_id: d}, reg.version, reg.generation, reg.list_version, {}, reg.scenes_known)
+            res = self.resolver.resolve(str(pending.get("text") or ""), sub, ctx.role, ())
+            if res.status == DENIED:
+                return Routed(text=GUEST_DENIED_TEXT)
+            if res.status != PLAN or not res.calls:
+                return None
+            calls += res.calls
+            says.append(res.say)
+        ctx.reason = f"user request (clarified): {str(pending.get('text'))[:80]}"
+        if trace is not None:
+            trace.route, trace.sse_route, trace.source, trace.fast_reason = "fast", "fast", "fast_path", "disambiguated"
+            trace.candidates = [[d.endpoint_id, 1.0] for d in chosen]
+            trace.note_calls(calls)
+        outs = await self.executor.run_calls(ctx, calls)
+        return Routed(outs=outs, say=" ".join(says))
+
+    async def filter_reads_reply(self, ctx: ReqCtx, text: str, outs: list, reg: DeviceRegistry, say: str) -> str:
+        """"which devices are on right now?" answered by the LLM path: whatever reads the model made, the reply lists only the
+        devices that are on (fetching the rooms' states itself when the model did not)."""
+        flt = self.resolver.on_off_filter(text, reg)
+        if flt is None or self.executor is None:
+            return say
+        expect, eps = flt
+        seen = {st.get("endpoint_id") for o in outs if o.ok and o.tool == "get_state" for st in (o.result.get("states") or [])
+                if isinstance(st, dict)}
+        rooms = sorted({reg.devices[e].room for e in eps if e in reg.devices and e not in seen})
+        if rooms:                                              # the model read only part of what the question covers
+            outs = outs + await self.executor.run_calls(ctx, [{"tool": "get_state", "args": {"room": r}} for r in rooms])
+        return describe_question(outs, reg, ("list", "power", expect, eps)) or say
 
     @staticmethod
     def _intent_of(res) -> str:
@@ -157,10 +258,9 @@ class Scheduler:
         art = "an" if name[:1] in "aeiou" else "a"
         if not names:
             return f"I don't see {art} {name}."
-        more = f" and {len(names) - 5} more" if len(names) > 5 else ""
-        return f"I don't see {art} {name}. I can control: {', '.join(names[:5])}{more}."
+        return f"I don't see {art} {name}. I can control: {join_names(names, 8)}."
 
-    async def _identity(self, trace: TurnTrace) -> Routed:
+    async def _identity(self, trace: TurnTrace, reg: DeviceRegistry | None = None) -> Routed:
         """"who are you" / "what is the llm name": the fixed capability line plus the model's name when it is known."""
         name = ""
         if self.model_name is not None:
@@ -170,7 +270,8 @@ class Scheduler:
                 log.warning("model name lookup failed", exc_info=True)
         trace.fast_reason, trace.confidence = "identity", 1.0
         trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
-        return Routed(text=f"{IDENTITY_TEXT} I run on {name}." if name else IDENTITY_TEXT)
+        base = capability_text(reg) if reg is not None else IDENTITY_TEXT
+        return Routed(text=f"{base} I run on {name}." if name else base)
 
     async def _list(self, ctx: ReqCtx, trace: TurnTrace, reg: DeviceRegistry) -> Routed:
         """"devices" / "list devices" / "what can you control": `list_devices`, then one `get_state` per room of the (at most

@@ -23,6 +23,28 @@ def fmt_value(v: object) -> str:
     return clean_label(v, 24) or "?"
 
 
+def join_names(names: list[str], limit: int = 8) -> str:
+    """"A", "A and B", "A, B and C"; past `limit` the rest is counted ("A, B, ... and 2 more"). A short list is never
+    cut: "and 1 more" is not an answer."""
+    names = list(names)
+    if len(names) > limit:
+        return ", ".join(names[:limit]) + f" and {len(names) - limit} more"
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def which_one_text(devs: list) -> str:
+    """The clarifying question for a singular reference that matches several devices: real names, with the room only
+    when two of them share a name."""
+    names = [d.name for d in devs]
+    dup = {n for n in names if names.count(n) > 1}
+    labels = [f"{d.name} ({d.room})" if d.name in dup else d.name for d in devs]
+    if len(labels) > 6:
+        return f"Which one do you mean: {join_names(labels, 6)}?"
+    return "Which one do you mean: " + (", ".join(labels[:-1]) + " or " + labels[-1]) + "?"
+
+
 def describe_outcomes(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
     """The confirmation text for a pure action turn, built from the verified outcomes (S8f)."""
     acted = [o for o in outs if o.ok and o.tool in ("set_state", "run_scene")]
@@ -147,19 +169,29 @@ def describe_question(outs: list[CallOutcome], reg: DeviceRegistry, question: tu
     current reading ("what is X's brightness?"), "any" (no device named, e.g. "is anything on?") scans every state
     this turn fetched. Empty string when the read failed or the capability is missing from the result (the caller
     falls back to its own default text)."""
-    mode, cap, expect = question
+    mode, cap, expect = question[:3]
+    only = question[3] if len(question) > 3 else None          # "list" mode: the endpoint ids the question is about
     states = [s for o in outs if o.ok and o.tool == "get_state" for s in (o.result.get("states") or []) if isinstance(s, dict)]
     if not states:
         return ""
+    if mode == "list":
+        # "which devices are on?": only the devices that are (the listed ones; offline devices are not "on")
+        verb = "on" if expect else "off"
+        hits = [s for s in states if s.get("online") and s.get("values", {}).get(cap) is expect
+                and (only is None or s.get("endpoint_id") in only)]
+        if not hits:
+            return f"Nothing is {verb}." if expect else "Everything is on."
+        items = [f"{name(reg, s.get('endpoint_id'))} ({reg.devices[s['endpoint_id']].room})" if s.get("endpoint_id") in reg.devices
+                 else name(reg, s.get("endpoint_id")) for s in hits]
+        return f"{'On' if expect else 'Off'} right now: {join_names(items)}."
     if mode == "any":
         verb = "on" if expect else "off"
         hits = [s for s in states if s.get("online") and s.get("values", {}).get(cap) is expect]
         if not hits:
             return f"No, nothing is {verb}." if expect else "No, everything is off."
-        shown = ", ".join(name(reg, s.get("endpoint_id")) for s in hits[:3])
-        more = f" and {len(hits) - 3} more" if len(hits) > 3 else ""
+        shown = join_names([name(reg, s.get("endpoint_id")) for s in hits])
         plural = "is" if len(hits) == 1 else "are"
-        return f"Yes, {shown}{more} {plural} {verb}."
+        return f"Yes, {shown} {plural} {verb}."
     s = states[0]
     nm = name(reg, s.get("endpoint_id"))
     if not s.get("online"):
