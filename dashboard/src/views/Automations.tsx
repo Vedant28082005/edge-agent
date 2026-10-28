@@ -1,3 +1,4 @@
+import { useToast } from "../toast";
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, session } from "../api/client";
 import type {
@@ -416,10 +417,11 @@ export function Automations() {
   const [err, setErr] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const names = makeNames(endpoints);
+  const toast = useToast();
 
   const load = useCallback(async () => {
-    try { setRules(await api<AutomationRule[]>("GET", "/automations")); setErr(null); } catch (e) { setErr(explain(e)); }
-  }, []);
+    try { setRules(await api<AutomationRule[]>("GET", "/automations")); setErr(null); } catch (e) { const m = explain(e); setErr(m); toast(m); }
+  }, [toast]);
   useEffect(() => { void load(); }, [load, autoRev]); // autoRev: refetch on `automations_changed`
 
   const proposed = (rules ?? []).filter((r) => r.status === "proposed");
@@ -430,6 +432,11 @@ export function Automations() {
       {isAdmin && <KillSwitch />}
       {autoEnabled === false && <div className="banner warn" role="status"><span>Automations are paused. No rule will run until they are resumed.</span></div>}
       {err && <p className="err" role="alert">{err}</p>}
+      {rules === null && !err && (
+        <div className="skeleton-list" aria-busy="true" aria-label="Loading rules">
+          {[0, 1].map((i) => <div key={i} className="card skeleton" aria-hidden="true"><span className="sk sk-title" /><span className="sk sk-line" /></div>)}
+        </div>
+      )}
 
       {proposed.length > 0 && (
         <div className="auto-block" role="region" aria-label="Proposed rules">
@@ -448,7 +455,7 @@ export function Automations() {
         {creating && endpoints && <CreateForm eps={endpoints} onDone={() => { setCreating(false); void load(); }} />}
         {creating && <div className="row"><button className="sm" onClick={() => setCreating(false)}>Cancel</button></div>}
         {rules && others.length === 0 && !creating && (
-          <div className="empty"><p>No rules yet.</p><p className="small">A rule does one thing when something happens, like a notification when a door has been open too long.</p></div>
+          <div className="empty"><p><strong>No rules yet</strong></p><p className="small">A rule does one thing when something happens, like a notification when a door has been open too long.</p></div>
         )}
         <ul className="plain stack">{others.map((r) => <RuleCard key={r.rule_id} rule={r} names={names} onChanged={load} />)}</ul>
       </div>
