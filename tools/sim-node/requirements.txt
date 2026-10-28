@@ -1,1 +1,2 @@
 -r ../sim-esp32/requirements.txt
+psutil>=5.9

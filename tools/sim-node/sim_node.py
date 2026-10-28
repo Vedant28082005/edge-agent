@@ -39,6 +39,7 @@ from profiles import PROFILES  # noqa: E402
 DEFAULT_HOST = "192.168.29.89"
 DEFAULT_PORT = 8883
 SIM_FW = "sim-0.1.0"
+EXIT_CREDENTIALS = 3
 ALIAS_RE = re.compile(r"^[A-Za-z0-9._-]{1,48}$")
 
 
@@ -70,6 +71,31 @@ def parse_latency(text: str) -> tuple:
     if lo_f < 0 or hi_f < lo_f:
         raise ConfigError("--latency-ms: need 0 <= MIN <= MAX")
     return lo_f, hi_f
+
+
+AUTH_REFUSALS_TO_EXIT = 3
+
+
+def is_auth_refusal(reason_code) -> bool:
+    text = str(reason_code).lower()
+    return "bad user name or password" in text or "not authorized" in text
+
+
+class AuthWatchTransport(PahoTransport):
+    """PahoTransport already retries the first connection and every reconnect with 1..30 s backoff (a broker that is
+    down, no LAN yet, a TLS error: the sim keeps trying). Only a broker that keeps refusing the credentials is final:
+    that is counted here so the main loop can exit with a clear message instead of retrying forever."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.auth_refusals = 0
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties):
+        if reason_code.is_failure:
+            self.auth_refusals = self.auth_refusals + 1 if is_auth_refusal(reason_code) else 0
+        else:
+            self.auth_refusals = 0
+        super()._on_connect(client, userdata, flags, reason_code, properties)
 
 
 class SimNode(Node):
@@ -189,27 +215,34 @@ def main(argv=None):
         except CredError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
-        transport = PahoTransport(node_id, args.host, args.port, ca, user, pw, will)
+        transport = AuthWatchTransport(node_id, args.host, args.port, ca, user, pw, will)
     node = SimNode(cfg, transport, validator, clock, latency_ms=latency, fail_rate=args.fail_rate,
                    rng_seed=cfg.seed)
     node.boot()
     transport.start()
-    print(f"running ({'mock bus' if args.mock else f'{args.host}:{args.port} TLS'}), Ctrl-C to stop")
+    print(f"running ({'mock bus' if args.mock else f'{args.host}:{args.port} TLS'}), Ctrl-C to stop; "
+          "retries the broker with backoff until it is reachable", flush=True)
     if args.mock:
         import threading
         threading.Thread(target=_stdin_injector, args=(bus, node_id), daemon=True).start()
+    rc = 0
     try:
         while not node.stopped:
             if args.mock:
                 transport.poll()
             node.tick()
+            if getattr(transport, "auth_refusals", 0) >= AUTH_REFUSALS_TO_EXIT:
+                logging.error("credentials rejected by the broker (expired or removed). Re-run: "
+                              "provision-sim.ps1 -NodeId %s -GatewayUrl <gateway>", args.node_id)
+                rc = EXIT_CREDENTIALS
+                break
             time.sleep(0.02)
     except KeyboardInterrupt:
         pass
     finally:
         node.shutdown()            # publishes status=offline (a clean disconnect would not fire the LWT)
     print(node_id, json.dumps(node.stats))
-    return 0
+    return rc
 
 
 def _stdin_injector(bus, node_id):

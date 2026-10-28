@@ -24,6 +24,7 @@ param(
     [string] $WifiProfile = '',   # saved profile name (GET /admin/wifi-profiles)
     [string] $WifiSsid = '',      # alternative: inline Wi-Fi, password prompted. Neither: a placeholder the sim ignores
     [string] $SimDir = '',
+    [string] $Profile = '',                 # light|fan|curtain|dht|relay4|sensors|room: recorded in .sim\nodes.json for start-sims.bat
     [switch] $PassThru,                     # emit the node id on the pipeline (for start-room.ps1)
     [SecureString] $AdminPassword = $null   # for start-room.ps1, which asks once; never read from a file or the environment
 )
@@ -86,11 +87,19 @@ $ascii = New-Object Text.ASCIIEncoding
 [IO.File]::WriteAllText((Join-Path $dir "$nid.cred"), "username=$($b.mqtt.username)`npassword=$($b.mqtt.password)`n", $ascii)
 & icacls $dir /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null
 
+if ($Profile) {
+    . (Join-Path $PSScriptRoot 'sim-common.ps1')
+    $env:SIM_DIR = $SimDir
+    & (Get-SimPython) (Join-Path $PSScriptRoot 'simctl.py') register --label $NodeId --profile $Profile --node-id $nid --gateway $base | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning 'Could not update .sim\nodes.json; register it with: python simctl.py register --label ... --profile ...' }
+} else {
+    Write-Warning 'No -Profile given: this node is not in .sim\nodes.json, so start-sims.bat cannot tell which profile to run. Re-run with -Profile, or: python simctl.py register --label <label> --profile <profile> --node-id <id>'
+}
 $exp = [DateTimeOffset]::FromUnixTimeSeconds([int64]$sess.expires_at).LocalDateTime.ToString('HH:mm:ss')
 Write-Host "node id   : $nid"
 Write-Host "broker    : $($b.mqtt.host):$($b.mqtt.port)  (bundle value; sim_node.py defaults to 192.168.29.89:8883, override with --host)"
 Write-Host "written to: $dir  (ca.pem, $nid.cred; git-ignored)"
 Write-Host "REMINDER  : the provisioning session expires in about 10 minutes (at $exp). Start the sim now:"
-Write-Host "            python sim_node.py --profile <profile> --node-id $NodeId"
+Write-Host "            python sim_node.py --profile <profile> --node-id $NodeId   (or double-click start-sims.bat)"
 $b = $null; $sess = $null
 if ($PassThru) { $nid }
