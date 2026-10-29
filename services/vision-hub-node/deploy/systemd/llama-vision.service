@@ -1,0 +1,21 @@
+# systemd USER unit (not installed by Phase 1). Qwen3-VL-2B Q4_K_M + mmproj Q8_0 under llama.cpp b11413.
+# Config from the benchmark: -c 1024, -np 1, -t 4; 224 px images are produced by vision-service, cache_prompt=false is
+# sent per request. Loopback only. Paths come from ~/.config/edge-vision/llama.env (see llama.env.example).
+[Unit]
+Description=llama-server (Qwen3-VL-2B) for the vision node
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/edge-vision/llama.env
+ExecStart=${LLAMA_BIN} -m ${LLAMA_MODEL} --mmproj ${LLAMA_MMPROJ} --host 127.0.0.1 --port 8080 -c 1024 -np 1 -t 4 --no-webui
+Restart=on-failure
+RestartSec=5
+Nice=5
+NoNewPrivileges=true
+# discard output: prompts and answers must not reach the journal
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=default.target

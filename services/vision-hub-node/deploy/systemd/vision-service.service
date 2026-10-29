@@ -1,0 +1,17 @@
+# systemd USER unit (not installed by Phase 1). Loopback HTTP wrapper around llama-server.
+[Unit]
+Description=Vision service (127.0.0.1:8310)
+Requires=llama-vision.service
+After=llama-vision.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/edge-vision/app
+ExecStart=%h/edge-vision/venv/bin/python -m vision_hub --port 8310 --llama-url http://127.0.0.1:8080 --frames folder:%h/edge-vision/frames --allowed-dir %h/edge-vision/frames
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+StandardOutput=null
+
+[Install]
+WantedBy=default.target
