@@ -1,0 +1,10 @@
+{
+  "node": "vlmpi",
+  "http": {"host": "__BIND__", "port": 8300},
+  "auth": {"verifier_file": "__HOME__/edge-vision/secrets/verifiers/agent.sha256"},
+  "contracts_dir": "__HOME__/edge-vision/app/contracts",
+  "llama": {"url": "http://127.0.0.1:8081", "model_name": "qwen3-vl-2b-q4"},
+  "whisper": {"enabled": false},
+  "yolo": {"enabled": false},
+  "limits": {"min_mem_mb": 400, "max_waiting": 4, "node_cap_ms": 25000, "cache_ttl_s": 30, "vlm_max_side": 224}
+}

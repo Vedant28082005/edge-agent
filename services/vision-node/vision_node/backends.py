@@ -11,6 +11,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .errors import ApiError
 from .schema import mock_value
 
 
@@ -48,6 +49,24 @@ class DetectBackend(Protocol):
 
     async def loaded(self) -> bool: ...
     async def detect(self, image: bytes, width: int, height: int, min_conf: float, max_detections: int) -> list[RawDetection]: ...
+
+
+class DisabledBackend:
+    """Stands in for a backend this node does not run (config `enabled: false`). Every operation is 503
+    `vision_unavailable`, and /health leaves it out and does not count it in `ok`."""
+    enabled = False
+
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+
+    async def loaded(self) -> bool:
+        return False
+
+    async def transcribe(self, wav16k: bytes) -> str:
+        raise ApiError("vision_unavailable")
+
+    async def detect(self, image: bytes, width: int, height: int, min_conf: float, max_detections: int) -> list:
+        raise ApiError("vision_unavailable")
 
 
 @dataclass

@@ -1,0 +1,20 @@
+# systemd USER unit. The existing services/vision-node, native (no Docker), VLM only. Binds the Tailscale address from
+# ~/edge-vision/config/vision-node.json (never 0.0.0.0). It retries until tailscale0 has that address.
+[Unit]
+Description=vision-node (agent-facing perception API, port 8300)
+Requires=llama-vision.service
+After=llama-vision.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/edge-vision/app
+Environment=PYTHONPATH=%h/edge-vision/app PYTHONDONTWRITEBYTECODE=1
+ExecStart=%h/edge-vision/venv/bin/python -m vision_node --config %h/edge-vision/config/vision-node.json
+Restart=on-failure
+RestartSec=5
+MemoryMax=300M
+NoNewPrivileges=true
+StandardOutput=null
+
+[Install]
+WantedBy=default.target

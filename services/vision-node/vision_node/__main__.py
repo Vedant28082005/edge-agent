@@ -53,10 +53,13 @@ def main(argv: list[str] | None = None) -> int:
         app = create_app(cfg, mock_backends(), contract=contract, auth=auth, sysinfo=MockSysInfo(), mock=True)
         log.info("MOCK mode: deterministic fake models")
     else:
-        from .backends import Backends
+        from .backends import Backends, DisabledBackend
         from .real import LlamaVlm, OnnxYolo, WhisperStt
-        be = Backends(LlamaVlm(cfg.llama_url, cfg.llama_model_name), WhisperStt(cfg.whisper_url, cfg.whisper_model_name),
-                      OnnxYolo(cfg.yolo_model_path, cfg.yolo_model_name))
+        be = Backends(LlamaVlm(cfg.llama_url, cfg.llama_model_name, cfg.vlm_max_side),
+                      WhisperStt(cfg.whisper_url, cfg.whisper_model_name) if cfg.whisper_enabled
+                      else DisabledBackend(cfg.whisper_model_name),
+                      OnnxYolo(cfg.yolo_model_path, cfg.yolo_model_name) if cfg.yolo_enabled
+                      else DisabledBackend(cfg.yolo_model_name))
         app = create_app(cfg, be, contract=contract, auth=auth)
 
     import uvicorn

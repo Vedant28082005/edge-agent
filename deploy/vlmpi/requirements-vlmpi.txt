@@ -1,0 +1,8 @@
+# vision-node on the vlmpi (VLM only: no whisper, no YOLO, so no numpy/onnxruntime). Wheels only, pinned to the versions
+# the test suite ran with on the PC (aarch64 cp313 wheels exist for pillow, pyyaml and rpds-py; verified by install.sh).
+starlette==1.10.0
+uvicorn==0.54.0
+httpx==0.28.1
+jsonschema==4.26.0
+PyYAML==6.0.3
+pillow==13.0.0

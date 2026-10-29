@@ -21,13 +21,16 @@ class Config:
     llama_model_name: str = "qwen3-vl-2b-q4"
     whisper_url: str = "http://127.0.0.1:8082"
     whisper_model_name: str = "whisper-base.en"
+    whisper_enabled: bool = True            # false: STT answers 503 vision_unavailable and is left out of /health
     yolo_model_path: str = "/var/lib/edge-agent/models/yolov8n.onnx"
     yolo_model_name: str = "yolov8n"
+    yolo_enabled: bool = True               # false: /v1/detect answers 503 vision_unavailable and is left out of /health
     ffmpeg: str = "ffmpeg"
     min_mem_mb: int = 400
     max_waiting: int = 4
     node_cap_ms: int = 25000
     cache_ttl_s: float = 30.0
+    vlm_max_side: int = 0                   # >0: downscale the image to this many px (long side) before the VLM; 0 = as sent
 
     def validate(self, mock: bool) -> "Config":
         if not _NODE.fullmatch(self.node):
@@ -37,6 +40,12 @@ class Config:
                 raise SystemExit("vision-node: bad model name")
         if not mock and self.host in ("", "0.0.0.0", "::", "[::]"):
             raise SystemExit("vision-node: refusing to bind a wildcard address; use the node's Tailscale address")
+        for flag in (self.whisper_enabled, self.yolo_enabled):
+            if not isinstance(flag, bool):
+                raise SystemExit("vision-node: whisper.enabled and yolo.enabled must be booleans")
+        if isinstance(self.vlm_max_side, bool) or not isinstance(self.vlm_max_side, int) or not (
+                self.vlm_max_side == 0 or 64 <= self.vlm_max_side <= 1024):
+            raise SystemExit("vision-node: vlm_max_side must be 0 or 64..1024")
         if not 1 <= self.max_waiting <= 4 or not 1000 <= self.node_cap_ms <= 25000:
             raise SystemExit("vision-node: max_waiting must be 1..4 and node_cap_ms 1000..25000")
         return self
