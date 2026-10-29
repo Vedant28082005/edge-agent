@@ -274,6 +274,9 @@ class ChatService:
         no domain/direction/device). Discards the pending entry on any reply, confirmation or not -- a changed
         subject abandons the question rather than leaving it to misfire on some later, unrelated "yes"."""
         pending = self.store.pop_pending(ctx.user_id, ctx.session_id)
+        if pending and pending.get("kind") == "disambig":
+            # (S15 A3) the answer to "which one do you mean?": re-run the original request on exactly the device(s) named
+            return await self.sched.answer_which(ctx, text, pending, trace) if self.sched else None
         if not pending or not is_short_confirmation(text):
             return None
         devs = ambient_domain_devices(reg, pending["domain"])
@@ -361,6 +364,8 @@ class ChatService:
                 trace.note_executed(outs)
             await ctx.emit("status", {"text": "working on it"})
             final = routed.text if routed.text is not None else compose_final(routed.say, outs, reg)
+            if routed.note:
+                final = f"{final} {routed.note}"
         else:
             if self.sched:
                 win = self.sched.memory.load(user, sess, guest)
@@ -525,6 +530,8 @@ class ChatService:
                 tool_results = "\n".join(render_result(o.tool, o.args, o.result, reg, aliases) for o in new if o.ok)
             if homebench_question:
                 say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
+            if self.sched is not None and self.sched.cfg.deterministic_fixes and not hb_failures:
+                say = await self.sched.filter_reads_reply(ctx, text, outs, reg, say)       # (S15 A4) "which are on" lists only those
             final = apply_hb_failures(compose_final(say, outs, reg), hb_failures, outs, reg)
             final, text_source = self._choose_reply(final, model_say, outs, reg, text, stripped_any, trace)
             phrased = await self._natural_read(ctx, text, outs, reg, trace, hb_failures)

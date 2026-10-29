@@ -19,6 +19,23 @@ from .util import clean_label
 CAPABILITY_TEXT = ("I'm your smart-home assistant: I can switch devices on and off, adjust them, run scenes "
                    "and tell you what state they are in.")
 
+_TYPE_PLURAL = {"light": "lights", "fan": "fans", "outlet": "outlets", "lock": "locks", "cover": "covers (blinds, curtains)",
+                "thermostat": "thermostats", "generic": "other devices"}
+
+
+def capability_text(reg: DeviceRegistry) -> str:
+    """The identity line, built from the device types this caller really has (no "locks" in a home without any)."""
+    ctl = [_TYPE_PLURAL[t] for t in sorted({d.type for d in reg.devices.values() if any(c.kind == "actuator" for c in d.caps)})
+           if t in _TYPE_PLURAL]
+    can = ["control your " + (", ".join(ctl[:-1]) + " and " + ctl[-1] if len(ctl) > 1 else ctl[0])] if ctl else []
+    if any(d.type == "sensor" for d in reg.devices.values()):
+        can.append("read your sensors")
+    if reg.scene_names():
+        can.append("run scenes")
+    can.append("tell you what's on")
+    return "I'm your smart-home assistant: I can " + (", ".join(can[:-1]) + " and " + can[-1] if len(can) > 1 else can[0]) + "."
+
+
 NUM_RE = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")
 _TOK_RE = re.compile(r"[a-z']+")
 # word groups of opposite states: (side A, side B)

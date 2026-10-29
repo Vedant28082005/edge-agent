@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..devices import Device, DeviceRegistry
+from ..render import join_names
 from ..schema import _ACTION_VERBS, _is_off_like, ensure_power_dependency, validate_call
 from .config import SchedConfig
 from .text import (FILLER, NEGATION, PREP, QUANT, QUESTION, RELATIVE, TEMPORAL, TYPE_SYN, is_type_word, normalise,
@@ -76,6 +77,8 @@ class Resolution:
                                                   # the current value is unknown here (no live state, no I/O in the
                                                   # resolver), so the scheduler fetches it and computes the target
     unknown: str = ""                            # sanitised name the user gave for a device that is not in the registry
+    ambiguous: list = field(default_factory=list)   # (S15 A3) endpoint ids a singular reference matched equally: the scheduler asks
+    skipped: list = field(default_factory=list)     # (S15 A2) plain-text notes on what a group action deliberately left out
     question: tuple | None = None                # (mode, capability, expect) for `resolve_question`: how the
                                                   # scheduler should compose the answer from the get_state result(s)
                                                   # it still has to fetch (no live state here either)
@@ -129,6 +132,10 @@ class FastPathResolver:
         sc = self._scene(s, toks, scenes, role)
         if sc is not None:
             return sc
+        if self.cfg.deterministic_fixes:
+            grp = self._scope_group(s, toks, reg, role)
+            if grp is not None:
+                return grp
         cmd = self._parse(s, toks, reg)
         if isinstance(cmd, str):
             return _fall(cmd)
@@ -204,6 +211,10 @@ class FastPathResolver:
             calls = [{"tool": "get_state", "args": {"endpoint_id": ep}} for ep in eps]
             return Resolution(PLAN, calls, "", 1.0, "any_bool_question", "question", [(ep, 1.0) for ep in eps[:5]],
                               question=("any", "power", _ON_OFF_WORDS[bool_word]))
+        if bool_word is not None and self.cfg.deterministic_fixes:
+            listed = self._on_off_list(toks, reg, _ON_OFF_WORDS[bool_word])
+            if listed is not None:
+                return listed
         if not (bool_word or lock_word or open_word or attr_word):
             return None
         drop = set(_ON_OFF_WORDS) | set(_LOCK_STATE_WORDS) | set(_OPEN_CLOSED_WORDS) | set(_ATTR_CAP_WORDS)
@@ -248,6 +259,50 @@ class FastPathResolver:
         reason = "attribute_question" if mode == "value" else "bool_question"
         return Resolution(PLAN, [{"tool": "get_state", "args": {"endpoint_id": d.endpoint_id}}], "", top, reason,
                           "question", [(d.endpoint_id, top)], question=(mode, cap, expect))
+
+    _LIST_FILLER = frozenset({"device", "thing", "right", "now", "currently", "at", "the", "moment", "is", "are", "there",
+                              "show", "me", "tell", "which", "what", "whats", "that", "turned", "switched", "running",
+                              "powered", "still", "on", "off", "list"})
+
+    def on_off_filter(self, text: str, reg: DeviceRegistry) -> tuple[bool, frozenset] | None:
+        """(expect, endpoint ids) when `text` asks WHICH devices are on/off ("which devices are on right now?", "what lights
+        are off in the bedroom?"): the answer lists only those. None for any other text."""
+        s = strip_polite(normalise(text))
+        toks = s.split()
+        if not toks or toks[0] not in ("which", "what", "whats", "show", "list"):
+            return None
+        if set(toks) & (_ACTION_VERBS - {"show"}):
+            return None
+        bool_word = next((w for w in _ON_OFF_WORDS if w in set(toks)), None)
+        if bool_word is None:
+            return None
+        res = self._on_off_list(toks, reg, _ON_OFF_WORDS[bool_word])
+        return (res.question[2], res.question[3]) if res is not None else None
+
+    def _on_off_list(self, toks: list[str], reg: DeviceRegistry, expect: bool) -> "Resolution | None":
+        """"which devices are on" / "what is on" / "which lights are on in the bedroom": get_state for the rooms involved,
+        answered by `render.describe_question` in "list" mode (only the devices that are on / off)."""
+        if toks[0] not in ("which", "what", "whats", "show", "list"):
+            return None
+        rest = [stem(t) for t in toks if t not in self._LIST_FILLER and stem(t) not in self._LIST_FILLER]
+        rooms = {r: [stem(t) for t in normalise(r).split()] for r in reg.rooms()}
+        fit = [r for r, rt in rooms.items() if rt and all(t in rest for t in rt)]
+        room = max(fit, key=lambda r: len(rooms[r])) if fit else None
+        if room is not None:
+            rest = [t for t in rest if t not in rooms[room]]
+        types = {typ for t in rest for typ in (is_type_word(t),) if typ}
+        rest = [t for t in rest if not is_type_word(t)]
+        if rest:
+            return None                                   # a word we cannot place: let the normal path decide
+        devs = [d for d in reg.devices.values() if d.cap("power") and d.cap("power").kind == "actuator"
+                and (room is None or d.room == room) and (not types or d.type in types)]
+        if not devs:
+            return None
+        calls = [{"tool": "get_state", "args": {"room": r}} for r in sorted({d.room for d in devs})]
+        if len(calls) > self.cfg.fast_max_group:
+            return None
+        return Resolution(PLAN, calls, "", 1.0, "on_off_list_question", "question", [],
+                          question=("list", "power", expect, frozenset(d.endpoint_id for d in devs)))
 
     # ------------------------------------------------------------------------------------------ intent
     def _parse(self, s: str, toks: list[str], reg: DeviceRegistry) -> _Cmd | str:
@@ -391,6 +446,71 @@ class FastPathResolver:
     def _names_device_word(target: list[str]) -> bool:
         return any(is_type_word(t) for t in target)
 
+    # ------------------------------------------------------------------------------------------ room / house scope (S15 A2)
+    _SCOPE_SKIP = frozenset({"device", "devices", "thing", "things", "stuff", "all", "everything", "every", "here", "there",
+                             "around", "up"})
+    _WHOLE_HOME = frozenset({"house", "home", "place", "apartment", "flat"})
+
+    def _scope_group(self, s: str, toks: list[str], reg: DeviceRegistry, role: str) -> Resolution | None:
+        """"turn off everything in the bedroom" / "turn off everything" / "switch on all the devices in the hall": one
+        `set_state power` per device of that room (or of the whole scope) that has a power switch. `risk: confirm`
+        endpoints are NOT part of a group action (they need the confirmation flow, by name) and are reported as skipped.
+        None when the text is not this shape. A guest is denied (never set_state); a scoped registry already holds only
+        the caller's rooms, so "everything" can never reach beyond them."""
+        tset = set(toks)
+        if not tset & {"everything", "all"} or tset & {"on", "off"} not in ({"on"}, {"off"}):
+            return None
+        if "everything" not in tset and not tset & {"device", "devices", "thing", "things"}:
+            return None                                              # "all the lights": the type-group path knows that one
+        if not (tset & _ON_PARTICLE_VERBS or "everything" in tset):
+            return None
+        on = "on" in tset
+        drop = _ON_PARTICLE_VERBS | {"on", "off"} | FILLER | PREP | self._SCOPE_SKIP
+        rest = [stem(t) for t in toks if t not in drop]
+        rooms = {r: [stem(t) for t in normalise(r).split()] for r in reg.rooms()}
+        fit = [r for r, rt in rooms.items() if rt and all(t in rest for t in rt)]
+        room = max(fit, key=lambda r: len(rooms[r])) if fit else None
+        if room is not None:
+            rest = [t for t in rest if t not in rooms[room]]
+        rest = [t for t in rest if t not in self._WHOLE_HOME]
+        if rest:
+            named = [t for t in rest if re.fullmatch(r"[a-z]{3,20}", t)]
+            if room is None and len(named) == len(rest) and len(named) <= 2:
+                rn = ", ".join(reg.rooms())
+                return Resolution(PLAN, [], f"I don't see a room called {' '.join(named)}." + (f" Rooms: {rn}." if rn else ""),
+                                  1.0, "scope_unknown_room", "power")
+            return None
+        if role == "guest":
+            return Resolution(DENIED, reason="guest_cannot_control", intent="power", confidence=1.0)
+        where = f" in the {room}" if room else ""
+        switchable = [d for d in reg.devices.values() if (room is None or d.room == room)
+                      and d.cap("power") is not None and d.cap("power").kind == "actuator" and d.cap("power").type == "bool"]
+        members = sorted((d for d in switchable if d.risk != "confirm"), key=lambda d: (d.room.lower(), d.name.lower(), d.endpoint_id))
+        skipped = self._held_note([d for d in switchable if d.risk == "confirm"])
+        verb = "on" if on else "off"
+        if not members:
+            return Resolution(PLAN, [], f"There's nothing to turn {verb}{where}." + (" " + skipped[0] if skipped else ""),
+                              1.0, "scope_empty", "power")
+        if len(members) > self.cfg.fast_max_group:
+            return Resolution(PLAN, [], f"That's {len(members)} devices{where}, more than I switch in one go. Name a room or a "
+                                        f"type, for example: turn {verb} all the lights.", 1.0, "scope_too_large", "power")
+        calls = []
+        for d in members:
+            err, clean = validate_call(reg, "set_state", {"endpoint_id": d.endpoint_id, "capability": "power", "value": on})
+            if err:
+                return _fall(err, "power")
+            calls.append({"tool": "set_state", "args": clean})
+        say = f"Turning {verb} {join_names([d.name for d in members])}{where}."
+        return Resolution(PLAN, calls, say, 1.0, "scope_group", "power", [(d.endpoint_id, 1.0) for d in members[:5]], skipped=skipped)
+
+    @staticmethod
+    def _held_note(held: list[Device]) -> list[str]:
+        if not held:
+            return []
+        one = len(held) == 1
+        return [f"I left out {join_names([d.name for d in held])}: {'it needs' if one else 'they need'} your confirmation, "
+                f"so ask for {'it' if one else 'them'} by name."]
+
     # ------------------------------------------------------------------------------------------ relative (S8g)
     def _relative_plan(self, cmd: _Cmd, reg: DeviceRegistry, role: str) -> Resolution:
         """Resolve the device (and, failing an explicit capability word, its one numeric actuator capability) for a
@@ -411,7 +531,9 @@ class FastPathResolver:
         winners = [d for sc, d in scored if sc >= top - 1e-9]
         runner = max((sc for sc, d in scored if sc < top - 1e-9), default=0.0)
         if len(winners) > 1 or top - runner < self.cfg.fast_margin:
-            return _fall("ambiguous", "relative", cands, top)
+            res = _fall("ambiguous", "relative", cands, top)
+            res.ambiguous = self._tied(scored, top)
+            return res
         d = winners[0]
         cap_id = cmd.cap or self._auto_cap(d)
         c = d.cap(cap_id) if cap_id else None
@@ -459,20 +581,30 @@ class FastPathResolver:
         winners = [d for sc, d in scored if sc >= top - 1e-9]
         runner = max((sc for sc, d in scored if sc < top - 1e-9), default=0.0)
         conf = top * cmd.conf
+        if conf < self.cfg.fast_threshold and self.cfg.deterministic_fixes and self._only_synonym(xs, top, runner):
+            conf = self.cfg.fast_threshold                     # S15 A1: "close the curtain" for a device of type cover
         if conf < self.cfg.fast_threshold:
             return self._unknown_fall("low_confidence", intent, xs, cands, conf)
+        skipped: list[str] = []
         if group:
             members = [d for d in winners if capable(d)]
+            if self.cfg.deterministic_fixes:                   # S15 A2: risk:confirm endpoints never ride along in a group
+                held = [d for d in members if d.risk == "confirm"]
+                if held:
+                    members = [d for d in members if d.risk != "confirm"]
+                    skipped = self._held_note(held)
             # winners that cannot do it (a sensor named like the lights) are skipped silently in a group
             if not members:
                 return _fall("capability_missing", intent, cands, conf)
             if len(members) > self.cfg.fast_max_group:
                 return _fall("group_too_large", intent, cands, conf)
         else:
-            if len(winners) > 1:
-                return _fall("ambiguous", intent, cands, conf)
-            if top - runner < self.cfg.fast_margin:
-                return _fall("ambiguous", intent, cands, conf)
+            if len(winners) > 1 or top - runner < self.cfg.fast_margin:
+                res = _fall("ambiguous", intent, cands, conf)
+                tied = [d for d in self._tied(scored, top, objs=True) if capable(d)]
+                if len(tied) > 1:
+                    res.ambiguous = [d.endpoint_id for d in tied]
+                return res
             if not capable(winners[0]):
                 return _fall("capability_missing", intent, cands, conf)
             members = winners
@@ -493,7 +625,19 @@ class FastPathResolver:
         turned_on_eps = {c["args"]["endpoint_id"] for c in calls
                          if c["args"].get("capability") == "power" and c["args"].get("value") is True}
         turned_on = [d for d in members if d.endpoint_id in turned_on_eps]
-        return Resolution(PLAN, calls, self._say(cmd, members, turned_on, value_cap), conf, "device_match", intent, cands)
+        res = Resolution(PLAN, calls, self._say(cmd, members, turned_on, value_cap), conf, "device_match", intent, cands)
+        res.skipped = skipped
+        return res
+
+    def _tied(self, scored: list, top: float, objs: bool = False) -> list:
+        """The devices within the fast-path margin of the best score (what a singular reference could mean), best first."""
+        out = [d for sc, d in scored if sc >= top - self.cfg.fast_margin - 1e-9]
+        return out if objs else [d.endpoint_id for d in out]
+
+    @staticmethod
+    def _only_synonym(xs: list[str], top: float, runner: float) -> bool:
+        """Every target word is a type word (a synonym like curtain/blind/shade) and exactly one device explains it."""
+        return bool(xs) and top >= 0.8 and runner < 0.5 and all(is_type_word(t) for t in xs)
 
     @staticmethod
     def _auto_cap(d: Device) -> str | None:
@@ -540,7 +684,7 @@ class FastPathResolver:
 
     @staticmethod
     def _say(cmd: _Cmd, devs: list[Device], turned_on: list[Device] | None = None, value_cap: str | None = None) -> str:
-        names = ", ".join(d.name for d in devs[:3]) + (f" and {len(devs) - 3} more" if len(devs) > 3 else "")
+        names = join_names([d.name for d in devs])
         if cmd.kind == "power":
             return f"Turning {'on' if cmd.value else 'off'} {names}."
         if cmd.kind == "lock":
@@ -550,6 +694,12 @@ class FastPathResolver:
         if cmd.kind == "value" and value_cap == "brightness":
             num = int(cmd.value[0])
             return f"{names} turned on at {num}%." if turned_on else f"{names} brightness set to {num}."
+        if cmd.kind == "value" and value_cap:
+            num = int(cmd.value[0]) if float(cmd.value[0]).is_integer() else cmd.value[0]
+            unit = "%" if cmd.value[1] and value_cap in ("brightness", "position") else ""
+            return f"{names} {value_cap.replace('_', ' ')} set to {num}{unit}."
+        if cmd.kind == "mode" and cmd.cap:
+            return f"{names} {cmd.cap} set to {cmd.value}."
         return f"Setting {names}."
 
     # ------------------------------------------------------------------------------------------ compound (S8f/S8g)
@@ -580,6 +730,13 @@ class FastPathResolver:
                 return None
             top = scored[0][0]
             runner = max((sc for sc, d in scored if sc < top - 1e-9), default=0.0)
+            n_top = sum(1 for sc, _ in scored if sc >= top - 1e-9)     # a tie at the top is ambiguity, whatever the runner-up
+            if top >= self.cfg.fast_threshold and (n_top > 1 or top - runner < self.cfg.fast_margin) and self.cfg.deterministic_fixes:
+                tied = [d for d in self._tied(scored, top, objs=True) if self._call_for(value_cmd, d)]
+                if len(tied) > 1:
+                    res = _fall("ambiguous", "value", [(d.endpoint_id, round(sc, 3)) for sc, d in scored[:5]], top)
+                    res.ambiguous = [d.endpoint_id for d in tied]
+                    return res
             if top < self.cfg.fast_threshold or top - runner < self.cfg.fast_margin:
                 return None
             d = scored[0][1]

@@ -71,7 +71,7 @@ def normalise_nodes(data: dict | None) -> dict:
 
 ROUTE_MODES = ("hybrid", "llm_first", "rules_first")
 FAST_INTENTS = ("command", "set_value", "compound", "relative", "status", "list", "identity", "ambient")
-HYBRID_FAST_INTENTS = ("command", "set_value", "compound")
+HYBRID_FAST_INTENTS = ("command", "set_value", "compound", "identity")
 
 
 @dataclass
@@ -84,6 +84,10 @@ class SchedConfig:
     say_in_plan: bool = False               # the plan array may carry a `say` string (per-model test; off = calls-only grammar)
     say_max_tokens: int = 25                # the model's optional `say` (grammar-bounded to ~4 chars per token)
     read_reply_max_tokens: int = 30
+    # S15 flags (all default OFF = the behaviour before S15). deterministic_fixes: room/group scope commands, "ask which
+    # one" on a singular ambiguous reference in every path, deterministic clarification answers, single-synonym
+    # confidence (A1-A4)
+    deterministic_fixes: bool = False
     # ablation switches
     fast_path: bool = True
     router: bool = True
@@ -125,7 +129,7 @@ class SchedConfig:
         for k in ("say_max_tokens", "read_reply_max_tokens"):
             if isinstance(getattr(cfg, k), bool) or not isinstance(getattr(cfg, k), int) or not 1 <= getattr(cfg, k) <= 256:
                 raise ValueError(f"sched.{k} must be an integer 1..256")
-        for k in ("natural_read_replies", "say_in_plan"):
+        for k in ("natural_read_replies", "say_in_plan", "deterministic_fixes"):
             if not isinstance(getattr(cfg, k), bool):
                 raise ValueError(f"sched.{k} must be a boolean")
         if cfg.constraint_backend not in ("json_schema", "gbnf"):
@@ -150,6 +154,10 @@ class SchedConfig:
         return self.say_in_plan and self.route_mode != "rules_first"
 
     ABLATION = ("fast_path", "router", "constrained_decoding", "prefix_cache")
+    S15_FLAGS = ("deterministic_fixes",)           # runtime-switchable too (eval baseline vs new), kept out of `flags()`
 
     def flags(self) -> dict:
         return {k: getattr(self, k) for k in self.ABLATION}
+
+    def s15_flags(self) -> dict:
+        return {k: getattr(self, k) for k in self.S15_FLAGS}
