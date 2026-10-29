@@ -28,6 +28,7 @@ class TurnTrace:
     generated_tokens: int = 0
     cache_hit: bool | None = None            # None = no LLM call this turn
     prefix_hash: str = ""
+    roster_hash: str = ""                    # (S15 B) hash of the device roster the plan was made against ("" = classic prompt)
     constrained: bool = False
     outcome: str = "ok"                      # ok | partial | failed | needs_confirmation | denied | cancelled | error:<code>
     flags: dict = field(default_factory=dict)

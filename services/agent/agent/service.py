@@ -63,7 +63,7 @@ class Agent:
         self.llm.prefix_cache, self.llm.id_slot = self.sched_cfg.prefix_cache, self.sched_cfg.id_slot
         self.hub = hub
         self.builder = PromptBuilder(self.registry, format=cfg.llm_format, say=self.sched_cfg.allow_say,
-                                     assistant_name=cfg.assistant_name)
+                                     assistant_name=cfg.assistant_name, generated=self.sched_cfg.generated_prompt)
         self.views = ScopedViews(self.registry, self.builder)
         self._last_scope: OrderedDict[str, tuple[str, Scope, float]] = OrderedDict()    # user -> (role, scope, monotonic ts)
         self.loader = RegistryLoader(hub, self.registry, self._on_registry_changed) if hub else None

@@ -316,6 +316,7 @@ class ScriptedLLM:
         self.requests: list[list[dict]] = []
         self._prev = ""
         self.delay = 0.0
+        self.registry = None                            # (S15) set by a test when the prompt's roster carries no endpoint ids
         self.script: list[tuple[str, Any]] = []         # optional overrides: (regex on user text, reply dict|callable)
         self.emit_say = False                           # (S14) put the reply's "say" into the wire array next to the calls
         self.phrase = None                              # (S14) optional callable(facts, question) -> str for stream_text
@@ -324,10 +325,10 @@ class ScriptedLLM:
     async def complete(self, messages: list[dict], schema: dict | None, max_tokens: int | None = None,
                        repeat_penalty: float | None = None) -> LlmResult:
         self.requests.append(messages)
+        aliases = self._aliases(messages)               # as the model saw them: a registry change mid-request must not renumber
         if self.delay:
             await asyncio.sleep(self.delay)
         reply = self.respond(messages)
-        aliases = self._aliases(messages)
         tuples = [t for t in (encode_call(c, aliases) for c in reply.get("calls", [])) if t is not None]
         import jsonschema
         if self.constrained and schema is not None:
@@ -425,18 +426,18 @@ class ScriptedLLM:
     def _set(d, cap, val, say) -> dict:
         return {"calls": [{"tool": "set_state", "args": {"endpoint_id": d[0], "capability": cap, "value": val}}], "say": say}
 
-    @staticmethod
-    def _devices(messages: list[dict]) -> list[tuple]:
+    def _devices(self, messages: list[dict]) -> list[tuple]:
         out = {}
         for m in messages:
             for ln in m["content"].splitlines():
                 mm = _DEV.match(ln)
                 if mm:
                     out[mm.group(2)] = mm.groups()[1:]      # (ep, name, room, type, tags): the alias column is dropped
+        if not out and self.registry is not None:       # (S15) the generated roster has no id column: read the registry itself
+            return [(d.endpoint_id, d.name, d.room, d.type, ",".join(d.tags)) for d in self.registry.devices.values()]
         return list(out.values())
 
-    @staticmethod
-    def _aliases(messages: list[dict]) -> AliasMap:
+    def _aliases(self, messages: list[dict]) -> AliasMap:
         """Read back the SAME alias|id lines the real model would see this turn, so the mock encodes calls to the
         compact wire format exactly as a real model constrained to its own prompt would have to."""
         to_alias, to_ep = {}, {}
@@ -446,6 +447,9 @@ class ScriptedLLM:
                 if mm:
                     to_alias[mm.group(2)] = mm.group(1)
                     to_ep[mm.group(1)] = mm.group(2)
+        if not to_alias and self.registry is not None:
+            from .aliases import build_aliases
+            return build_aliases(self.registry)
         return AliasMap(to_alias, to_ep)
 
     @staticmethod

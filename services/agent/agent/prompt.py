@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from typing import Callable
 
 from .aliases import AliasMap, build_aliases
 from .devices import Device, DeviceRegistry
 from . import homebench
+from .roster import TEMPLATE, Roster
 from .util import ENUM_VAL_RE, clean_label, clean_user_text, est_tokens, truncate_tokens
 
 
@@ -175,6 +176,7 @@ class Prompt:
     prefix_hash: str
     budgets: Budgets
     degraded_devices: bool = False
+    roster_hash: str = ""               # (S15) which device list the plan was made against ("" = classic prompt)
 
     def check(self) -> None:
         b = self.budgets
@@ -187,13 +189,21 @@ class Prompt:
 class PromptBuilder:
     def __init__(self, registry: DeviceRegistry, budgets: Budgets | None = None, format: str = "json",
                  states_provider: Callable[[], dict] | None = None, say: bool = False, assistant_name: str = "",
-                 model_name: str = "") -> None:
+                 model_name: str = "", generated: bool = False) -> None:
         self.registry, self.budgets, self.format = registry, budgets or Budgets(), format
+        # (S15 B, flag sched.generated_prompt) fixed template + generated roster; json format only, and not together with `say`
+        self.generated = bool(generated) and format == "json" and not say
+        self.roster: Roster | None = None
+        self.roster_hash = ""
+        if self.generated:
+            self.budgets = replace(self.budgets, system=max(self.budgets.system, est_tokens(TEMPLATE)),
+                                   tools=max(self.budgets.tools, 1))
         self.states_provider = states_provider        # homebench only: () -> {endpoint_id: {capability: value}}
         self.say = say and format == "json"           # (S14) the model may add a short reply text
         self.assistant_name, self.model_name = assistant_name, model_name
         self.system_prompt = SYSTEM_PROMPT_SAY if self.say else SYSTEM_PROMPT
-        if est_tokens(self.system_prompt) > self.budgets.system or est_tokens(TOOLS_TEXT) > self.budgets.tools:
+        if not self.generated and (est_tokens(self.system_prompt) > self.budgets.system
+                                   or est_tokens(TOOLS_TEXT) > self.budgets.tools):
             raise PromptBudgetError("static system/tool text exceeds its budget")
         self.say_text = ""
         self.prefix = ""
@@ -213,6 +223,12 @@ class PromptBuilder:
             states = self.states_provider() if self.states_provider else None
             prefix, self.hb_table = homebench.build_prefix(self.registry, states)
             self.degraded, self.devices_tokens = False, est_tokens(prefix)
+        elif self.generated:
+            self.aliases = build_aliases(self.registry)
+            self.roster = Roster(self.registry, self.aliases, self.budgets.devices)
+            self.degraded, self.devices_tokens = self.roster.large, est_tokens(self.roster.text)
+            self.roster_hash = self.roster.hash
+            prefix = f"{TEMPLATE}\n\n{self.roster.text}"
         else:
             self.aliases = build_aliases(self.registry)  # (S8i) same map the decoding schema cache computes, kept in step
             dev_text, self.degraded = build_devices_section(self.registry, self.budgets.devices, self.aliases)
@@ -221,8 +237,9 @@ class PromptBuilder:
             if self.say:
                 self.say_text = f"{SAY_TEXT}\n{fact_line(self.assistant_name, self.model_name, self.registry)}"
                 prefix = f"{self.system_prompt}\n\n{TOOLS_TEXT}\n\n{self.say_text}\n\n{dev_text}"
-        if prefix == self.prefix:
+        if prefix == self.prefix and (not self.generated or self.roster_hash == getattr(self, "_built_hash", None)):
             return False
+        self._built_hash = self.roster_hash
         self.prefix = prefix
         self.prefix_hash = hashlib.sha256(prefix.encode()).hexdigest()[:16]
         self.prefix_version += 1
@@ -280,7 +297,10 @@ class PromptBuilder:
                 mem_text += line + "\n"
         mem_text = mem_text.rstrip("\n")
         cur = truncate_tokens(clean_user_text(user_text, 400), b.current)
-        detail = rooms_detail(self.registry, cur, b.devices, self.aliases) if self.degraded else ""
+        if self.generated:
+            detail = self.roster.relevant(cur) if self.roster is not None else ""
+        else:
+            detail = rooms_detail(self.registry, cur, b.devices, self.aliases) if self.degraded else ""
         parts = []
         if summary:
             parts.append("Earlier: " + summary)
@@ -298,7 +318,9 @@ class PromptBuilder:
         sizes = {"system": est_tokens(self.system_prompt), "tools": est_tokens(TOOLS_TEXT), "devices": self.devices_tokens,
                  "memories": est_tokens(mem_text), "recent": recent_tokens, "current": est_tokens(cur),
                  "tool_results": est_tokens(tr), "say": est_tokens(self.say_text)}
-        p = Prompt(msgs, sizes, self.prefix_hash, b, self.degraded)
+        if self.generated:
+            sizes.update(system=est_tokens(TEMPLATE), tools=0, devices=max(self.devices_tokens, est_tokens(detail)))
+        p = Prompt(msgs, sizes, self.prefix_hash, b, self.degraded, self.roster_hash)
         p.check()
         return p
 
