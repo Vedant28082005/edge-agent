@@ -430,10 +430,12 @@ class Scheduler:
         return f"{who}: {r.get('capability')} is {shown}{unit}{stale}."
 
     # ------------------------------------------------------------------------------------------ LLM bookkeeping
-    def note_llm(self, trace: TurnTrace, prefix_hash: str, timings: dict, constrained: bool, raw: str = "") -> None:
+    def note_llm(self, trace: TurnTrace, prefix_hash: str, timings: dict, constrained: bool, raw: str = "",
+                 roster_hash: str = "") -> None:
         obs = self.prefix.observe(prefix_hash, timings)
         trace.llm_calls += 1
         trace.prefix_hash = prefix_hash
+        trace.roster_hash = roster_hash
         trace.prompt_tokens += int(timings.get("prompt_n") or 0)
         trace.cached_tokens += int(timings.get("cache_n") or 0)
         trace.generated_tokens += int(timings.get("predicted_n") or 0)

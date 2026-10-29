@@ -88,6 +88,8 @@ class SchedConfig:
     # one" on a singular ambiguous reference in every path, deterministic clarification answers, single-synonym
     # confidence (A1-A4)
     deterministic_fixes: bool = False
+    # (S15 B) the planner prompt is a fixed template + a roster generated from the live registry (see roster.py). Config-only.
+    generated_prompt: bool = False
     # ablation switches
     fast_path: bool = True
     router: bool = True
@@ -129,7 +131,7 @@ class SchedConfig:
         for k in ("say_max_tokens", "read_reply_max_tokens"):
             if isinstance(getattr(cfg, k), bool) or not isinstance(getattr(cfg, k), int) or not 1 <= getattr(cfg, k) <= 256:
                 raise ValueError(f"sched.{k} must be an integer 1..256")
-        for k in ("natural_read_replies", "say_in_plan", "deterministic_fixes"):
+        for k in ("natural_read_replies", "say_in_plan", "deterministic_fixes", "generated_prompt"):
             if not isinstance(getattr(cfg, k), bool):
                 raise ValueError(f"sched.{k} must be a boolean")
         if cfg.constraint_backend not in ("json_schema", "gbnf"):

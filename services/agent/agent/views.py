@@ -45,7 +45,8 @@ class ScopedViews:
         if v is not None and v.generation == self.registry.generation:
             self._cache.move_to_end(key)
             return v
-        builder = PromptBuilder(self.registry.scoped(scope), format=self.format)
+        builder = PromptBuilder(self.registry.scoped(scope), format=self.format,
+                                generated=bool(self.main and self.main.generated))
         v = View(scope, self.registry.scoped(scope), self.registry.generation, _builder=builder)
         self._cache[key] = v
         while len(self._cache) > self.MAX:

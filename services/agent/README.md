@@ -168,3 +168,17 @@ without a read, numbers and on/off/locked/open polarity match). `sched.natural_r
 read-only answers from the read results and streams it as `token` events (checked by `reply.phrase_verdict`, else the agent text).
 `sched.say_in_plan` (default `false`) lets the plan array carry a `say` string; per-model switch. Any `say` must also be a clean sentence (>=3 words, no brackets/quotes, no bare alias or tool code, terminal punctuation) or the agent text / capability line is used; a hello/thanks turn never runs a read.
 Each trace records `route_mode`, `text_source` (`model`|`agent`) and `say_verdict`.
+
+## S15 flags (all default off, config-only: `agent.json` `sched`, restart to change)
+
+- `sched.deterministic_fixes`: room/house scope commands ("turn off everything in the bedroom"), `risk: confirm` devices left out of
+  group actions, "which one do you mean?" for a singular reference that matches several devices (answered without the model),
+  "which devices are on" listing only those, curtain/blind/shade as the cover.
+- `sched.generated_prompt`: the planner prompt is a fixed template (`roster.TEMPLATE`) plus a roster generated from the live registry
+  (`roster.py`: alias|name|room|type|capabilities, sanitised labels, no endpoint ids). The roster hash is in every trace
+  (`roster_hash`); a registry change rebuilds it and re-warms the prefix cache in the background; a plan made against an outdated
+  roster that names a device or scene that no longer exists is rejected and re-planned once. Above 20 devices the prefix holds a summary
+  and each turn lists the devices the message points at. JSON format only; not combined with `say_in_plan`.
+- Prompt size: `python tools/measure_prompt.py [--gguf MODEL.gguf | --llama http://HOST:8080]` ([est], offline [measured-proxy] with a
+  Qwen GGUF's vocabulary, or real `/tokenize` + cold/warm prefill from a running llama-server).
+

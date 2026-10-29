@@ -42,6 +42,21 @@ def _read_sig(c: dict) -> tuple:
     return (c.get("tool"), tuple(sorted((c.get("args") or {}).items())))
 
 
+def _names_unknown(calls: list[dict], reg: DeviceRegistry) -> bool:
+    """True when a decoded plan names an endpoint, room or scene the current registry does not have."""
+    for c in calls:
+        a = c.get("args") if isinstance(c, dict) else None
+        if not isinstance(a, dict):
+            continue
+        if "endpoint_id" in a and a["endpoint_id"] not in reg.devices:
+            return True
+        if "room" in a and a["room"] not in reg.rooms():
+            return True
+        if c.get("tool") == "run_scene" and reg.find_scene(a.get("scene")) is None:
+            return True
+    return False
+
+
 def no_plan_text(reg: DeviceRegistry) -> str:
     """(S8g) The model made no tool call and gave no text either: never silently say "OK", and never invent a
     device -- name one straight from the live registry (any real one; it is only an example of the phrasing)."""
@@ -380,6 +395,7 @@ class ChatService:
             say = ""
             retried_validation = False
             retried_polarity = False
+            retried_stale = False
             model_say = ""                      # (S14) the model's optional text from its last round; see reply.say_verdict
             stripped_any = False
             hb_table = self.hb_table_provider(ctx.scope) if (self.hb_table_provider
@@ -422,7 +438,22 @@ class ChatService:
                 if trace is not None:
                     trace.add_stage("llm_ms", (time.monotonic() - llm_t0) * 1000)
                 if self.sched and trace is not None:
-                    self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained), plan.raw)
+                    self.sched.note_llm(trace, prompt.prefix_hash, plan.timings, bool(self.planner.llm.constrained), plan.raw,
+                                        prompt.roster_hash)
+                if prompt.roster_hash and plan.calls:
+                    # (S15 B3) the device list changed while the model was working: a plan that names a device or scene that no
+                    # longer exists is rejected (never executed) and re-planned once against the rebuilt roster.
+                    fresh = self.views.get(ctx.scope)
+                    if fresh.builder.roster_hash != prompt.roster_hash and _names_unknown(plan.calls, fresh.registry):
+                        self.metrics.stale_plans_rejected += 1
+                        if trace is not None:
+                            trace.fallbacks.append("stale_roster")
+                        if not retried_stale:
+                            retried_stale, view, reg = True, fresh, fresh.registry
+                            extra_tail, tool_results = [], ""
+                            continue
+                        say = "The device list just changed, so I did nothing. Please ask again."
+                        break
                 model_say = plan.say
                 if plan.failures:        # homebench only: error_input / unparsed parts, reported alongside whatever ran
                     hb_failures.extend(plan.failures)
