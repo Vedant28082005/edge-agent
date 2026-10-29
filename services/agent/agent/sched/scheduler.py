@@ -18,7 +18,7 @@ from ..devices import DeviceRegistry
 from ..events import Event, EventBus
 from ..executor import CallOutcome, Executor
 from ..devices import Device
-from ..render import (LIST_MAX, ambient_clarifying_text, describe_outcomes, describe_question, describe_reads, join_names,
+from ..render import (LIST_MAX, ambient_clarifying_text, ambient_proposal_text, describe_outcomes, describe_question, describe_reads, join_names,
                       which_one_text)
 from ..reply import capability_text
 from ..util import clean_label
@@ -78,7 +78,7 @@ class Scheduler:
         """Decoding schema for this scope: the full registry for an unrestricted caller, otherwise only its own endpoints,
         rooms and scenes. Keyed on the hub's `registry_version` (content hash when the hub sent none)."""
         return self.constraints.get(self.views.get(scope).registry, None, "" if not scope.restricted else scope.key,
-                                    self.cfg.say_max_tokens if self.cfg.allow_say else 0)
+                                    self.cfg.say_max_tokens if self.cfg.allow_say else 0, self.cfg.chat_route)
 
     def aliases(self, scope: Scope = UNRESTRICTED):
         """(S8i) The same scope's alias map, from the same cache entry as `schema` -- so the planner's decode and the
@@ -326,6 +326,9 @@ class Scheduler:
         call = ambient_default_call(domain, direction, devs[0])
         if call is None:
             return None
+        if self.cfg.chat_route:                       # (S15 C4) never a silent action on a guess: propose, act on a "yes"
+            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction})
+            return Routed(text=ambient_proposal_text(call, devs[0]))
         calls = ensure_power_dependency([call], reg)
         trace.note_calls(calls)
         outs = await self.executor.run_calls(ctx, calls)
@@ -431,7 +434,7 @@ class Scheduler:
 
     # ------------------------------------------------------------------------------------------ LLM bookkeeping
     def note_llm(self, trace: TurnTrace, prefix_hash: str, timings: dict, constrained: bool, raw: str = "",
-                 roster_hash: str = "") -> None:
+                 roster_hash: str = "", step: str = "plan", ms: float | None = None) -> None:
         obs = self.prefix.observe(prefix_hash, timings)
         trace.llm_calls += 1
         trace.prefix_hash = prefix_hash
@@ -439,10 +442,16 @@ class Scheduler:
         trace.prompt_tokens += int(timings.get("prompt_n") or 0)
         trace.cached_tokens += int(timings.get("cache_n") or 0)
         trace.generated_tokens += int(timings.get("predicted_n") or 0)
+        trace.prompt_eval_tokens += int(timings.get("prompt_n") or 0)
+        trace.cache_hit_tokens += int(timings.get("cache_n") or 0)
+        trace.steps.append({"step": step, "prompt_n": int(timings.get("prompt_n") or 0), "cache_n": int(timings.get("cache_n") or 0),
+                            "predicted_n": int(timings.get("predicted_n") or 0),
+                            "ms": round(ms if ms is not None else float(timings.get("prompt_ms") or 0) + float(timings.get("predicted_ms") or 0), 1)})
         if trace.cache_hit is None:                      # the first request of the turn decides; totals are in cached_tokens
             trace.cache_hit = obs.cache_hit
-        trace.constrained = constrained
-        trace.llm_raw = (raw or "")[:RAW_TRUNC]
+        if step == "plan":
+            trace.constrained = constrained
+            trace.llm_raw = (raw or "")[:RAW_TRUNC]
 
     # ------------------------------------------------------------------------------------------ trace out
     def emit(self, ctx: ReqCtx, trace: TurnTrace) -> None:

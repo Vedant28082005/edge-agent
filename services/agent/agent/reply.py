@@ -23,17 +23,62 @@ _TYPE_PLURAL = {"light": "lights", "fan": "fans", "outlet": "outlets", "lock": "
                 "thermostat": "thermostats", "generic": "other devices"}
 
 
-def capability_text(reg: DeviceRegistry) -> str:
-    """The identity line, built from the device types this caller really has (no "locks" in a home without any)."""
-    ctl = [_TYPE_PLURAL[t] for t in sorted({d.type for d in reg.devices.values() if any(c.kind == "actuator" for c in d.caps)})
+def capability_clause(reg: DeviceRegistry, short: bool = False) -> str:
+    """"control your lights and fans, read your sensors, run scenes and tell you what's on", from the real device types."""
+    ctl = [(_TYPE_PLURAL[t].split(" (")[0] if short else _TYPE_PLURAL[t]) for t in sorted({d.type for d in reg.devices.values() if any(c.kind == "actuator" for c in d.caps)})
            if t in _TYPE_PLURAL]
-    can = ["control your " + (", ".join(ctl[:-1]) + " and " + ctl[-1] if len(ctl) > 1 else ctl[0])] if ctl else []
+    can = [("control " if short else "control your ") + (", ".join(ctl[:-1]) + " and " + ctl[-1] if len(ctl) > 1 else ctl[0])] if ctl else []
     if any(d.type == "sensor" for d in reg.devices.values()):
         can.append("read your sensors")
     if reg.scene_names():
         can.append("run scenes")
     can.append("tell you what's on")
-    return "I'm your smart-home assistant: I can " + (", ".join(can[:-1]) + " and " + can[-1] if len(can) > 1 else can[0]) + "."
+    return ", ".join(can[:-1]) + " and " + can[-1] if len(can) > 1 else can[0]
+
+
+def capability_text(reg: DeviceRegistry) -> str:
+    """The identity line, built from the device types this caller really has (no "locks" in a home without any)."""
+    return "I'm your smart-home assistant: I can " + capability_clause(reg) + "."
+
+
+# --------------------------------------------------------------------------------------------- the chat route (S15 C)
+CHAT_MARK = "Chat reply:"
+_ACK_THANKS = {"thanks", "thank", "thx", "ty", "cheers", "ta"}
+_ACK_WORDS = _ACK_THANKS | {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "alright", "cool", "great", "nice", "perfect", "good",
+                            "fine", "you", "so", "much", "a", "lot", "got", "it", "no", "nope", "nah", "nevermind", "never",
+                            "mind", "please", "haan", "ji", "hanji", "correct", "right", "k", "kk"}
+
+
+def chat_instruction(reg: DeviceRegistry) -> str:
+    """The ONLY thing a chat call adds after the planner's own request (same system message, same roster): short, because
+    every token here is prefill time on the node. Capabilities come from the real device types."""
+    return f"{CHAT_MARK} max 2 short friendly sentences. Nothing was done on any device; claim no action. You can {capability_clause(reg, True)}."
+
+
+def is_bare_ack(text: str) -> bool:
+    """"yes" / "thanks" / "ok thanks" alone (at most 4 words, all acknowledgement words): never a command."""
+    toks = _TOK_RE.findall((text or "").lower())
+    return bool(toks) and len(toks) <= 4 and all(t in _ACK_WORDS for t in toks)
+
+
+def ack_reply(text: str) -> str:
+    toks = set(_TOK_RE.findall((text or "").lower()))
+    return "You're welcome!" if toks & _ACK_THANKS else "OK. Tell me what to turn on or off."
+
+
+_SENT_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def finish_chat_text(raw: str, max_sentences: int = 2) -> str:
+    """The model's chat text as one clean line of at most `max_sentences` COMPLETE sentences: a reply cut off by the token limit
+    keeps only what was finished ("" when not even one sentence was)."""
+    t = " ".join((raw or "").split())
+    if not t:
+        return ""
+    sents = [s for s in _SENT_END.split(t) if s]
+    if not t[-1] in ".!?":
+        sents = sents[:-1]                        # the last one was cut off
+    return " ".join(sents[:max_sentences])
 
 
 NUM_RE = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?")

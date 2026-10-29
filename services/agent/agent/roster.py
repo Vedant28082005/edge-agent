@@ -47,6 +47,15 @@ TEMPLATE = (
     "U:thanks->[]"
 )
 
+# (S15 C) same template, with the chat decision explained; used only when sched.chat_route is on. The system message must stay
+# byte-identical between the planner and the chat call, so the chat instruction lives in the tail, never here.
+TEMPLATE_CHAT = (TEMPLATE
+                 .replace("- Not a device request, unclear, or a vague complaint: [].\n",
+                          "- Not a device request (greeting, thanks, a question about you or the home): [[\"chat\"]].\n"
+                          "- Unclear which device, or a vague complaint: [].\n")
+                 .replace("U:hello->[]\nU:thanks->[]", "U:hello->[[\"chat\"]]\nU:turn it on->[]"))
+assert TEMPLATE_CHAT != TEMPLATE
+
 _INJECTION_RE = re.compile(
     r"\b(ignore|disregard|forget|override|bypass|jailbreak|pretend|obey|reveal)\b|\b(previous|prior|above|earlier|all)\s+"
     r"(rules?|instructions?|prompts?|messages?)\b|\b(system|developer)\s+(prompt|message)\b|\byou\s+(are|must|will|should)\b|"

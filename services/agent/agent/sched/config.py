@@ -90,6 +90,10 @@ class SchedConfig:
     deterministic_fixes: bool = False
     # (S15 B) the planner prompt is a fixed template + a roster generated from the live registry (see roster.py). Config-only.
     generated_prompt: bool = False
+    # (S15 C) the planner may answer [["chat"]] for a message that is not a device request; one short unconstrained reply then
+    # follows on the SAME cached prefix. Needs generated_prompt. Config-only.
+    chat_route: bool = False
+    chat_max_tokens: int = 40
     # ablation switches
     fast_path: bool = True
     router: bool = True
@@ -128,10 +132,12 @@ class SchedConfig:
             raise ValueError(f"sched.route_mode must be one of {', '.join(ROUTE_MODES)}")
         if not isinstance(cfg.fast_intents, list) or not set(cfg.fast_intents) <= set(FAST_INTENTS):
             raise ValueError(f"sched.fast_intents must be a list drawn from {', '.join(FAST_INTENTS)}")
-        for k in ("say_max_tokens", "read_reply_max_tokens"):
+        if cfg.chat_route and not cfg.generated_prompt:
+            raise ValueError("sched.chat_route needs sched.generated_prompt (the chat call shares the generated prefix)")
+        for k in ("say_max_tokens", "read_reply_max_tokens", "chat_max_tokens"):
             if isinstance(getattr(cfg, k), bool) or not isinstance(getattr(cfg, k), int) or not 1 <= getattr(cfg, k) <= 256:
                 raise ValueError(f"sched.{k} must be an integer 1..256")
-        for k in ("natural_read_replies", "say_in_plan", "deterministic_fixes", "generated_prompt"):
+        for k in ("natural_read_replies", "say_in_plan", "deterministic_fixes", "generated_prompt", "chat_route"):
             if not isinstance(getattr(cfg, k), bool):
                 raise ValueError(f"sched.{k} must be a boolean")
         if cfg.constraint_backend not in ("json_schema", "gbnf"):

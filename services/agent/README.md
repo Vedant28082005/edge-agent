@@ -181,4 +181,12 @@ Each trace records `route_mode`, `text_source` (`model`|`agent`) and `say_verdic
   and each turn lists the devices the message points at. JSON format only; not combined with `say_in_plan`.
 - Prompt size: `python tools/measure_prompt.py [--gguf MODEL.gguf | --llama http://HOST:8080]` ([est], offline [measured-proxy] with a
   Qwen GGUF's vocabulary, or real `/tokenize` + cold/warm prefill from a running llama-server).
+- `sched.chat_route` (needs `generated_prompt`; `chat_max_tokens`, default 40): the planner may answer `[["chat"]]` for a message that is
+  not a device request. One unconstrained call follows whose messages are the planner's own request + `[["chat"]]` + a short chat
+  instruction, so the system message (template + roster) is byte-identical and the server evaluates only that tail; the next planner turn
+  finds its prefix cached. The text must pass `reply.say_verdict`, else the capability line (from the real device types) is used.
+  "yes"/"thanks" alone are answered without the model and never execute; a comfort phrase ("I'm hot", "too dark") ends in one proposal
+  ("Want me to turn on Lamp?", a "yes" executes it) or one question, never a silent action. Trace fields: `decision` (act|chat),
+  `roster_hash`, `prompt_eval_tokens` (prompt tokens the server evaluated, llama `prompt_n`), `cache_hit_tokens` (reused, `cache_n`),
+  `steps` (per LLM call: step, prompt_n, cache_n, predicted_n, ms) and `stage_ms.chat_ms`.
 

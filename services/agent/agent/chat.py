@@ -16,9 +16,9 @@ from .executor import READ_TOOLS, CallOutcome, Executor, Metrics
 from .llm import LlmBusy, LlmError
 from .planner import Plan, Planner
 from .prompt import PromptBudgetError, PromptBuilder, render_result
-from .render import ambient_clarifying_text, describe_outcomes, describe_reads
-from .reply import (CAPABILITY_TEXT, is_conversation_turn, malformed_say, phrase_verdict, read_facts, read_messages,
-                    say_verdict)
+from .render import ambient_clarifying_text, ambient_proposal_text, describe_outcomes, describe_reads
+from .reply import (CAPABILITY_TEXT, ack_reply, capability_text, chat_instruction, finish_chat_text, is_bare_ack,
+                    is_conversation_turn, malformed_say, phrase_verdict, read_facts, read_messages, say_verdict)
 from .render import name as _name
 from .reqctx import ReqCtx, TurnCancelled
 from .schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
@@ -212,12 +212,42 @@ class ChatService:
         call = ambient_default_call(domain, direction, devs[0])
         if call is None:
             return None
+        if self.sched is not None and self.sched.cfg.chat_route:       # (S15 C4) propose, never act on a guess
+            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction})
+            return ambient_proposal_text(call, devs[0])
         new = await self.executor.run_calls(ctx, [call])
         outs += new
         if trace is not None:
             trace.note_calls([call])
             trace.note_executed(new)
         return " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or None
+
+    async def _chat_say(self, ctx: ReqCtx, text: str, prompt, reg: DeviceRegistry, trace: TurnTrace | None) -> str:
+        """(S15 C2) The planner chose [["chat"]]: one short UNCONSTRAINED call whose messages are the planner's own request
+        (same system message = the same cached template + roster, same history and user turn), then its `[["chat"]]` answer, then
+        one short chat instruction. The server therefore evaluates only that instruction (and the few tokens of the reply), and the
+        next planner turn finds its prefix untouched. The text goes through the S14b `say_verdict`; any failure (busy, error,
+        cut off, claims an action, a number from nowhere) falls back to the capability line built from the real device types."""
+        fallback = capability_text(reg)
+        cfg = self.sched.cfg
+        if not ctx.budget.take_step():
+            return fallback
+        msgs = [*prompt.messages, {"role": "assistant", "content": '[["chat"]]'}, {"role": "user", "content": chat_instruction(reg)}]
+        t0 = time.monotonic()
+        try:
+            res = await ctx.await_cancellable(self.planner.llm.complete(msgs, None, max_tokens=cfg.chat_max_tokens))
+        except (LlmBusy, LlmError) as e:
+            log.warning("chat reply failed: %s", e)
+            return fallback
+        ms = (time.monotonic() - t0) * 1000
+        if trace is not None:
+            self.sched.note_llm(trace, prompt.prefix_hash, res.timings, False, res.content, prompt.roster_hash, step="chat", ms=ms)
+            trace.add_stage("chat_ms", ms)
+        out = finish_chat_text(res.content)
+        verdict = say_verdict(out, [], reg, "", text) if out else "empty"
+        if trace is not None:
+            trace.say_verdict = "chat_" + (verdict or "ok")
+        return out if verdict is None else fallback
 
     @staticmethod
     def _tail(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
@@ -404,7 +434,13 @@ class ChatService:
             # fast path / read tools upstream (`sched.route`), never by calling the LLM here.
             homebench_question = view.builder.format == "homebench" and is_question_intent(text)
             hb_failures: list[str] = []
-            while not homebench_question:
+            chat_on = self.sched is not None and self.sched.cfg.chat_route
+            ack = ack_reply(text) if (chat_on and is_bare_ack(text)) else None
+            if ack is not None:                  # (S15 C3) "yes" / "thanks" alone, with nothing pending: a chat turn, no model, no tool
+                say = ack
+                if trace is not None:
+                    trace.decision = "chat"
+            while not homebench_question and ack is None:
                 if not ctx.budget.take_step():
                     if not outs:
                         await ctx.emit("error", {"code": "budget_exceeded", "message": "request budget exceeded"})
@@ -455,6 +491,14 @@ class ChatService:
                         say = "The device list just changed, so I did nothing. Please ask again."
                         break
                 model_say = plan.say
+                if chat_on:
+                    if trace is not None:
+                        trace.decision = "chat" if plan.chat else "act"
+                    if plan.chat:
+                        # a comfort phrase ("I'm hot") is answered with one proposal or question, never plain chat
+                        proposal = await self._ambient_empty_plan(ctx, text, reg, outs, trace)
+                        say = proposal if proposal is not None else await self._chat_say(ctx, text, prompt, reg, trace)
+                        break
                 if plan.failures:        # homebench only: error_input / unparsed parts, reported alongside whatever ran
                     hb_failures.extend(plan.failures)
                 conversation = False
@@ -487,6 +531,10 @@ class ChatService:
                         say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
                         break
                 sig = ambient_request_signal(text, reg)
+                if sig is not None and chat_on:
+                    proposal = await self._ambient_empty_plan(ctx, text, reg, outs, trace)
+                    say = proposal if proposal is not None else await self._chat_say(ctx, text, prompt, reg, trace)
+                    break
                 if sig is not None:
                     domain, expected = sig
                     devs = ambient_domain_devices(reg, domain)
