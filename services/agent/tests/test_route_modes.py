@@ -34,12 +34,12 @@ def tokens(ev):
 # ------------------------------------------------------------------------------------------------------ config
 def test_defaults_and_validation():
     c = SchedConfig.from_dict({})
-    assert c.route_mode == "hybrid" and c.fast_intents == ["command", "set_value", "compound"]
+    assert c.route_mode == "hybrid" and c.fast_intents == ["command", "set_value", "compound", "identity"]
     assert not c.natural_read_replies and not c.say_in_plan and not c.allow_say
     assert SchedConfig.from_dict({"say_in_plan": True}).allow_say
     assert not SchedConfig.from_dict({"say_in_plan": True, "route_mode": "rules_first"}).allow_say
     assert [c.allows_fast(i) for i in ("command", "set_value", "compound", "relative", "status", "list", "identity", "ambient")] == \
-           [True, True, True, False, False, False, False, False]
+           [True, True, True, False, False, False, True, False]
     assert not SchedConfig.from_dict({"route_mode": "rules_first"}).allow_say
     assert all(SchedConfig.from_dict({"route_mode": "rules_first"}).allows_fast(i) for i in ("status", "identity", "list"))
     assert not any(SchedConfig.from_dict({"route_mode": "llm_first", "fast_intents": ["command"]}).allows_fast(i)
@@ -71,10 +71,12 @@ async def test_hybrid_fast_for_commands_llm_for_everything_else(tmp_path):
         _, ev = await e.chat("set the bedroom fan speed to 3")
         assert one(ev, "final")["route"] == "fast" and e.llm.requests == []
         n = 0
-        for q in ("is the bedroom fan on?", "what is the device status?", "devices", "who are you", "it's dark"):
+        for q in ("is the bedroom fan on?", "what is the device status?", "devices", "it's dark"):
             _, ev = await e.chat(q)
             n += 1
             assert one(ev, "final")["route"] == "llm" and len(e.llm.requests) == n, q
+        _, ev = await e.chat("who are you")                     # S15: identity is deterministic registry text, even in hybrid
+        assert one(ev, "final")["route"] == "fast" and len(e.llm.requests) == n
     finally:
         await e.close()
 

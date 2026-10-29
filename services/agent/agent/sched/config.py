@@ -71,7 +71,7 @@ def normalise_nodes(data: dict | None) -> dict:
 
 ROUTE_MODES = ("hybrid", "llm_first", "rules_first")
 FAST_INTENTS = ("command", "set_value", "compound", "relative", "status", "list", "identity", "ambient")
-HYBRID_FAST_INTENTS = ("command", "set_value", "compound")
+HYBRID_FAST_INTENTS = ("command", "set_value", "compound", "identity")
 
 
 @dataclass

@@ -220,7 +220,7 @@ def test_describe_question_list_none_on_and_no_trailing_more():
 
 
 async def test_identity_text_is_built_from_the_real_device_types(tmp_path):
-    e = await env(tmp_path, route_mode="rules_first")       # hybrid sends identity to the LLM (phase C's chat route)
+    e = await env(tmp_path, route_mode="hybrid")
     try:
         _, ev = await e.chat("who are you?")
         t = one(ev, "final")["text"]
