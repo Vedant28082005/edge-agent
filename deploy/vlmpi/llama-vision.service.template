@@ -1,4 +1,5 @@
-# systemd USER unit. llama-server for the vision node, loopback only. Config: ~/edge-vision/config/llama.env.
+# systemd USER unit TEMPLATE: install.sh renders __VLM_BIN__ from llama.env (systemd needs a literal absolute path as the
+# first word of ExecStart; ${VAR} is not expanded there). llama-server for the vision node, loopback only. Config: ~/edge-vision/config/llama.env.
 # MemoryMax is [est] (not measured) and only applies if the user manager delegates the memory controller.
 [Unit]
 Description=llama-server (Qwen3-VL-2B) for vision-node
@@ -8,7 +9,7 @@ Type=simple
 EnvironmentFile=%h/edge-vision/config/llama.env
 ExecStartPre=/usr/bin/test -r ${VLM_MODEL}
 ExecStartPre=/usr/bin/test -r ${VLM_MMPROJ}
-ExecStart=${VLM_BIN} --model ${VLM_MODEL} --mmproj ${VLM_MMPROJ} --host 127.0.0.1 --port ${VLM_PORT} --ctx-size ${VLM_CTX} --threads ${VLM_THREADS} --parallel 1 --temp 0 $VLM_EXTRA_ARGS
+ExecStart=__VLM_BIN__ --model ${VLM_MODEL} --mmproj ${VLM_MMPROJ} --host 127.0.0.1 --port ${VLM_PORT} --ctx-size ${VLM_CTX} --threads ${VLM_THREADS} --parallel 1 --temp 0 $VLM_EXTRA_ARGS
 Restart=on-failure
 RestartSec=5
 MemoryMax=3000M

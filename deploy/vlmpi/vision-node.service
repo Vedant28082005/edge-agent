@@ -9,7 +9,7 @@ After=llama-vision.service
 Type=simple
 WorkingDirectory=%h/edge-vision/app
 Environment=PYTHONPATH=%h/edge-vision/app PYTHONDONTWRITEBYTECODE=1
-ExecStart=%h/edge-vision/venv/bin/python -m vision_node --config %h/edge-vision/config/vision-node.json
+ExecStart=%h/edge-vision/venv/bin/python -m vision_node --config %h/edge-vision/config/vision-node.json --log-level WARNING
 Restart=on-failure
 RestartSec=5
 MemoryMax=300M
