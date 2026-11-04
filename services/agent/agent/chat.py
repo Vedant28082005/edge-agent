@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 
 from .aliases import AliasMap
 from .devices import DeviceRegistry
@@ -17,8 +18,9 @@ from .llm import LlmBusy, LlmError
 from .planner import Plan, Planner
 from .prompt import PromptBudgetError, PromptBuilder, render_result
 from .render import ambient_clarifying_text, ambient_proposal_text, describe_outcomes, describe_reads
-from .reply import (CAPABILITY_TEXT, ack_reply, capability_text, chat_instruction, finish_chat_text, is_bare_ack,
+from .reply import (CAPABILITY_TEXT, ack_reply, capability_text, chat_message, finish_chat_text, is_bare_ack,
                     is_conversation_turn, malformed_say, phrase_verdict, read_facts, read_messages, say_verdict)
+from .roster import safe_label
 from .render import name as _name
 from .reqctx import ReqCtx, TurnCancelled
 from .schema import (ambient_default_call, ambient_domain_devices, ambient_request_signal, ensure_power_dependency,
@@ -33,6 +35,7 @@ from .util import clean_user_text
 log = logging.getLogger("agent.chat")
 
 DEFAULT_IMAGE_QUESTION = "What do you see?"      # image-only turn, no text: a general describe-the-scene question
+CONTEXT_TTL_S = 900.0     # (S15) how long "it" / "that one" keeps pointing at the last device
 KEEPALIVE_S = 8.0      # (S8g) well under any sane SSE/proxy idle timeout, for a 15-65s [est/measured] LLM turn
 
 NO_PLAN_TEXT = "I couldn't work out what to do."
@@ -160,6 +163,7 @@ class ChatService:
         self.hb_table_provider = hb_table_provider     # homebench only: Scope -> homebench.HomebenchTable
         self.store, self.metrics, self.settle_wait_s = store, metrics, settle_wait_s
         self._active = 0
+        self._convo: OrderedDict[tuple[str, str], dict] = OrderedDict()    # (S15) (user, session) -> what "it" refers to
         self._max_active = 1 + max_queued_turns
 
     def busy(self) -> bool:
@@ -202,18 +206,20 @@ class ChatService:
         if sig is None:
             return None
         domain, direction = sig
-        devs = ambient_domain_devices(reg, domain)
+        wide = self.sched is not None and self.sched.cfg.chat_route
+        devs = ambient_domain_devices(reg, domain, direction, wide)
         if not devs:
             return None
         if len(devs) > 1:
             self.metrics.ambient_clarifications += 1
-            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction})
-            return ambient_clarifying_text(domain, reg)
+            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction, "wide": wide,
+                                                                 "eps": [d.endpoint_id for d in devs]})
+            return ambient_clarifying_text(domain, reg, devs if wide else None)
         call = ambient_default_call(domain, direction, devs[0])
         if call is None:
             return None
-        if self.sched is not None and self.sched.cfg.chat_route:       # (S15 C4) propose, never act on a guess
-            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction})
+        if wide:                                                         # (S15 C4) propose, never act on a guess
+            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction, "wide": wide})
             return ambient_proposal_text(call, devs[0])
         new = await self.executor.run_calls(ctx, [call])
         outs += new
@@ -232,7 +238,9 @@ class ChatService:
         cfg = self.sched.cfg
         if not ctx.budget.take_step():
             return fallback
-        msgs = [*prompt.messages, {"role": "assistant", "content": '[["chat"]]'}, {"role": "user", "content": chat_instruction(reg)}]
+        # same system message (and anything before the planner's own last user turn); that turn is replaced by ONE message that starts
+        # with the plain-words instruction. No assistant `[["chat"]]` is replayed: a model shown its own JSON answer answers in JSON.
+        msgs = [*prompt.messages[:prompt.user_index], {"role": "user", "content": chat_message(reg, clean_user_text(text, 200))}]
         t0 = time.monotonic()
         try:
             res = await ctx.await_cancellable(self.planner.llm.complete(msgs, None, max_tokens=cfg.chat_max_tokens))
@@ -244,8 +252,12 @@ class ChatService:
             self.sched.note_llm(trace, prompt.prefix_hash, res.timings, False, res.content, prompt.roster_hash, step="chat", ms=ms)
             trace.add_stage("chat_ms", ms)
         out = finish_chat_text(res.content)
-        verdict = say_verdict(out, [], reg, "", text) if out else "empty"
+        if res.content.lstrip()[:1] in ("[", "{"):
+            verdict = "json"                                   # it answered in the planner's format again
+        else:
+            verdict = say_verdict(out, [], reg, "", text) if out else "empty"
         if trace is not None:
+            trace.chat_raw = (res.content or "")[:300]
             trace.say_verdict = "chat_" + (verdict or "ok")
         return out if verdict is None else fallback
 
@@ -322,9 +334,11 @@ class ChatService:
         if pending and pending.get("kind") == "disambig":
             # (S15 A3) the answer to "which one do you mean?": re-run the original request on exactly the device(s) named
             return await self.sched.answer_which(ctx, text, pending, trace) if self.sched else None
+        if pending and pending.get("eps") and self.sched is not None and self.sched.cfg.deterministic_fixes:
+            return await self.sched.answer_ambient_choice(ctx, text, pending, trace)     # (S15) "fan" after "Thermostat or Fan?"
         if not pending or not is_short_confirmation(text):
             return None
-        devs = ambient_domain_devices(reg, pending["domain"])
+        devs = ambient_domain_devices(reg, pending["domain"], pending.get("direction"), bool(pending.get("wide")))
         if len(devs) != 1:
             return None            # still ambiguous: a bare "yes" cannot pick which device, so this does nothing
         call = ambient_default_call(pending["domain"], pending["direction"], devs[0])
@@ -373,6 +387,50 @@ class ChatService:
         finally:
             self._active -= 1
 
+    # ------------------------------------------------------------------------------------------ context line (S15 B)
+    @staticmethod
+    def _action_phrase(o: CallOutcome) -> str:
+        cap, val = o.args.get("capability"), o.args.get("value")
+        if cap == "power":
+            return "turned on" if val else "turned off"
+        if cap == "lock":
+            return "locked" if val == "locked" else "unlocked"
+        return f"set {safe_label(cap, 'value', 16)} to {val}" if isinstance(val, (int, float, str)) and not isinstance(val, bool) else "changed"
+
+    def _note_context(self, ctx: ReqCtx, outs: list[CallOutcome], final: str, view) -> None:
+        """What "it" / "that one" / "yes" will mean on the next turn: the devices this turn touched or read, what was done, and a
+        question the answer asked. Kept per (user, session) in memory only, never in the prompt prefix."""
+        key = (ctx.user_id, ctx.session_id)
+        st = dict(self._convo.get(key) or {"eps": [], "action": ""})
+        done = [o for o in outs if o.ok and isinstance(o.args, dict) and isinstance(o.args.get("endpoint_id"), str)
+                and o.tool in ("set_state", "get_state", "read_sensor")]
+        if done:
+            st["eps"] = list(dict.fromkeys(o.args["endpoint_id"] for o in done))[-3:]
+            writes = [o for o in done if o.tool == "set_state"]
+            st["action"] = self._action_phrase(writes[-1]) if writes else "read its state"
+        st["question"] = clean_user_text(final, 120) if final.strip().endswith("?") else ""
+        st["ts"] = time.monotonic()
+        self._convo[key] = st
+        self._convo.move_to_end(key)
+        while len(self._convo) > 64:
+            self._convo.popitem(last=False)
+
+    def _context_line(self, ctx: ReqCtx, view) -> str:
+        """"Context: last devices: e3 Fan; last action: turned on; asked: ..." -- about 25 tokens, empty when there is nothing to say."""
+        st = self._convo.get((ctx.user_id, ctx.session_id))
+        if not st or time.monotonic() - st["ts"] > CONTEXT_TTL_S:
+            return ""
+        reg, al = view.registry, view.builder.aliases
+        devs = [f"{al.alias(e)} {safe_label(reg.devices[e].name, reg.devices[e].type)}" for e in st["eps"] if e in reg.devices]
+        parts = []
+        if devs:
+            parts.append("last devices: " + ", ".join(devs))
+            if st["action"]:
+                parts.append("last action: " + st["action"])
+        if st["question"]:
+            parts.append("asked: " + st["question"])
+        return ("Context: " + "; ".join(parts) + ".") if parts else ""
+
     async def _turn(self, ctx: ReqCtx, text: str, t0: float) -> None:
         trace = self.sched.new_trace(ctx) if self.sched else None
         try:
@@ -383,6 +441,8 @@ class ChatService:
             if trace is not None:
                 trace.outcome = "cancelled"
         finally:
+            if self.sched:
+                self.sched.guarded.discard(ctx.req_id)
             if self.sched and trace is not None:
                 self.sched.emit(ctx, trace)
 
@@ -412,7 +472,10 @@ class ChatService:
             if routed.note:
                 final = f"{final} {routed.note}"
         else:
-            if self.sched:
+            context = ""
+            if view.builder.generated:                        # (S15 B) the cache cannot keep history: one compact line instead
+                history, summary, context = [], "", self._context_line(ctx, view)
+            elif self.sched:
                 win = self.sched.memory.load(user, sess, guest)
                 history, summary = win.history, win.summary
             else:
@@ -450,7 +513,7 @@ class ChatService:
                     say = "I stopped here because I reached this request's limit."
                     break
                 try:
-                    prompt = view.builder.build(text, history, summary, memories, extra_tail, tool_results)
+                    prompt = view.builder.build(text, history, summary, memories, extra_tail, tool_results, context)
                 except PromptBudgetError:
                     log.exception("prompt over budget")
                     await ctx.emit("error", {"code": "bad_request", "message": "request too large"})
@@ -501,6 +564,11 @@ class ChatService:
                         break
                 if plan.failures:        # homebench only: error_input / unparsed parts, reported alongside whatever ran
                     hb_failures.extend(plan.failures)
+                if self.sched is not None and ctx.req_id in self.sched.guarded and any(
+                        c.get("tool") in ("set_state", "run_scene") for c in plan.calls):
+                    say = "I wasn't sure which device you meant, so I changed nothing. Tell me again with the device name."
+                    plan.calls = []
+                    break
                 conversation = False
                 if plan.calls and not outs and is_conversation_turn(text, reg, plan.calls):
                     plan.calls, conversation = [], True        # "hello" / "thanks": the model's habitual read is dropped
@@ -514,6 +582,8 @@ class ChatService:
                     ambient_acted = await self._ambient_empty_plan(ctx, text, reg, outs, trace)
                     if ambient_acted is not None:
                         say = ambient_acted
+                    elif chat_on and not outs and ambient_request_signal(text, reg) is not None:
+                        say = await self._chat_say(ctx, text, prompt, reg, trace)       # a comfort phrase nothing can answer: just talk
                     else:
                         say = " ".join(p for p in (describe_outcomes(outs, reg), describe_reads(outs, reg)) if p) or no_plan_text(reg)
                     break
@@ -622,6 +692,7 @@ class ChatService:
             words = final.split(" ")
             for i in range(0, len(words), 3):
                 await ctx.emit("token", {"text": " ".join(words[i:i + 3]) + (" " if i + 3 < len(words) else "")})
+        self._note_context(ctx, outs, final, view)
         self.store.add_message(user, sess, "user", text, guest)
         self.store.add_message(user, sess, "assistant", final, guest)
         if self.sched:

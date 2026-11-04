@@ -65,6 +65,7 @@ class Scheduler:
         self.memory = MemoryWindow(store, cfg.window_tokens, cfg.summary_tokens, max_messages=cfg.window_messages)
         self.prefix = PrefixTracker()
         self.by_route: dict[str, dict] = {}
+        self.guarded: set[str] = set()      # (S15 A3) req_ids of turns that follow an unanswered clarification: the model may not write
         self.model_name = None             # async () -> str | None: the LLM's name (config, else llama-server /props); set by Agent
 
     # ------------------------------------------------------------------------------------------ flags
@@ -207,7 +208,9 @@ class Scheduler:
         reg = self.views.get(ctx.scope).registry
         devs = [reg.devices[e] for e in pending.get("eps", []) if e in reg.devices]
         chosen = self.pick_candidates(text, devs)
-        if not chosen or self.executor is None:
+        if not chosen:
+            return self.unanswered(ctx, text, pending, reg, devs, which_one_text(devs) if devs else "Which device do you mean?")
+        if self.executor is None:
             return None
         calls: list[dict] = []
         says: list[str] = []
@@ -227,6 +230,53 @@ class Scheduler:
             trace.note_calls(calls)
         outs = await self.executor.run_calls(ctx, calls)
         return Routed(outs=outs, say=" ".join(says))
+
+    _CANCEL = frozenset({"cancel", "nevermind", "never", "mind", "no", "nope", "nah", "stop", "forget", "skip", "nothing"})
+    MAX_REASKS = 2
+
+    def unanswered(self, ctx: ReqCtx, text: str, pending: dict, reg: DeviceRegistry, devs: list[Device], question: str) -> Routed | None:
+        """(S15 A3) The reply to a clarification did not pick any of its options. "cancel"/"no": drop it. A new, recognisable request
+        (or a long message): let it through, but this turn is `guarded` -- the model may not execute a write on it. Anything else (a
+        name that is not an option, "light2" for Light / Test light): ask again with the same options, at most `MAX_REASKS` times."""
+        toks = strip_polite(normalise(text)).split()
+        if toks and set(toks) <= self._CANCEL:
+            return Routed(text="OK, cancelled. Nothing was changed.")
+        if len(toks) > 6 or not toks:
+            self.guarded.add(ctx.req_id)
+            return None
+        res = self.resolver.resolve(text, reg, ctx.role, reg.scene_names())
+        if res.status in (PLAN, DENIED, RELATIVE_PENDING) or res.ambiguous:
+            self.guarded.add(ctx.req_id)
+            return None
+        tries = int(pending.get("tries", 0)) + 1
+        if tries > self.MAX_REASKS:
+            return Routed(text="OK, I'll leave that. Tell me again with the device name.")
+        self.store.set_pending(ctx.user_id, ctx.session_id, {**pending, "tries": tries})
+        return Routed(text=f"I don't see \"{clean_label(text, 24)}\" among those. {question}")
+
+    async def answer_ambient_choice(self, ctx: ReqCtx, text: str, pending: dict, trace: TurnTrace | None) -> Routed | None:
+        """(S15 C4) The reply to a comfort question that named several devices ("Which one do you mean: Thermostat or Fan?"): the
+        named one gets the comfort action (the user chose; nothing is guessed). A bare yes cannot choose, so it asks again."""
+        reg = self.views.get(ctx.scope).registry
+        devs = [reg.devices[e] for e in pending.get("eps", []) if e in reg.devices]
+        question = ambient_clarifying_text(pending.get("domain", ""), reg, devs)
+        if len(devs) < 2 or self.executor is None:
+            return None
+        chosen = self.pick_candidates(text, devs)
+        if len(chosen) != 1:
+            if not chosen and set(strip_polite(normalise(text)).split()) <= {"yes", "yeah", "yep", "ok", "okay", "sure"}:
+                self.store.set_pending(ctx.user_id, ctx.session_id, pending)
+                return Routed(text=question)
+            return self.unanswered(ctx, text, pending, reg, devs, question)
+        call = ambient_default_call(pending["domain"], pending["direction"], chosen[0])
+        if call is None:
+            return None
+        calls = ensure_power_dependency([call], reg)
+        if trace is not None:
+            trace.route, trace.sse_route, trace.source, trace.fast_reason = "fast", "fast", "fast_path", "ambient_choice"
+            trace.note_calls(calls)
+        outs = await self.executor.run_calls(ctx, calls)
+        return Routed(outs=outs, say=describe_outcomes(outs, reg))
 
     async def filter_reads_reply(self, ctx: ReqCtx, text: str, outs: list, reg: DeviceRegistry, say: str) -> str:
         """"which devices are on right now?" answered by the LLM path: whatever reads the model made, the reply lists only the
@@ -315,19 +365,21 @@ class Scheduler:
         if sig is None:
             return None
         domain, direction = sig
-        devs = ambient_domain_devices(reg, domain)
+        wide = self.cfg.chat_route
+        devs = ambient_domain_devices(reg, domain, direction, wide)
         if not devs:
             return None
         trace.route, trace.sse_route, trace.source = "fast", "fast", "fast_path"
         if len(devs) > 1:
             self.executor.metrics.ambient_clarifications += 1
-            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction})
-            return Routed(text=ambient_clarifying_text(domain, reg))
+            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction, "wide": wide,
+                                                                 "eps": [d.endpoint_id for d in devs]})
+            return Routed(text=ambient_clarifying_text(domain, reg, devs if wide else None))
         call = ambient_default_call(domain, direction, devs[0])
         if call is None:
             return None
         if self.cfg.chat_route:                       # (S15 C4) never a silent action on a guess: propose, act on a "yes"
-            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction})
+            self.store.set_pending(ctx.user_id, ctx.session_id, {"domain": domain, "direction": direction, "wide": wide})
             return Routed(text=ambient_proposal_text(call, devs[0]))
         calls = ensure_power_dependency([call], reg)
         trace.note_calls(calls)

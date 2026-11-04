@@ -34,12 +34,27 @@ def join_names(names: list[str], limit: int = 8) -> str:
     return ", ".join(names[:-1]) + " and " + names[-1]
 
 
+def device_labels(devs: list, with_room: bool = False) -> list[str]:
+    """One label per device, never two the same: "Name" or "Name (Room)"; when two devices still read alike, their type tells them
+    apart ("Light (Bedroom) [outlet]"), and when even that is equal an ordinal does ("Light (Bedroom) #2")."""
+    base = [f"{d.name} ({d.room})" if with_room else d.name for d in devs]
+    out, count = [], {}
+    for d, b in zip(devs, base):
+        same = [x for x, bb in zip(devs, base) if bb == b]
+        if len(same) == 1:
+            out.append(b)
+        elif len({x.type for x in same}) == len(same):
+            out.append(f"{b} [{d.type}]")
+        else:
+            count[b] = count.get(b, 0) + 1
+            out.append(f"{b} #{count[b]}")
+    return out
+
+
 def which_one_text(devs: list) -> str:
     """The clarifying question for a singular reference that matches several devices: real names, with the room only
     when two of them share a name."""
-    names = [d.name for d in devs]
-    dup = {n for n in names if names.count(n) > 1}
-    labels = [f"{d.name} ({d.room})" if d.name in dup else d.name for d in devs]
+    labels = device_labels(devs, with_room=len({d.name for d in devs}) < len(devs))
     if len(labels) > 6:
         return f"Which one do you mean: {join_names(labels, 6)}?"
     return "Which one do you mean: " + (", ".join(labels[:-1]) + " or " + labels[-1]) + "?"
@@ -147,10 +162,11 @@ def describe_list(outs: list[CallOutcome], reg: DeviceRegistry) -> str:
                 if isinstance(s, dict) and isinstance(s.get("endpoint_id"), str):
                     live[s["endpoint_id"]] = s
     items = []
-    for d in devs[:LIST_MAX]:
+    labels = device_labels(devs[:LIST_MAX], with_room=True)
+    for d, label in zip(devs[:LIST_MAX], labels):
         s = live.get(d.endpoint_id)
         st = "offline" if s is not None and not s.get("online") else (_list_state(s.get("values") or {}) if s else "")
-        items.append(f"{d.name} ({d.room})" + (f" {st}" if st else ""))
+        items.append(label + (f" {st}" if st else ""))
     n, more = len(devs), len(devs) - LIST_MAX
     head = f"You have {n} device{'s' if n != 1 else ''}: "
     return head + "; ".join(items) + (f"; and {more} more." if more > 0 else ".")
@@ -177,19 +193,29 @@ def describe_question(outs: list[CallOutcome], reg: DeviceRegistry, question: tu
     if mode == "list":
         # "which devices are on?": only the devices that are (the listed ones; offline devices are not "on")
         verb = "on" if expect else "off"
-        hits = [s for s in states if s.get("online") and s.get("values", {}).get(cap) is expect
-                and (only is None or s.get("endpoint_id") in only)]
+        hits, seen = [], set()
+        for s in states:                                       # one entry per device, however many reads covered it
+            ep = s.get("endpoint_id")
+            if (s.get("online") and s.get("values", {}).get(cap) is expect and (only is None or ep in only) and ep not in seen
+                    and ep in reg.devices):
+                seen.add(ep)
+                hits.append(reg.devices[ep])
         if not hits:
             return f"Nothing is {verb}." if expect else "Everything is on."
-        items = [f"{name(reg, s.get('endpoint_id'))} ({reg.devices[s['endpoint_id']].room})" if s.get("endpoint_id") in reg.devices
-                 else name(reg, s.get("endpoint_id")) for s in hits]
-        return f"{'On' if expect else 'Off'} right now: {join_names(items)}."
+        return f"{'On' if expect else 'Off'} right now: {join_names(device_labels(hits, with_room=True))}."
     if mode == "any":
         verb = "on" if expect else "off"
-        hits = [s for s in states if s.get("online") and s.get("values", {}).get(cap) is expect]
+        hits, seen = [], set()
+        for s in states:
+            ep = s.get("endpoint_id")
+            if s.get("online") and s.get("values", {}).get(cap) is expect and ep not in seen:
+                seen.add(ep)
+                hits.append(s)
         if not hits:
             return f"No, nothing is {verb}." if expect else "No, everything is off."
-        shown = join_names([name(reg, s.get("endpoint_id")) for s in hits])
+        known = [reg.devices[s["endpoint_id"]] for s in hits if s.get("endpoint_id") in reg.devices]
+        shown = join_names(device_labels(known, with_room=len({d.name for d in known}) < len(known)) if len(known) == len(hits)
+                           else [name(reg, s.get("endpoint_id")) for s in hits])
         plural = "is" if len(hits) == 1 else "are"
         return f"Yes, {shown} {plural} {verb}."
     s = states[0]
@@ -232,10 +258,10 @@ def ambient_proposal_text(call: dict, d) -> str:
     return f"Want me to set {d.name} {cap} to {val}?"
 
 
-def ambient_clarifying_text(domain: str, reg: DeviceRegistry) -> str:
+def ambient_clarifying_text(domain: str, reg: DeviceRegistry, devs: list | None = None) -> str:
     """(S8h) An ambient complaint that named no device and no number: ask, naming the real devices that could
     answer it rather than guessing one."""
-    names = [d.name for d in ambient_domain_devices(reg, domain)]
+    names = device_labels(devs, with_room=True) if devs else [d.name for d in ambient_domain_devices(reg, domain)]
     if not names:
         return "Which device do you mean?"
     if len(names) == 1:

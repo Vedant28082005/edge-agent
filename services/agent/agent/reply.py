@@ -49,6 +49,14 @@ _ACK_WORDS = _ACK_THANKS | {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "
                             "mind", "please", "haan", "ji", "hanji", "correct", "right", "k", "kk"}
 
 
+def chat_message(reg: DeviceRegistry, text: str) -> str:
+    """The final user message of a chat call: the instruction FIRST, in plain words (the system message says JSON-only, so this
+    names that rule and overrides it), then the person's message. It replaces the planner's own last user turn; the system message
+    and everything before it stay byte-identical, so they come from the cache."""
+    return (f"{CHAT_MARK} plain words, no JSON. Answer in at most 2 short friendly sentences; nothing was done on any device, "
+            f"claim no action. You can {capability_clause(reg, True)}.\nMessage: {text}")
+
+
 def chat_instruction(reg: DeviceRegistry) -> str:
     """The ONLY thing a chat call adds after the planner's own request (same system message, same roster): short, because
     every token here is prefill time on the node. Capabilities come from the real device types."""

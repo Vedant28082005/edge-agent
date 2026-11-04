@@ -3,6 +3,8 @@ from the live registry last; sanitised names; roster hash in the trace; rebuild 
 rejected; guest scoping; a relevance cut above 20 devices; aliases stable across renames."""
 from __future__ import annotations
 
+import copy
+
 import asyncio
 import re
 
@@ -137,7 +139,7 @@ def test_prompt_size_at_10_devices_is_under_target():
 # --------------------------------------------------------------------------------------------- end to end
 async def gen_env(tmp_path, devices=BEDROOM, **kw):
     sched = {"route_mode": "llm_first", "generated_prompt": True, **kw.pop("sched", {})}
-    e = await custom_env(tmp_path, devices, **sched)
+    e = await custom_env(tmp_path, copy.deepcopy(devices), **sched)
     e.llm.registry = e.agent.registry
     return e
 
@@ -166,7 +168,7 @@ async def test_registry_change_rebuilds_the_roster_and_rewarms_in_the_background
     from conftest import Env
     sf = tmp_path / "agent.secret"
     sf.write_text(SECRET)
-    fake = FakeHub(SECRET, devices=BEDROOM, settle_delay=0.05)
+    fake = FakeHub(SECRET, devices=copy.deepcopy(BEDROOM), settle_delay=0.05)
     server = LocalServer(fake.app())
     url = await server.start()
     cfg = AgentConfig(hub_url=url, hub_secret_file=str(sf), db_path=":memory:", warm_prefix=True,

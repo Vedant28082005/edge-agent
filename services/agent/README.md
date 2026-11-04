@@ -189,4 +189,11 @@ Each trace records `route_mode`, `text_source` (`model`|`agent`) and `say_verdic
   ("Want me to turn on Lamp?", a "yes" executes it) or one question, never a silent action. Trace fields: `decision` (act|chat),
   `roster_hash`, `prompt_eval_tokens` (prompt tokens the server evaluated, llama `prompt_n`), `cache_hit_tokens` (reused, `cache_n`),
   `steps` (per LLM call: step, prompt_n, cache_n, predicted_n, ms) and `stage_ms.chat_ms`.
+- Live-test fixes (same flags): with `generated_prompt` the planner request is `[system, user]` only: history and summary are replaced by one
+  compact `Context: last devices: e3 Fan; last action: turned on; asked: ...` line (kept in memory per user+session, 15 min), so the tail after the
+  cached prefix is about 15-40 tokens instead of ~150. The chat call sends the same system message plus ONE user message that begins
+  `Chat reply: plain words, no JSON.`; the raw chat text is in the trace (`chat_raw`; a JSON-looking reply is `say_verdict: chat_json`).
+  `deterministic_fixes` also adds `status` to the default hybrid `fast_intents` (an explicit `fast_intents` is respected), de-duplicates
+  and labels same-named devices, re-asks (at most twice) when a reply to "Which one do you mean?" matches no option, and the turn after an
+  unanswered clarification may not execute a model-planned write. With `chat_route`, "too hot" is answered by a fan as well as a thermostat.
 

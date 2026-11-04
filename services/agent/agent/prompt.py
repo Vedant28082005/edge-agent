@@ -177,6 +177,7 @@ class Prompt:
     budgets: Budgets
     degraded_devices: bool = False
     roster_hash: str = ""               # (S15) which device list the plan was made against ("" = classic prompt)
+    user_index: int = 0                 # index of the final "User: ..." message in `messages`
 
     def check(self) -> None:
         b = self.budgets
@@ -263,8 +264,11 @@ class PromptBuilder:
 
     def build(self, user_text: str, history: list[tuple[str, str]] | None = None, summary: str = "",
               memories: list[str] | None = None, extra_tail: list[dict] | None = None,
-              tool_results: str = "") -> Prompt:
-        """history: [(role 'user'|'assistant', text)] oldest first. extra_tail: messages appended after the user turn
+              tool_results: str = "", context: str = "") -> Prompt:
+        """`context` (S15, generated prompt only): one compact line (last devices, last action, a pending question) that takes the place of
+        history and summary, which are then ignored: history is the part of a request the cache cannot keep.
+
+        history: [(role 'user'|'assistant', text)] oldest first. extra_tail: messages appended after the user turn
         (the planner loop's own assistant output and tool results) — also in the tail, never the prefix.
 
         homebench format ignores history/summary/memories: the fine-tuned model was trained on a single system-role
@@ -273,6 +277,8 @@ class PromptBuilder:
         if self.format == "homebench":
             return self._build_homebench(user_text, extra_tail, tool_results)
         b = self.budgets
+        if self.generated:
+            history, summary = [], ""
         msgs: list[dict] = [{"role": "system", "content": self.prefix}]
         # --- recent turns (+ summary) <= 400
         summary = truncate_tokens(clean_user_text(summary, 600), b.summary) if summary else ""
@@ -310,8 +316,11 @@ class PromptBuilder:
             parts.append("Known about the user:\n" + mem_text)
         if detail:
             parts.append(detail)
+        if self.generated and context:
+            parts.append(truncate_tokens(clean_user_text(context, 300), 60))
         parts.append("User: " + cur)
         msgs.append({"role": "user", "content": "\n".join(parts)})
+        user_index = len(msgs) - 1
         tr = truncate_tokens(tool_results, b.tool_results) if tool_results else ""
         for m in extra_tail or []:
             msgs.append(m)
@@ -322,7 +331,7 @@ class PromptBuilder:
                  "tool_results": est_tokens(tr), "say": est_tokens(self.say_text)}
         if self.generated:
             sizes.update(system=est_tokens(self.template), tools=0, devices=max(self.devices_tokens, est_tokens(detail)))
-        p = Prompt(msgs, sizes, self.prefix_hash, b, self.degraded, self.roster_hash)
+        p = Prompt(msgs, sizes, self.prefix_hash, b, self.degraded, self.roster_hash, user_index)
         p.check()
         return p
 

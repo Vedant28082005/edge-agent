@@ -32,6 +32,7 @@ class TurnTrace:
     prompt_eval_tokens: int = 0              # (S15 C6) prompt tokens the server actually EVALUATED this turn, all LLM calls (llama `prompt_n`)
     cache_hit_tokens: int = 0                # (S15 C6) prompt tokens it reused from the prefix cache (llama `cache_n`)
     steps: list = field(default_factory=list)   # (S15 C6) one row per LLM call: {step, prompt_n, cache_n, predicted_n, ms}
+    chat_raw: str = ""                       # (S15) the model's raw chat text (truncated), whether or not it was shown
     roster_hash: str = ""                    # (S15 B) hash of the device roster the plan was made against ("" = classic prompt)
     constrained: bool = False
     outcome: str = "ok"                      # ok | partial | failed | needs_confirmation | denied | cancelled | error:<code>

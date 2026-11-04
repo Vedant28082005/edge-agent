@@ -163,11 +163,16 @@ AMBIENT_WORDS: dict[str, tuple[str, int]] = {
 AMBIENT_DOMAIN_TYPE = {"light": "light", "temp": "thermostat", "air": "fan"}
 
 
-def ambient_domain_devices(reg: DeviceRegistry, domain: str) -> list:
+def ambient_domain_devices(reg: DeviceRegistry, domain: str, direction: int | None = None, wide: bool = False) -> list:
     """Live devices that can answer a complaint in this domain (used both to size the ambiguity and, by the
-    caller, to name real devices in a clarifying question)."""
+    caller, to name real devices in a clarifying question). `wide` (S15 C4, flag sched.chat_route): "too hot" is also answered by
+    a fan that has a power switch, next to the thermostats; "too cold" only by a thermostat."""
     typ = AMBIENT_DOMAIN_TYPE.get(domain)
-    return [d for d in reg.devices.values() if d.type == typ] if typ else []
+    devs = [d for d in reg.devices.values() if d.type == typ] if typ else []
+    if wide and domain == "temp" and direction is not None and direction < 0:
+        devs += [d for d in reg.devices.values() if d.type == "fan" and d.cap("power") is not None
+                 and d.cap("power").kind == "actuator" and d.cap("power").type == "bool"]
+    return devs
 
 
 # A short confirmation reply to a pending clarifying question (e.g. "Did you mean the Bedroom light?") -- never
@@ -255,6 +260,11 @@ def ambient_default_call(domain: str, direction: int, d) -> dict | None:
             return {"tool": "set_state", "args": {"endpoint_id": d.endpoint_id, "capability": "power", "value": direction > 0}}
         return None
     if domain == "temp":
+        if d.type == "fan":                                   # (S15) only offered for "too hot": the fan on
+            c = d.cap("power")
+            if c is not None and c.kind == "actuator" and c.type == "bool" and direction < 0:
+                return {"tool": "set_state", "args": {"endpoint_id": d.endpoint_id, "capability": "power", "value": True}}
+            return None
         c = d.cap("mode")
         if c is not None and c.kind == "actuator" and c.type == "enum" and {"heat", "cool"} <= set(c.values or ()):
             return {"tool": "set_state", "args": {"endpoint_id": d.endpoint_id, "capability": "mode",
