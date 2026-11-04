@@ -94,6 +94,10 @@ class SchedConfig:
     # follows on the SAME cached prefix. Needs generated_prompt. Config-only.
     chat_route: bool = False
     chat_max_tokens: int = 40
+    # (S15 D) the plan grammar allows no optional whitespace, so the model decodes `[["s","e1","power",true]]`, not `[[ "s", "e1", ... ]]`
+    # (about 8 tokens fewer on a two-call plan). llama.cpp's own json_schema converter always allows whitespace, so this sends our
+    # GBNF in the `grammar` field (constraint_backend is forced to gbnf). The GBNF path is covered by tests/test_llama_real.py.
+    compact_json: bool = False
     # ablation switches
     fast_path: bool = True
     router: bool = True
@@ -134,12 +138,14 @@ class SchedConfig:
             raise ValueError(f"sched.route_mode must be one of {', '.join(ROUTE_MODES)}")
         if not isinstance(cfg.fast_intents, list) or not set(cfg.fast_intents) <= set(FAST_INTENTS):
             raise ValueError(f"sched.fast_intents must be a list drawn from {', '.join(FAST_INTENTS)}")
+        if cfg.compact_json:
+            cfg.constraint_backend = "gbnf"
         if cfg.chat_route and not cfg.generated_prompt:
             raise ValueError("sched.chat_route needs sched.generated_prompt (the chat call shares the generated prefix)")
         for k in ("say_max_tokens", "read_reply_max_tokens", "chat_max_tokens"):
             if isinstance(getattr(cfg, k), bool) or not isinstance(getattr(cfg, k), int) or not 1 <= getattr(cfg, k) <= 256:
                 raise ValueError(f"sched.{k} must be an integer 1..256")
-        for k in ("natural_read_replies", "say_in_plan", "deterministic_fixes", "generated_prompt", "chat_route"):
+        for k in ("natural_read_replies", "say_in_plan", "deterministic_fixes", "generated_prompt", "chat_route", "compact_json"):
             if not isinstance(getattr(cfg, k), bool):
                 raise ValueError(f"sched.{k} must be a boolean")
         if cfg.constraint_backend not in ("json_schema", "gbnf"):
@@ -164,10 +170,11 @@ class SchedConfig:
         return self.say_in_plan and self.route_mode != "rules_first"
 
     ABLATION = ("fast_path", "router", "constrained_decoding", "prefix_cache")
+    S15_TRACE_FLAGS = ("deterministic_fixes", "generated_prompt", "chat_route", "compact_json")     # recorded in every trace
     S15_FLAGS = ("deterministic_fixes",)           # runtime-switchable too (eval baseline vs new), kept out of `flags()`
 
     def flags(self) -> dict:
         return {k: getattr(self, k) for k in self.ABLATION}
 
     def s15_flags(self) -> dict:
-        return {k: getattr(self, k) for k in self.S15_FLAGS}
+        return {k: getattr(self, k) for k in self.S15_TRACE_FLAGS}

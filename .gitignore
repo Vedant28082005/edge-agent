@@ -32,3 +32,7 @@ deploy/e2e-work/
 
 # simulated node credentials (tools/sim-node/provision-sim.ps1)
 .sim/
+
+# S15 evaluation output (chat text, trace dumps)
+eval-results/
+traces*.json

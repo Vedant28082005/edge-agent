@@ -1,0 +1,4 @@
+{
+  "_comment": "label 'baseline': the S15 flags OFF. Remove these four keys from the agent.json `sched` object (or set them as below); leave every other sched key as it is.",
+  "sched": {"deterministic_fixes": false, "generated_prompt": false, "chat_route": false, "compact_json": false}
+}
