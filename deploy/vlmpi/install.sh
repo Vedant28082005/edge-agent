@@ -55,9 +55,20 @@ if [ ! -f "$BASE/config/llama.env" ]; then
   render "$HERE/llama.env.template" > "$BASE/config/llama.env"
 fi
 
-# units (code, not configuration: refreshed on every run); nothing is enabled or started
+# units (code, not configuration: refreshed on every run); nothing is enabled or started.
+# systemd does not expand ${VAR} in the first word of ExecStart, so the llama-server path is rendered in from llama.env.
+VLM_BIN="$(sed -n -e 's/^VLM_BIN=//p' "$BASE/config/llama.env" | tail -n 1 | sed -e 's/^"\(.*\)"$/\1/')"
+case "$VLM_BIN" in
+  /*) ;;
+  *) echo "llama.env: VLM_BIN must be an absolute path"; exit 1 ;;
+esac
+case "$VLM_BIN" in
+  *[!A-Za-z0-9_./+-]*) echo "llama.env: VLM_BIN has characters that are not allowed in a unit path"; exit 1 ;;
+esac
+[ -x "$VLM_BIN" ] || { echo "llama.env: VLM_BIN is not an executable file: $VLM_BIN"; exit 1; }
 mkdir -p "$UNITS"
-cp "$HERE/llama-vision.service" "$HERE/vision-node.service" "$UNITS/"
+sed -e "s|__VLM_BIN__|$VLM_BIN|" "$HERE/llama-vision.service.template" > "$UNITS/llama-vision.service"
+cp "$HERE/vision-node.service" "$UNITS/"
 systemctl --user daemon-reload || echo "note: systemctl --user is not available in this shell; run daemon-reload in a login session"
 
 # offline self-check: the node must load its config and contract
