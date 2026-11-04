@@ -1,1 +1,5 @@
 * text=auto eol=lf
+
+# Shell scripts, units and templates must keep LF (they run on Linux).
+*.sh text eol=lf
+deploy/vlmpi/* text eol=lf
