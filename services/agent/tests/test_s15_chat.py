@@ -4,6 +4,8 @@ next planner turn re-evaluate the prefix. Conversation turns and reads never wri
 phrases end in one proposal or one question."""
 from __future__ import annotations
 
+import copy
+
 import pytest
 from conftest import one
 from test_ambient_polarity import custom_env
@@ -15,7 +17,7 @@ from agent.aliases import build_aliases
 from agent.llm import LlmBusy
 from agent.planner import parse_plan
 from agent.prompt import PromptBuilder
-from agent.reply import ack_reply, capability_text, chat_instruction, finish_chat_text, is_bare_ack
+from agent.reply import ack_reply, capability_text, chat_message, finish_chat_text, is_bare_ack
 from agent.roster import TEMPLATE, TEMPLATE_CHAT
 from agent.sched.config import SchedConfig
 from agent.sched.grammar import ConstraintCache
@@ -32,7 +34,7 @@ def sets(e):
 
 async def chat_env(tmp_path, devices=BEDROOM, **sched):
     sched = {"route_mode": "llm_first", "generated_prompt": True, "chat_route": True, **sched}
-    e = await custom_env(tmp_path, devices, **sched)
+    e = await custom_env(tmp_path, copy.deepcopy(devices), **sched)
     e.llm.registry, e.llm.chat_mode = e.agent.registry, True
     e.spy = []
     orig = e.llm.complete
@@ -104,13 +106,14 @@ async def test_chat_turn_answers_in_words_and_shares_the_planners_prefix(tmp_pat
         assert not sets(e) and [c for c in e.fake.calls if c["tool"] != "list_devices"] == []
         plan_req, chat_req = e.llm.requests
         assert e.spy[0]["constrained"] is True and e.spy[1] == {"constrained": False, "max_tokens": 40}   # unconstrained, ~40 tokens
-        # the shared-prefix property: the system message (template + roster) is byte-identical, and the chat request is the planner's
-        # whole request plus a short tail -- nothing before the tail differs
+        # the shared-prefix property: the system message (template + roster) is byte-identical to the planner's. The chat request is that
+        # system message plus ONE user message that starts with the plain-words instruction (no replayed `[["chat"]]` answer, which made
+        # the model answer in JSON again: trace #145)
         assert chat_req[0] == plan_req[0] and chat_req[0]["content"] == e.agent.builder.prefix
-        assert chat_req[:len(plan_req)] == plan_req
-        tail = chat_req[len(plan_req):]
-        assert [m["role"] for m in tail] == ["assistant", "user"] and tail[0]["content"] == '[["chat"]]'
-        assert est_tokens(tail[1]["content"]) <= 60 and "You can control" in tail[1]["content"]
+        assert len(chat_req) == 2 and chat_req[1]["role"] == "user"
+        msg = chat_req[1]["content"]
+        assert msg.startswith("Chat reply: plain words, no JSON") and msg.endswith("Message: hello there")
+        assert est_tokens(msg) <= 80 and "You can control" in msg
         t = last_trace(e)
         assert t["decision"] == "chat" and t["roster_hash"] == e.agent.builder.roster_hash and t["llm_calls"] == 2
         assert [s["step"] for s in t["steps"]] == ["plan", "chat"] and t["stage_ms"]["chat_ms"] >= 0
@@ -126,7 +129,7 @@ async def test_a_chat_turn_never_makes_the_next_planner_turn_re_evaluate_the_pre
         t1 = last_trace(e)
         plan_step, chat_step = t1["steps"]
         # the chat call evaluated only its tail (assistant decision + instruction); the whole planner request came from the cache
-        tail_est = est_tokens('[["chat"]]') + est_tokens(chat_instruction(e.agent.registry)) + 8
+        tail_est = est_tokens(chat_message(e.agent.registry, "hello there")) + 8
         assert chat_step["cache_n"] >= prefix_tokens and chat_step["prompt_n"] <= tail_est, chat_step
         e.llm.script.append((r"fan", {"calls": [{"tool": "set_state", "args": {"endpoint_id": "ep_c0000003", "capability": "power", "value": True}}], "say": ""}))
         await e.chat("start the fan")
@@ -236,11 +239,12 @@ async def test_comfort_phrase_with_one_candidate_is_a_proposal_and_a_yes_execute
 
 
 async def test_comfort_phrase_the_model_calls_chat_is_still_a_proposal_or_question(tmp_path):
-    e = await chat_env(tmp_path, devices=[*LAMP_ONLY, THERMO])
+    e = await chat_env(tmp_path, devices=[*LAMP_ONLY, THERMO])           # a thermostat AND a fan can answer "hot"
     try:
         e.llm.script.append((r"hot", {"calls": [], "chat": True}))
         _, ev = await e.chat("I'm hot")
-        assert one(ev, "final")["text"] == "Want me to set Thermostat to cool?" and not sets(e) and len(e.llm.requests) == 1
+        t = one(ev, "final")["text"]
+        assert t.startswith("Which one do you mean") and "Thermostat" in t and "Fan" in t and not sets(e) and len(e.llm.requests) == 1
         _, ev = await e.chat("no thanks")                                                           # declining does nothing
         assert not sets(e)
     finally:
@@ -256,7 +260,7 @@ async def test_comfort_phrase_with_two_candidates_asks_and_with_none_just_chats(
         assert one(ev, "final")["text"].startswith("Which one do you mean") and not sets(e)
     finally:
         await e.close()
-    e = await chat_env(tmp_path, devices=LAMP_ONLY)                                              # no thermostat at all
+    e = await chat_env(tmp_path, devices=[dev(1, "Lamp", "Bedroom", "light", [POWER])])             # nothing can answer "hot"
     try:
         e.llm.script.append((r"hot", {"calls": [], "chat": True}))
         _, ev = await e.chat("I'm hot")

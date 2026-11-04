@@ -127,6 +127,8 @@ class SchedConfig:
             if k not in known:
                 raise ValueError(f"unknown sched config key: {k}")
             setattr(cfg, k, v)
+        if cfg.deterministic_fixes and "fast_intents" not in (data or {}):
+            cfg.fast_intents = [*HYBRID_FAST_INTENTS, "status"]      # (S15) "which devices are on" answered from the registry, no LLM
         cfg.nodes = normalise_nodes(cfg.nodes)
         if cfg.route_mode not in ROUTE_MODES:
             raise ValueError(f"sched.route_mode must be one of {', '.join(ROUTE_MODES)}")

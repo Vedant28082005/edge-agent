@@ -3,6 +3,8 @@ transcripts: "turn off everything in the bedroom", "close the curtain" (device n
 to 50%" with Light and Light2, "light2" as the clarification answer, "which devices are on right now?", "who are you?"."""
 from __future__ import annotations
 
+import copy
+
 import pytest
 from conftest import one
 from test_ambient_polarity import custom_env
@@ -39,7 +41,7 @@ BEDROOM = [
 
 async def env(tmp_path, devices=BEDROOM, **sched):
     sched = {"route_mode": "hybrid", "fast_path": True, "router": False, "deterministic_fixes": True, **sched}
-    return await custom_env(tmp_path, devices, **sched)
+    return await custom_env(tmp_path, copy.deepcopy(devices), **sched)
 
 
 def sets(e):
