@@ -30,7 +30,7 @@ from typing import Callable
 from .aliases import AliasMap, build_aliases
 from .devices import Device, DeviceRegistry
 from . import homebench
-from .roster import TEMPLATE, Roster
+from .roster import TEMPLATE, TEMPLATE_CHAT, Roster
 from .util import ENUM_VAL_RE, clean_label, clean_user_text, est_tokens, truncate_tokens
 
 
@@ -189,14 +189,16 @@ class Prompt:
 class PromptBuilder:
     def __init__(self, registry: DeviceRegistry, budgets: Budgets | None = None, format: str = "json",
                  states_provider: Callable[[], dict] | None = None, say: bool = False, assistant_name: str = "",
-                 model_name: str = "", generated: bool = False) -> None:
+                 model_name: str = "", generated: bool = False, chat: bool = False) -> None:
         self.registry, self.budgets, self.format = registry, budgets or Budgets(), format
         # (S15 B, flag sched.generated_prompt) fixed template + generated roster; json format only, and not together with `say`
         self.generated = bool(generated) and format == "json" and not say
+        self.chat = bool(chat) and self.generated
+        self.template = TEMPLATE_CHAT if self.chat else TEMPLATE
         self.roster: Roster | None = None
         self.roster_hash = ""
         if self.generated:
-            self.budgets = replace(self.budgets, system=max(self.budgets.system, est_tokens(TEMPLATE)),
+            self.budgets = replace(self.budgets, system=max(self.budgets.system, est_tokens(self.template)),
                                    tools=max(self.budgets.tools, 1))
         self.states_provider = states_provider        # homebench only: () -> {endpoint_id: {capability: value}}
         self.say = say and format == "json"           # (S14) the model may add a short reply text
@@ -228,7 +230,7 @@ class PromptBuilder:
             self.roster = Roster(self.registry, self.aliases, self.budgets.devices)
             self.degraded, self.devices_tokens = self.roster.large, est_tokens(self.roster.text)
             self.roster_hash = self.roster.hash
-            prefix = f"{TEMPLATE}\n\n{self.roster.text}"
+            prefix = f"{self.template}\n\n{self.roster.text}"
         else:
             self.aliases = build_aliases(self.registry)  # (S8i) same map the decoding schema cache computes, kept in step
             dev_text, self.degraded = build_devices_section(self.registry, self.budgets.devices, self.aliases)
@@ -319,7 +321,7 @@ class PromptBuilder:
                  "memories": est_tokens(mem_text), "recent": recent_tokens, "current": est_tokens(cur),
                  "tool_results": est_tokens(tr), "say": est_tokens(self.say_text)}
         if self.generated:
-            sizes.update(system=est_tokens(TEMPLATE), tools=0, devices=max(self.devices_tokens, est_tokens(detail)))
+            sizes.update(system=est_tokens(self.template), tools=0, devices=max(self.devices_tokens, est_tokens(detail)))
         p = Prompt(msgs, sizes, self.prefix_hash, b, self.degraded, self.roster_hash)
         p.check()
         return p

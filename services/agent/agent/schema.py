@@ -40,6 +40,7 @@ DRAFT7 = "http://json-schema.org/draft-07/schema#"
 TOOL_CODES = {"set_state": "s", "read_sensor": "r", "get_state_ep": "g", "get_state_room": "gr",
               "list_devices": "l", "run_scene": "n"}
 CODE_TOOLS = {v: k for k, v in TOOL_CODES.items()}
+CHAT_CODE = "chat"                                   # (S15 C1, flag sched.chat_route) a decision, not a tool
 
 
 def _tuple(code: str, *items: dict) -> dict:
@@ -56,7 +57,7 @@ SAY_CHARS_PER_TOKEN = 4
 
 
 def build_plan_schema(reg: DeviceRegistry, aliases: AliasMap, scene_names: tuple[str, ...] | None = None,
-                      say_tokens: int = 0) -> dict:
+                      say_tokens: int = 0, chat: bool = False) -> dict:
     """`say_tokens` > 0 (S14) additionally lets the array carry ONE short string next to (or instead of) the call tuples:
     `[calls...]`, `["text"]` or `[calls..., "text"]`, the string capped at about that many tokens. 0 keeps the S8i
     calls-only grammar byte for byte."""
@@ -89,6 +90,8 @@ def build_plan_schema(reg: DeviceRegistry, aliases: AliasMap, scene_names: tuple
         scene_names = reg.scene_names()              # from list_devices.scenes (already scoped for a scoped view)
     scene = {"enum": list(scene_names)} if scene_names else {"type": "string", "pattern": SCENE_RE.pattern, "maxLength": 48}
     variants.append(_tuple(TOOL_CODES["run_scene"], scene))
+    if chat:                                         # (S15 C1) the model's way to say "this is not a device request": [["chat"]]
+        variants.append(_tuple(CHAT_CODE))
     if say_tokens > 0:
         variants.append({"type": "string", "maxLength": say_tokens * SAY_CHARS_PER_TOKEN})
         return {"$schema": DRAFT7, "type": "array", "maxItems": MAX_CALLS + 1, "items": {"anyOf": variants}}

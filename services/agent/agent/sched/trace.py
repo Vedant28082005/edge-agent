@@ -28,6 +28,10 @@ class TurnTrace:
     generated_tokens: int = 0
     cache_hit: bool | None = None            # None = no LLM call this turn
     prefix_hash: str = ""
+    decision: str = ""                       # (S15 C6) what the planner chose for an LLM turn: "act" | "chat" ("" = no planner call)
+    prompt_eval_tokens: int = 0              # (S15 C6) prompt tokens the server actually EVALUATED this turn, all LLM calls (llama `prompt_n`)
+    cache_hit_tokens: int = 0                # (S15 C6) prompt tokens it reused from the prefix cache (llama `cache_n`)
+    steps: list = field(default_factory=list)   # (S15 C6) one row per LLM call: {step, prompt_n, cache_n, predicted_n, ms}
     roster_hash: str = ""                    # (S15 B) hash of the device roster the plan was made against ("" = classic prompt)
     constrained: bool = False
     outcome: str = "ok"                      # ok | partial | failed | needs_confirmation | denied | cancelled | error:<code>

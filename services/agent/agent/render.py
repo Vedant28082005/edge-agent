@@ -221,6 +221,17 @@ def describe_question(outs: list[CallOutcome], reg: DeviceRegistry, question: tu
     return ""
 
 
+def ambient_proposal_text(call: dict, d) -> str:
+    """(S15 C4) A comfort phrase with exactly one device that can answer: propose the one concrete action and wait for a yes."""
+    a = call.get("args", {})
+    cap, val = a.get("capability"), a.get("value")
+    if cap == "power":
+        return f"Want me to turn {'on' if val else 'off'} {d.name}?"
+    if cap == "mode":
+        return f"Want me to set {d.name} to {val}?"
+    return f"Want me to set {d.name} {cap} to {val}?"
+
+
 def ambient_clarifying_text(domain: str, reg: DeviceRegistry) -> str:
     """(S8h) An ambient complaint that named no device and no number: ask, naming the real devices that could
     answer it rather than guessing one."""

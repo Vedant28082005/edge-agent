@@ -17,7 +17,7 @@ from .aliases import AliasMap
 from . import homebench
 from .executor import Metrics
 from .llm import Llm, LlmResult
-from .schema import MAX_CALLS
+from .schema import CHAT_CODE, MAX_CALLS
 from .scope import UNRESTRICTED, Scope
 from .util import clean_user_text
 
@@ -114,6 +114,7 @@ class Plan:
     raw: str = ""                   # the model's unparsed reply (S8f: logged, truncated, in turn_traces)
     failures: list[str] = field(default_factory=list)   # homebench only: "could not do this part" notes
     say: str = ""                   # (S14) the model's optional short text (a bare string next to / instead of the calls)
+    chat: bool = False              # (S15 C1) the model chose [["chat"]]: not a device request; `calls` is empty by construction
 
     def as_assistant_json(self, aliases: AliasMap, hb_table: "homebench.HomebenchTable | None" = None) -> str:
         """The compact wire re-rendering of this plan, used only to show the planner its own previous turn in a
@@ -134,6 +135,8 @@ def parse_plan(text: str, aliases: AliasMap) -> Plan:
     if not isinstance(obj, list):
         return Plan([], False)
     tuples = [t for t in obj if isinstance(t, list)]
+    if tuples and tuples[0] == [CHAT_CODE]:        # chat is only ever the FIRST element; whatever follows it is dropped
+        return Plan([], True, chat=True)
     says = [t for t in obj if isinstance(t, str)]
     calls = [c for c in (_decode(t, aliases) for t in tuples[:MAX_CALLS]) if c is not None]
     say = " ".join(clean_user_text(says[-1], 160).split()) if says else ""     # model text: a display string only, never an id

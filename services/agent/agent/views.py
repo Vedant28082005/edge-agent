@@ -46,7 +46,8 @@ class ScopedViews:
             self._cache.move_to_end(key)
             return v
         builder = PromptBuilder(self.registry.scoped(scope), format=self.format,
-                                generated=bool(self.main and self.main.generated))
+                                generated=bool(self.main and self.main.generated),
+                                chat=bool(self.main and self.main.chat))
         v = View(scope, self.registry.scoped(scope), self.registry.generation, _builder=builder)
         self._cache[key] = v
         while len(self._cache) > self.MAX:

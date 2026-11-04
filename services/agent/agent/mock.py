@@ -316,6 +316,8 @@ class ScriptedLLM:
         self.requests: list[list[dict]] = []
         self._prev = ""
         self.delay = 0.0
+        self.chat_mode = False                          # (S15) answer greetings / thanks / "who are you" with [["chat"]]
+        self.chat_text = "Hi! I can help with your lights and fans."   # str | callable(messages): the unconstrained chat reply
         self.registry = None                            # (S15) set by a test when the prompt's roster carries no endpoint ids
         self.script: list[tuple[str, Any]] = []         # optional overrides: (regex on user text, reply dict|callable)
         self.emit_say = False                           # (S14) put the reply's "say" into the wire array next to the calls
@@ -328,6 +330,9 @@ class ScriptedLLM:
         aliases = self._aliases(messages)               # as the model saw them: a registry change mid-request must not renumber
         if self.delay:
             await asyncio.sleep(self.delay)
+        if messages and messages[-1]["role"] == "user" and messages[-1]["content"].startswith("Chat reply:"):
+            ct = self.chat_text(messages) if callable(self.chat_text) else self.chat_text      # (S15 C2) the unconstrained chat call
+            return LlmResult(ct, self._timings(messages, ct), "stop")
         reply = self.respond(messages)
         tuples = [t for t in (encode_call(c, aliases) for c in reply.get("calls", [])) if t is not None]
         import jsonschema
@@ -336,6 +341,13 @@ class ScriptedLLM:
                 jsonschema.validate(tuples, schema)
             except jsonschema.ValidationError:
                 tuples = []
+        if reply.get("chat"):                                            # (S15 C1) the model's [["chat"]] decision
+            tuples = [["chat"]]
+            if self.constrained and schema is not None:
+                try:
+                    jsonschema.validate(tuples, schema)
+                except jsonschema.ValidationError:
+                    tuples = []                                          # the grammar has no chat variant (sched.chat_route off)
         if self.emit_say and reply.get("say"):
             tuples = [*tuples, reply["say"]]
             if self.constrained and schema is not None:
@@ -344,12 +356,16 @@ class ScriptedLLM:
                 except jsonschema.ValidationError:
                     tuples = tuples[:-1]               # the grammar has no `say` string (route_mode rules_first)
         content = json.dumps(tuples, separators=(",", ":"))
+        return LlmResult(content, self._timings(messages, content))
+
+    def _timings(self, messages: list[dict], content: str) -> dict:
+        """llama-server's shape: `prompt_n` = prompt tokens EVALUATED this request, `cache_n` = prompt tokens reused from the
+        single slot's cache (the longest common prefix with the previous request, however the two diverge afterwards)."""
         cur = "".join(f"<{m['role']}>{m['content']}\n" for m in messages)
         common = os.path.commonprefix([self._prev, cur]) if self._prev else ""
         pn, cn = est_tokens(cur), est_tokens(common)
         self._prev = cur
-        return LlmResult(content, {"prompt_n": pn, "cache_n": cn, "prompt_ms": (pn - cn) * 10.0,
-                                   "predicted_n": est_tokens(content)})
+        return {"prompt_n": max(pn - cn, 1), "cache_n": cn, "prompt_ms": max(pn - cn, 1) * 10.0, "predicted_n": est_tokens(content)}
 
     async def stream_text(self, messages: list[dict], max_tokens: int):
         """(S14) Stand-in for LlmClient.stream_text: phrases the facts of a read-answer prompt, word by word."""
@@ -371,6 +387,8 @@ class ScriptedLLM:
         for pat, rep in self.script:
             if re.search(pat, text, re.I):
                 return rep(messages) if callable(rep) else rep
+        if self.chat_mode and re.search(r"^(hi|hello|hey|good (morning|evening|night)|how are you|tell me a joke|what can you do|who are you)\b", text.strip(), re.I):
+            return {"calls": [], "chat": True}
         if self.emit_say:
             if re.search(r"^(hi|hello|hey)\b", text.strip(), re.I):
                 return {"calls": [], "say": "Hi! Tell me what to turn on or off."}

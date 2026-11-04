@@ -26,7 +26,7 @@ from ..util import jcs
 
 # --------------------------------------------------------------------------------------------- cache key
 def registry_decoding_key(reg: DeviceRegistry, scene_names: tuple[str, ...] | None = None, scope_key: str = "",
-                          say_tokens: int = 0) -> str:
+                          say_tokens: int = 0, chat: bool = False) -> str:
     """Cache key of the decoding schema. When `list_devices` carried the hub's `registry_version` the key is that number
     (plus the scope and the scene listing, which a version bump need not cover): O(1) in the device count and exactly as
     fresh as the hub's own change counter. Without one it falls back to a hash of everything the schema depends on (ids,
@@ -36,6 +36,7 @@ def registry_decoding_key(reg: DeviceRegistry, scene_names: tuple[str, ...] | No
     if reg.list_version is not None:
         shape: dict = {"v": reg.list_version, "scope": scope_key, "scenes": scenes}
         shape.update({"say": say_tokens} if say_tokens else {})
+        shape.update({"chat": True} if chat else {})
     else:
         shape = {
             "devices": sorted(
@@ -44,6 +45,7 @@ def registry_decoding_key(reg: DeviceRegistry, scene_names: tuple[str, ...] | No
                 for d in reg.devices.values()),
             "rooms": reg.rooms(), "scenes": scenes, "scope": scope_key}
         shape.update({"say": say_tokens} if say_tokens else {})
+        shape.update({"chat": True} if chat else {})
     try:
         text = jcs(shape)
     except (TypeError, ValueError):
@@ -198,8 +200,8 @@ class ConstraintCache:
         self.hits = 0
 
     def get(self, reg: DeviceRegistry, scene_names: tuple[str, ...] | None = None, scope_key: str = "",
-            say_tokens: int = 0) -> ConstraintSchema:
-        key = registry_decoding_key(reg, scene_names, scope_key, say_tokens)
+            say_tokens: int = 0, chat: bool = False) -> ConstraintSchema:
+        key = registry_decoding_key(reg, scene_names, scope_key, say_tokens, chat)
         cur = self._by_scope.get(scope_key)
         if cur is not None and cur.key == key:
             self.hits += 1
@@ -207,7 +209,7 @@ class ConstraintCache:
             self._by_scope.move_to_end(scope_key)
             return cur
         aliases = build_aliases(reg)
-        sch = ConstraintSchema(build_plan_schema(reg, aliases, scene_names, say_tokens))
+        sch = ConstraintSchema(build_plan_schema(reg, aliases, scene_names, say_tokens, chat))
         sch.key, sch.hub_version, sch.aliases = key, reg.version, aliases
         sch.gbnf = schema_to_gbnf(sch)
         self._by_scope[scope_key] = sch
