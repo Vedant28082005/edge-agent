@@ -1,0 +1,4 @@
+{
+  "_comment": "label 'new': S15 phases A-C on. Merge these keys into the agent.json `sched` object; leave every other sched key as it is.",
+  "sched": {"deterministic_fixes": true, "generated_prompt": true, "chat_route": true, "compact_json": false}
+}

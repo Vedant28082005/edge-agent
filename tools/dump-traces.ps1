@@ -10,6 +10,7 @@
 .PARAMETER Target ssh target (default pi@pi-brain, see tools\nodes.psd1)
 .PARAMETER Db     path of agent.sqlite on the Pi if DATA_DIR is not /var/lib/edge-agent
 .PARAMETER Out    local output file (default traces.json in the current folder)
+.PARAMETER Quiet  do not print the per-turn summary
 .EXAMPLE
   .\tools\dump-traces.ps1
 #>
@@ -17,7 +18,8 @@ param(
     [int]$Count = 15,
     [string]$Target = 'pi@pi-brain',
     [string]$Db = '/var/lib/edge-agent/agent/agent.sqlite',
-    [string]$Out = 'traces.json'
+    [string]$Out = 'traces.json',
+    [switch]$Quiet
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -37,6 +39,7 @@ Run 'scp result' { scp "${Target}:$remote" $Out }
 Run 'cleanup' { ssh $Target "rm -f /tmp/dump_traces.py /tmp/dump-traces.sh $remote" }
 
 $rows = Get-Content $Out -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($Quiet) { "$($rows.Count) traces written to $((Resolve-Path $Out).Path)"; return }
 foreach ($r in $rows) {
     $steps = ($r.steps | ForEach-Object { "$($_.step)[eval=$($_.prompt_n) cached=$($_.cache_n) gen=$($_.predicted_n) $($_.ms)ms]" }) -join ' '
     "{0} #{1} '{2}' -> {3}/{4} {5}ms text_source={6} say_verdict={7} roster={8}`n    steps: {9}`n    llm_raw: {10}`n    reply: {11}" -f `

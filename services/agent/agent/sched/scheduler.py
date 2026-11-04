@@ -79,7 +79,8 @@ class Scheduler:
         """Decoding schema for this scope: the full registry for an unrestricted caller, otherwise only its own endpoints,
         rooms and scenes. Keyed on the hub's `registry_version` (content hash when the hub sent none)."""
         return self.constraints.get(self.views.get(scope).registry, None, "" if not scope.restricted else scope.key,
-                                    self.cfg.say_max_tokens if self.cfg.allow_say else 0, self.cfg.chat_route)
+                                    self.cfg.say_max_tokens if self.cfg.allow_say else 0, self.cfg.chat_route,
+                                    self.cfg.compact_json)
 
     def aliases(self, scope: Scope = UNRESTRICTED):
         """(S8i) The same scope's alias map, from the same cache entry as `schema` -- so the planner's decode and the
@@ -87,7 +88,7 @@ class Scheduler:
         return self.schema(scope).aliases
 
     def new_trace(self, ctx: ReqCtx) -> TurnTrace:
-        return TurnTrace(ctx.req_id, flags=self.cfg.flags(), route_mode=self.cfg.route_mode)
+        return TurnTrace(ctx.req_id, flags=self.cfg.flags(), route_mode=self.cfg.route_mode, s15=self.cfg.s15_flags())
 
     # ------------------------------------------------------------------------------------------ routing
     async def route(self, ctx: ReqCtx, text: str, trace: TurnTrace) -> Routed | None:

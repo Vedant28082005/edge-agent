@@ -196,4 +196,8 @@ Each trace records `route_mode`, `text_source` (`model`|`agent`) and `say_verdic
   `deterministic_fixes` also adds `status` to the default hybrid `fast_intents` (an explicit `fast_intents` is respected), de-duplicates
   and labels same-named devices, re-asks (at most twice) when a reply to "Which one do you mean?" matches no option, and the turn after an
   unanswered clarification may not execute a model-planned write. With `chat_route`, "too hot" is answered by a fan as well as a thermostat.
+- `sched.compact_json` (default off): the plan grammar allows no optional whitespace (`[["s","e1","power",true]]`, not `[[ "s", "e1", ... ]]`), 2-6
+  fewer decoded tokens per plan [measured-proxy]. llama.cpp's own json_schema converter always allows whitespace, so this forces
+  `constraint_backend: gbnf` (our GBNF in the `grammar` field; gate: `tests/test_llama_real.py`). Every trace now also carries `s15`
+  (the four S15 flags it ran with) and `req_id`, which `tools/eval` uses; see `tools/eval/README.md`.
 
