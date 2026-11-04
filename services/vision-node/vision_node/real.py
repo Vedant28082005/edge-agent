@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import logging
 import os
@@ -76,9 +77,28 @@ class _Http:
         return r
 
 
+def shrink(image: bytes, max_side: int) -> tuple[bytes, str] | None:
+    """JPEG re-encode of `image` with its long side at most `max_side` px (never upscaled), or None if it is already small
+    enough or cannot be decoded (the caller then sends the original; media.py has validated it before). RAM only."""
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(image)) as im:
+            if max(im.size) <= max_side:
+                return None
+            im.draft("RGB", (max_side * 2, max_side * 2))
+            im = im.convert("RGB")
+            im.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            im.save(out, "JPEG", quality=90)
+            return out.getvalue(), "image/jpeg"
+    except Exception:
+        return None
+
+
 class LlamaVlm:
-    def __init__(self, url: str, model_name: str = "qwen3-vl-2b-q4"):
+    def __init__(self, url: str, model_name: str = "qwen3-vl-2b-q4", max_side: int = 0):
         self.model_name = model_name
+        self.max_side = max_side
         self._http = _Http(url, "/health")
 
     async def loaded(self) -> bool:
@@ -86,6 +106,10 @@ class LlamaVlm:
 
     async def _chat(self, image: bytes, mime: str, question: str, *, max_tokens: int, seed: int, temperature: float,
                     extra: dict, instruction: str) -> tuple[str, bool]:
+        if self.max_side:
+            small = await asyncio.to_thread(shrink, image, self.max_side)
+            if small:
+                image, mime = small
         uri = f"data:{mime};base64,{base64.b64encode(image).decode('ascii')}"
         body = {
             "messages": [

@@ -298,7 +298,7 @@ class VisionApp:
 
     # ------------------------------------------------------------------------------------------------ health
     async def health(self, request: Request) -> Response:
-        backends = (self.b.vlm, self.b.stt, self.b.detect)
+        backends = tuple(b for b in (self.b.vlm, self.b.stt, self.b.detect) if getattr(b, "enabled", True))
         loaded = await asyncio.gather(*(b.loaded() for b in backends), return_exceptions=True)
         loaded = [x is True for x in loaded]
         mem = self.sys.mem_available_mb()
